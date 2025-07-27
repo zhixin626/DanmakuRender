@@ -151,25 +151,27 @@ class biliuprs():
         self.logger.error(f'{self.account} 登录失败!.')
 
     def upload_once(self, video, bvid=None, **config):
-        with tempfile.TemporaryFile(dir='.temp') as logfile:
-            self.call_biliuprs(video=video, bvid=bvid, logfile=logfile, **config)
-            if self.debug:
-                return True, ''
+        self.call_biliuprs(video=video, bvid=bvid, logfile=None, **config)
+        return True, ''
+        # with tempfile.TemporaryFile(dir='.temp') as logfile:
+        #     self.call_biliuprs(video=video, bvid=bvid, logfile=logfile, **config)
+        #     if self.debug:
+        #         return True, ''
         
-            out_bvid = None
-            log = ''
-            logfile.seek(0)
-            for line in logfile.readlines():
-                line = line.decode('utf-8', errors='ignore').strip()
-                log += line+'\n'
-                if '\"bvid\"' in line:
-                    res = re.search(r'(BV[0-9A-Za-z]{10})', line)
-                    if res:  out_bvid = res[0]
+        #     out_bvid = None
+        #     log = ''
+        #     logfile.seek(0)
+        #     for line in logfile.readlines():
+        #         line = line.decode('utf-8', errors='ignore').strip()
+        #         log += line+'\n'
+        #         if '\"bvid\"' in line:
+        #             res = re.search(r'(BV[0-9A-Za-z]{10})', line)
+        #             if res:  out_bvid = res[0]
         
-        if out_bvid:
-            return True, out_bvid
-        else:
-            return False, log
+        # if out_bvid:
+        #     return True, out_bvid
+        # else:
+        #     return False, log
     
     def format_config(self, config, video_info=None, replace_invalid=False):
         config = config.copy()

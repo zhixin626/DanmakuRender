@@ -288,19 +288,18 @@ class StreamDownloadTask():
                     time.sleep(start_check_interval)
                     stop_waited += start_check_interval
                 else:
-                    self.logger.info(f"[通知][{self.taskname}] 检测到主播下播。")
                     time.sleep(stop_check_interval)
                     stop_waited += stop_check_interval
 
                 if stop_waited > stop_wait_time and not live_end:
                     live_end = True
-                    self.logger.info(f"[通知][{self.taskname}] 检测到直播已结束。")
+                    # self.logger.info(f"[{self.taskname}] 检测到直播已结束。")
                     self._pipeSend('liveend', '直播已结束', data=self.sess_id)
                     self.sess_id = uuid(8)
                     self.segment_id = 1
                 continue
 
-            self.logger.info(f"[检测][{self.taskname}] 正在直播，开始录制")
+            self.logger.info(f"[{self.taskname}] 正在直播，开始录制")
 
             try:
                 stop_waited = 0
@@ -325,7 +324,7 @@ class StreamDownloadTask():
                 else:
                     self.logger.debug(e)
 
-            self.logger.info(f"[结束][{self.taskname}]  本轮录制结束")
+            self.logger.info(f"[{self.taskname}]下播,本轮录制结束")
             self.logger.debug(f'{self.taskname} stop once.')
             self.stop_once()
 

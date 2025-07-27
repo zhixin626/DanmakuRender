@@ -15,7 +15,7 @@ download_args:
   # 下载类型
   dltype: live
   # 直播间链接
-  url: 'https://live.douyin.com/zcw199608'  # killer! 7529918848343362330
+  url: 'https://live.douyin.com/zcw199608'  # killer! 7529918848343362330 zcw199608
   # 录制输出文件夹，设置为空则使用任务名称作为文件夹
   output_dir: ./不可一世杀手
   # 录制文件名称格式，可使用关键字替换，默认效果：飞天狙想要努力变胖-2023年3月1日20点30分，注意这里不能含有冒号，斜杠等非法字符！！
