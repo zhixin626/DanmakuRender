@@ -284,18 +284,23 @@ class StreamDownloadTask():
             if not self.liveapi.Onair():
                 restart_cnt = 0
                 if live_end:
+                    # print(f"[检测][{self.taskname}] 未开播")
                     time.sleep(start_check_interval)
                     stop_waited += start_check_interval
                 else:
+                    self.logger.info(f"[通知][{self.taskname}] 检测到主播下播。")
                     time.sleep(stop_check_interval)
                     stop_waited += stop_check_interval
-                
+
                 if stop_waited > stop_wait_time and not live_end:
                     live_end = True
+                    self.logger.info(f"[通知][{self.taskname}] 检测到直播已结束。")
                     self._pipeSend('liveend', '直播已结束', data=self.sess_id)
-                    self.sess_id = uuid(8)          # 每场直播结束后重新分配session id
+                    self.sess_id = uuid(8)
                     self.segment_id = 1
                 continue
+
+            self.logger.info(f"[检测][{self.taskname}] 正在直播，开始录制")
 
             try:
                 stop_waited = 0
@@ -309,6 +314,8 @@ class StreamDownloadTask():
                 exit(0)
             except Exception as e:
                 if self.liveapi.Onair():
+                    self.logger.info(f"[异常][{self.taskname}]  录制过程中出错：{e}")
+                    self.logger.info(f"[重启][{self.taskname}]  第 {restart_cnt + 1} 次重启，等待后重新开始录制...")
                     self.logger.exception(e)
                     self.stop_once()
                     self._pipeSend('liveerror', f'录制过程出错:{e}', dtype='Exception', data=e)
@@ -317,9 +324,11 @@ class StreamDownloadTask():
                     continue
                 else:
                     self.logger.debug(e)
-            
+
+            self.logger.info(f"[结束][{self.taskname}]  本轮录制结束")
             self.logger.debug(f'{self.taskname} stop once.')
             self.stop_once()
+
 
     def start(self):
         thread = threading.Thread(target=self.start_helper,daemon=True)

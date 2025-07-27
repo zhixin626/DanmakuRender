@@ -139,7 +139,9 @@ class Uploader():
             status = info = None
             while retry >= 0:
                 try:
-                    self.logger.info(f"正在上传 {[f.path for f in files]} 至 {upload_args.get('account')}")
+                    file_list_str = ',\n  '.join([repr(f.path) for f in files])
+                    account = upload_args.get('account')
+                    self.logger.info(f"正在上传至 {account}：\n[\n  {file_list_str}\n]")
                     # logging.debug(task)
                     status, info = target_uploader.upload(files=files, **upload_args)
                 except KeyboardInterrupt:

@@ -66,6 +66,7 @@ class douyin(BaseAPI):
             try:
                 resp = self._get_response_douyin()
                 self.real_rid = resp['data'][0]['id_str']
+                logger.info(f"通过短 ID {self.web_rid} 获取到真实 room_id：{self.real_rid}")
             except:
                 raise Exception(f'解析抖音房间号{rid}错误.')
     
