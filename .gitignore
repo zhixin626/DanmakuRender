@@ -5,7 +5,7 @@
 /test**
 
 replay-**.yml
-DMR-**.yml
+# DMR-**.yml
 **.exe
 **.pyc
 **.mp4
