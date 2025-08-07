@@ -50,7 +50,7 @@ download_args:
   # 指定弹幕字体，默认为微软雅黑字体(Microsoft YaHei)
   font: Microsoft YaHei
   # 指定弹幕字体大小，默认为36
-  fontsize: 40
+  fontsize: 60
   # Distance from Screen Top 弹幕距离屏幕顶端的距离（像素，例如20，表示距离屏幕顶端20px）
   dst: 20
   # 指定单条弹幕持续时间（秒），默认为16
