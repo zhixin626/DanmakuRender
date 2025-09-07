@@ -178,6 +178,7 @@ class DanmakuDownloader():
                             timestamp=dm.get('timestamp', datetime.now().timestamp()),
                             color=dm.get('color', 'ffffff'),
                         )
+
                     # 将绝对时间转换为相对时间
                     dm.time = dm.timestamp - self.part_start_time - self.dm_delay_fixed
                     # 载入弹幕模板
@@ -186,6 +187,8 @@ class DanmakuDownloader():
                     if self.dm_available(dm):
                         retry = 0
                         if self.dmwriter.add(dm):
+                            # self.logger.info("弹幕内容: %s", dm.text)
+                            # self.logger.info("弹幕类型: %s", dm.dtype)
                             last_dm_time = datetime.now().timestamp()
                     continue
                 except asyncio.QueueEmpty:
@@ -202,6 +205,7 @@ class DanmakuDownloader():
                     last_dm_time = datetime.now().timestamp()
                     await asyncio.sleep(min(15*retry,60))
                     task = asyncio.create_task(dmc_task())
+                    self.logger.info(f"{self.url} 弹幕下载线程已重启。")
                     continue
 
                 if self.dm_auto_restart and datetime.now().timestamp()-last_dm_time>self.dm_auto_restart:
@@ -209,6 +213,7 @@ class DanmakuDownloader():
                     task.cancel()
                     last_dm_time = datetime.now().timestamp()
                     task = asyncio.create_task(dmc_task())
+                    self.logger.info(f"{self.url} 弹幕下载线程已重启。")
                     continue
                 
                 await asyncio.sleep(0.1)

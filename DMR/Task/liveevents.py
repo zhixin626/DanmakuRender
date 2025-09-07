@@ -1,6 +1,7 @@
 import logging
 import os
 from .baseevents import BaseEvents
+from .merge_mp4 import merge_mp4
 from ..utils import *
 
 class LiveEvents(BaseEvents):
@@ -136,7 +137,11 @@ class LiveEvents(BaseEvents):
             self.ended_dict[group_id] = time.time()
         else:
             self.logger.debug(f'No such group:{group_id}.')
-        
+
+        if self.config['common_event_args'].get('auto_merge') and group_id in self.ended_dict:
+            # self.logger.info("onLiveEnd正在检查是否merge")
+            self.check_for_merge(group_id)
+
         ret_msgs = []
         if self.config['common_event_args'].get('auto_upload'):
             upload_msgs = self._check_for_upload(group_id)
@@ -197,6 +202,8 @@ class LiveEvents(BaseEvents):
                 for idx, video_state in enumerate(self.state_dict[group_id]):
                     if video_state[vtype]['status'] == 'ready':
                         videos.append(video_state[vtype]['file'])
+                    elif video_state[vtype]['status'] == 'merged':
+                        continue
                     else:
                         videos = []
                         break
@@ -248,12 +255,86 @@ class LiveEvents(BaseEvents):
                         self.state_dict[video.group_id][idx][vtype]['status'] = 'ready'
                         self.state_dict[video.group_id][idx][vtype]['file'] = video
         
+        if self.config['common_event_args'].get('auto_merge') and video.group_id in self.ended_dict:
+            # self.logger.info("onRenderEnd正在检查是否merge")
+            self.check_for_merge(video.group_id)
+        
         ret_msgs = []
         if self.config['common_event_args'].get('auto_upload'):
             upload_msgs = self._check_for_upload(video.group_id)
             ret_msgs += upload_msgs
 
         return ret_msgs
+
+    def check_for_merge(self, group_id):
+        # 只合并 dm_video
+        vtype = "dm_video"
+
+        # 保留：所有都 ready 才能合并（all-ready gate）
+        for idx, video_state in enumerate(self.state_dict[group_id]):
+            if video_state[vtype]['status'] != 'ready':
+                return
+
+        videos = []
+        videos_paths = []
+        new_seg_id = 1
+
+        changed_entries = []
+        for idx, video_state in enumerate(self.state_dict[group_id]):
+            new_seg_id += 1
+            entry = video_state[vtype]
+            entry['status'] = 'merging'     # ← 改动点1
+            changed_entries.append(entry)    # ← 改动点1
+            videos_paths.append(entry['file'].path)
+            videos.append(entry['file'])
+
+        if len(videos_paths) < 2:
+            # 改动点1.1：不足 2 段也要回滚
+            for entry in changed_entries:
+                entry['status'] = 'ready'
+            return
+
+        self.logger.info("弹幕视频有%s个，开始合并",len(videos_paths))
+
+        try:
+            # 改动点2：不再提前 append 空 state；这里先做真正合并
+            final_path, meta = merge_mp4(videos_paths, return_info=True)
+        except Exception as e:
+            # 改动点3：失败回滚——只回滚我设为 merging 的那批（merging -> ready）
+            for entry in changed_entries:
+                entry['status'] = 'ready'
+            self.logger.debug("合并 mp4 时出错，已退回分段上传：%s", e)
+            return
+
+        # 改动点4：成功后把旧条目标记为 merged（merging -> merged）
+        for entry in changed_entries:
+            entry['status'] = 'merged'
+
+        # 改动点5：合并成功后再 append 新占位，并写入新的 ready 条目
+        video_state_new = {
+            'src_video':     {'status': None, 'file': None, 'wait': []},
+            'src_video_pre': {'status': None, 'file': None, 'wait': []},
+            'dm_video':      {'status': None, 'file': None, 'wait': []},
+        }
+
+        newvideo = VideoInfo(
+            path=final_path,
+            dtype='dm_video',
+            file_id=uuid(),                     
+            size=os.path.getsize(final_path),
+            ctime=datetime.now(),
+            dm_file_id=None,
+            duration=meta["duration"],
+            segment_id=new_seg_id,
+            taskname=videos[-1].taskname,
+            group_id=group_id,
+            streamer=videos[-1].streamer,
+            title=videos[-1].title,
+            resolution=meta["resolution"],
+        )
+
+        video_state_new['dm_video'].update({'status': 'ready', 'file': newvideo})
+        self.state_dict[group_id].append(video_state_new)   # ← 改动点5（成功后再 append）
     
     def _check_for_clean(self, group_id=None):
         ret_msgs = []

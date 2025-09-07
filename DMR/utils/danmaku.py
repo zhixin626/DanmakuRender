@@ -55,11 +55,19 @@ class GiftDanmaku(SimpleDanmaku):
         super().__init__(*args, **kwargs)
         self.gift_name = gift_name
         self.gift_count = int(gift_count)
+
         self.gift_price = float(gift_price)
+        # 新增：如果 gift_price 小数部分为 0，转成 int
+        if self.gift_price.is_integer():
+            self.gift_price = int(self.gift_price)
+
         self.price_unit = price_unit
         self.price = price if price is not None else self.gift_price * self.gift_count
-        self.dtype = 'gift'
+        # 新增：如果 price 小数部分为 0，转成 int
+        if isinstance(self.price, float) and self.price.is_integer():
+            self.price = int(self.price)
 
+        self.dtype = 'gift'
         self.text = text if text is not None else\
             f'{self.uname} 赠送给主播价值 {self.price} {self.price_unit} 的 {self.gift_count} 个 {self.gift_name}'
 

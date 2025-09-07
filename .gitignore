@@ -15,4 +15,5 @@ replay-**.yml
 **.json
 **.ass
 **.xml
+*.yml
 \-*

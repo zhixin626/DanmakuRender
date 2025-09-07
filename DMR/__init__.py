@@ -9,7 +9,7 @@ import logging
 from .engine import DMREngine
 from .Config import Config
 
-
+from IPython import embed
 class DanmakuRender():
     def __init__(self, config:Config, **kwargs) -> None:
         self.logger = logging.getLogger('DMR')

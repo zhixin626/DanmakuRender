@@ -24,6 +24,8 @@ from .dy_pb2 import PushFrame, Response, ChatMessage, GiftMessage, MemberMessage
 from .utils import DouyinDanmakuUtils
 import aiohttp
 
+from .douyin_shortcodes import replace_shortcodes_to_emoji
+
 logger = logging.getLogger(__name__)
 
 
@@ -135,22 +137,41 @@ class Douyin:
                 chatMessage = ChatMessage()
                 chatMessage.ParseFromString(msg.payload)
                 data = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
-                name = data['user']['nickName']
+                
+                user_info = data.get('user', {})
+                name = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
+                if 'nickName' not in user_info:
+                    logger.debug(
+                        f"nickName 不存在，已替换为: {name}"
+                    )
+
                 content = data['content']
                 msg_dict = SimpleDanmaku(
                     timestamp=now,
                     uname=name,
-                    content=content,
+                    content=replace_shortcodes_to_emoji(content),
                     dtype='danmaku',
                     color='ffffff'
                 )
+                
+                # logger.info("WebcastChatMessage\n%s", json.dumps(data, ensure_ascii=False, indent=2))
+
+                
                 # msg_dict = {"timestamp": now, "name": name, "content": content, "msg_type": "danmaku", "color": "ffffff"}
                 # print(msg_dict)
             elif msg.method == 'WebcastMemberMessage':
                 memberMessage = MemberMessage()
                 memberMessage.ParseFromString(msg.payload)
                 data = json_format.MessageToDict(memberMessage, preserving_proto_field_name=True)
-                name = data['user']['nickName']
+                
+                user_info = data.get('user', {})
+                name = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
+                if 'nickName' not in user_info:
+                    logger.debug(
+                        f"nickName 不存在，已替换为: {name}"
+                    )
+
+                # name = data['user']['nickName']
                 msg_dict = EntryDanmaku(
                     timestamp=now,
                     uname=name,
@@ -164,21 +185,32 @@ class Douyin:
                 data = json_format.MessageToDict(giftMessage, preserving_proto_field_name=True)
                 if 'combo' in data['gift'] and not 'repeatEnd' in data:
                   continue
-                name = data['user']['nickName']
-                diamondCount=str(data['gift']['diamondCount'])
+                user_info = data.get('user', {})
+                name = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
+                if 'nickName' not in user_info:
+                    logger.debug(
+                        f"nickName 不存在，已替换为: {name}"
+                    )
+                    
+                gift_price=str(data['gift']['diamondCount'])
+                gift_count=data['repeatCount']
                 msg_dict = GiftDanmaku(
                     timestamp=now,
                     uname=name,
-                    content=f"{name}送给主播{data['repeatCount']}个{data['gift']['name']}每个价值抖币{diamondCount}",
+                    content=f"{name}送给主播{data['repeatCount']}个{data['gift']['name']}每个价值抖币{gift_price}",
                     gift_name=data['gift']['name'],
-                    gift_count=data['repeatCount'],
-                    gift_price=diamondCount,
+                    gift_count=gift_count,
+                    gift_price=gift_price,
                     price_unit='抖币',
                     dtype='gift',
                     color='ffffff'
                 )
+                if msg_dict.price>=49:
+                    msg_dict=msg_dict
+                else:
+                    continue
             else:
                 msg_dict = {"timestamp": now, "name": "", "content": "", "msg_type": "other", "raw_data": msg}
+
             msgs.append(msg_dict)
-        
         return msgs, ack

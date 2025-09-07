@@ -69,6 +69,7 @@ class StreamgearsDownloader():
             self.streamgears_proc = subprocess.Popen(streamgears_args, stdin=subprocess.PIPE, stdout=logfile, stderr=subprocess.STDOUT, bufsize=10**8)
             while not self.stoped:
                 if self.streamgears_proc.poll() is not None:
+                    # self.streamgears_proc.poll()：检查子进程是否结束（返回 None 表示还在运行，非 None 表示退出）
                     break
 
                 files = sorted(glob.glob(join(self.output_dir, f'*{self.uuid}*')))

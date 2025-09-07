@@ -59,6 +59,7 @@ class AssWriter():
             f'PlayResX: {self.width}',
             f'PlayResY: {self.height}',
             'Timer: 100.0000',
+            'WrapStyle: 2',
             '',
             '[V4+ Styles]',
             'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
@@ -135,7 +136,13 @@ class AssWriter():
         # set ass Dialogue
         dm_info = f'Dialogue: 0,{t0},{t1},R2L,,0,0,0,,'
         dm_info += '{\\move(%d,%d,%d,%d)}'%(x0, y + self.dst, x1, y + self.dst)
-        dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
+        # dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
+
+        if danmu.dtype=="gift":
+            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR("ff99ff")) #修改抖音礼物弹幕颜色
+        else:
+            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
+
         content = danmu.text.replace('\n',' ').replace('\r',' ')
         if not self.ass_text_template:
             dm_info += content

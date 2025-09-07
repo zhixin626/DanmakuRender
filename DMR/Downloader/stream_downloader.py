@@ -85,9 +85,9 @@ class StreamDownloadTask():
             duration = max(duration, FFprobe.get_duration(filename))
         
         video_info = VideoInfo(
+            path=filename,
             file_id=uuid(),
             dtype='src_video',
-            path=filename,
             group_id=self.sess_id,
             segment_id=self.segment_id,
             size=os.path.getsize(filename),
@@ -276,7 +276,7 @@ class StreamDownloadTask():
         self.segment_id = 1
 
         if not self.liveapi.Onair():
-            self._pipeSend('liveend', '直播已结束', )
+            self._pipeSend('liveend', '直播未开始', )
             live_end = True
             time.sleep(start_check_interval)
 
@@ -294,12 +294,12 @@ class StreamDownloadTask():
                 if stop_waited > stop_wait_time and not live_end:
                     live_end = True
                     # self.logger.info(f"[{self.taskname}] 检测到直播已结束。")
-                    self._pipeSend('liveend', '直播已结束', data=self.sess_id)
+                    self._pipeSend('liveend', '直播真的结束了', data=self.sess_id)
                     self.sess_id = uuid(8)
                     self.segment_id = 1
                 continue
 
-            self.logger.info(f"[{self.taskname}] 正在直播，开始录制")
+            # self.logger.info(f"[{self.taskname}] 正在直播，开始录制")
 
             try:
                 stop_waited = 0
