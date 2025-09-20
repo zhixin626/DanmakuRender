@@ -83,7 +83,6 @@ class DanmakuDownloader():
             self.dmwriter = AssWriter(dm_template=self.dm_template, **self.kwargs)
         else:
             raise NotImplementedError(f"unsupported danmaku format {dm_format}")
-
     def time_fix(self, time_error):
         self.part_start_time -= time_error
 

@@ -70,7 +70,7 @@ class Downloader():
         elif dltype == 'virtual':
             from .virtual_downloader import VirtualDownloaderTask
             downloader_task = VirtualDownloaderTask
-        
+
         self.download_tasks[taskname] = downloader_task(taskname=taskname, send_queue=self.send_queue, **config)
         self.download_tasks[taskname].start()
         self._pipeSend(event='info', msg=f'下载任务 {taskname} 已启动。', dtype='str', data=taskname)

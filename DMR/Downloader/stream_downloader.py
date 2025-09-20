@@ -223,6 +223,7 @@ class StreamDownloadTask():
                                      height=self.height,
                                      advanced_dm_args=self.advanced_dm_args,
                                      **self.kwargs)
+
             self.dmw.start(self_segment=not self.video)
         
         def video_thread():
@@ -244,6 +245,8 @@ class StreamDownloadTask():
 
         self.executor = ThreadPoolExecutor(max_workers=2)
         futures = []
+
+
         if self.danmaku:
             futures.append(self.executor.submit(danmaku_thread))
         if self.video:

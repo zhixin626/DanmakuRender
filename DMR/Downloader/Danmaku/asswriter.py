@@ -1,7 +1,7 @@
 from datetime import datetime
 import threading
 from DMR.utils import *
-
+from itertools import cycle
 __all__ = ['AssWriter']
 
 class AssWriter():
@@ -24,7 +24,11 @@ class AssWriter():
                  outlinecolor:str,
                  outlinesize:int,
                  dm_template:dict=None,
+                 giftdm_color="a9b689",
+                 giftdm_opacity=1,
                  **kwargs) -> None:
+        self.giftdm_color=cycle(giftdm_color)
+        self.giftdm_opacity = hex(255-int(giftdm_opacity*255))[2:].zfill(2)
         self.description = description
         self.height = height
         self.width = width
@@ -138,8 +142,9 @@ class AssWriter():
         dm_info += '{\\move(%d,%d,%d,%d)}'%(x0, y + self.dst, x1, y + self.dst)
         # dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
 
-        if danmu.dtype=="gift":
-            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR("ff99ff")) #修改抖音礼物弹幕颜色
+        if danmu.dtype == "gift":
+            color = next(self.giftdm_color)
+            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.giftdm_opacity, RGB2BGR(color)) #修改抖音礼物弹幕颜色
         else:
             dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
 

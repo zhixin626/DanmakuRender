@@ -41,6 +41,7 @@ def up_file(file_path,task_name="不可一世杀手",url='https://live.douyin.co
     '--tag',f'直播回放,{task_name}',
     '--tid','65',
     '--title',f'不可一世杀手直播回放{year}.{month}.{day}(大弹幕版)',
+    '--extra-fields','{"is_only_self":1}',
     file_path
 ]
     print(biliuprs)
@@ -54,4 +55,4 @@ def up_file(file_path,task_name="不可一世杀手",url='https://live.douyin.co
 # concat(files,out_path)
 
 if __name__ == '__main__':
-    up_file("D:\\DanmakuRender\\不可一世杀手（弹幕版）\\final.mp4")
+    up_file(r"D:\DanmakuRender\test（弹幕版）\两白一黑子-2025.09.14.10点30分（弹幕版）.mp4")

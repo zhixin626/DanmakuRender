@@ -84,6 +84,8 @@ download_args:
     superchat: ~
     gift: '{uname} 送给手儿价值{gift_price}{price_unit}的{gift_name}×{gift_count}'
     entry: ~
+  giftdm_color: ["dfceea","a9b689","96aed1"]
+  giftdm_opacity: 1
 
 # 上传参数，如果不需要上传就把下面的都删了
 upload_args:
@@ -117,16 +119,23 @@ upload_args:
     cover: ''
     # 标题，可以使用关键字替换
     # 默认的例子：[飞天狙想要努力变胖/直播回放] 晚上七点半比赛 2023年2月24日 （带弹幕版）
-    title: '【标题待定】{STREAMER.NAME}{CTIME.MONTH}月{CTIME.DAY}日直播回放(大弹幕版)'
+    title: '{STREAMER.NAME}{CTIME.MONTH}月{CTIME.DAY}日直播回放(弹幕版)'
     # 简介，可以使用关键字替换
     desc: |
       {STREAMER.NAME}的直播回放
-      标题：{TITLE} 
+      标题：{TITLE}
       时间：{CTIME.YEAR}年{CTIME.MONTH:02d}月{CTIME.DAY:02d}日
-      直播地址：{STREAMER.URL} 
+      直播地址：{STREAMER.URL}
       录制工具：https://github.com/SmallPeaches/DanmakuRender
+      礼物弹幕颜色：
+        Lavender 薰衣草紫 (dfceea)
+        Sage        鼠尾草绿 (a9b689)
+        Mist         薄雾蓝　 (96aed1)
     # 动态内容，可以使用关键字替换
-    dynamic: '哈喽，大家好！今天给大家带来{STREAMER.NAME} {CTIME.YEAR}.{CTIME.MONTH:02d}.{CTIME.DAY:02d}的直播回放,感谢观看！'
+    dynamic: |
+      嗨!{STREAMER.NAME}{CTIME.YEAR}.{CTIME.MONTH}.{CTIME.DAY}的直播回放来了!
+      大家可以把有意思的时间节点发送在评论区
+      (长按进度条旁边的时间即可复制)
     # 标签（一定要有！多个标签逗号分割）
     tag: '直播回放,不可一世杀手'
     # 延迟发布，单位秒，如果需要的话至少设置14400秒（4个小时）
@@ -147,7 +156,7 @@ clean_args:
     # 目标文件夹，文件夹不存在会自动创建，可以使用关键字替换
     dest: ~
     # 清理延迟（秒），默认86400（24小时）
-    delay: 43200
+    delay: 86400
     # 清理弹幕视频时同时清理原文件，默认false
     # 请注意，此功能应该只在不上传原文件的情况下使用，否则会导致上传失败
     w_srcfile: True
