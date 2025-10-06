@@ -3,6 +3,7 @@ import os
 from .baseevents import BaseEvents
 from .merge_mp4 import merge_mp4
 from ..utils import *
+from pathlib import Path
 
 class LiveEvents(BaseEvents):
     def __init__(self, name, config):
@@ -288,11 +289,11 @@ class LiveEvents(BaseEvents):
             videos_paths.append(entry['file'].path)
             videos.append(entry['file'])
 
-        if len(videos_paths) < 2:
-            # 改动点1.1：不足 2 段也要回滚
-            for entry in changed_entries:
-                entry['status'] = 'ready'
-            return
+        # if len(videos_paths) < 2:
+        #     # 改动点1.1：不足 2 段也要回滚
+        #     for entry in changed_entries:
+        #         entry['status'] = 'ready'
+        #     return
 
         self.logger.info("弹幕视频有%s个，开始合并",len(videos_paths))
 
@@ -317,12 +318,28 @@ class LiveEvents(BaseEvents):
             'dm_video':      {'status': None, 'file': None, 'wait': []},
         }
 
+        try:
+            txt_path = Path(final_path).parent / "_livestart_times.txt"
+            with open(txt_path, "r", encoding="utf-8") as f:
+                # 取最后一行（strip 去掉换行）
+                last_line = None
+                for line in f:
+                    if line.strip():
+                        last_line = line.strip()
+            if last_line:
+                start_time = datetime.fromisoformat(last_line)
+            else:
+                start_time = datetime.now()
+        except Exception:
+            start_time = datetime.now()
+
+
         newvideo = VideoInfo(
             path=final_path,
             dtype='dm_video',
             file_id=uuid(),                     
             size=os.path.getsize(final_path),
-            ctime=datetime.now(),
+            ctime=start_time,
             dm_file_id=None,
             duration=meta["duration"],
             segment_id=new_seg_id,

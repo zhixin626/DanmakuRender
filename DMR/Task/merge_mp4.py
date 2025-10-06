@@ -63,7 +63,24 @@ def _probe_media(ffprobe: str, path: str) -> Dict[str, Union[str, float, int, Tu
         "path": str(path),
         "size": os.path.getsize(path) if os.path.exists(path) else None,
     }
-
+def _gen_autoname(base_dir: Path) -> Path:
+    """生成 final-YYYY-M-D-HH-MM[(-NNN)].mp4 的不重名文件路径"""
+    now = datetime.now()
+    fname = f"final-{now.year}-{now.month}-{now.day}-{now.hour:02d}-{now.minute:02d}.mp4"
+    illegal = r'[<>:"/\\|?*\x00-\x1F]'
+    fname = re.sub(illegal, "_", fname)
+    cand = base_dir / fname
+    if cand.exists():
+        i = 1
+        while True:
+            fname2 = f"final-{now.year}-{now.month}-{now.day}-{now.hour:02d}-{now.minute:02d}-{i:03d}.mp4"
+            fname2 = re.sub(illegal, "_", fname2)
+            cand2 = base_dir / fname2
+            if not cand2.exists():
+                cand = cand2
+                break
+            i += 1
+    return cand
 def merge_mp4(
     mp4_list: List[str],
     out_path: Optional[str] = None,
@@ -80,37 +97,42 @@ def merge_mp4(
     if not inputs:
         raise ValueError("mp4_list 为空")
 
-    # 输出路径
+    # === 单文件分支
     if len(inputs) == 1:
-        out_path_final = str(Path(inputs[0]).resolve())
+        src = Path(inputs[0]).resolve()
+        base_dir = src.parent
+
+        # 1) 目标名：没给 out_path 就用 _gen_autoname(base_dir)
+        if not out_path:
+            dst = _gen_autoname(base_dir)
+        else:
+            dst = Path(out_path)
+            if not dst.is_absolute():          # 相对路径 → 放到同目录
+                dst = (base_dir / dst).resolve()
+            # 若用户给了固定文件名且已存在，做个简单去重保护
+            if dst.exists() and dst != src:
+                i, stem, suffix = 1, dst.stem, (dst.suffix or ".mp4")
+                while True:
+                    cand = dst.with_name(f"{stem}-{i:03d}{suffix}")
+                    if not cand.exists():
+                        dst = cand
+                        break
+                    i += 1
+
+        # 2) 同盘改名（rename）
+        if src != dst:
+            src.rename(dst)
+
+        out_path_final = str(dst)
         if return_info:
             info = _probe_media(ffprobe, out_path_final)
             return out_path_final, info
         return out_path_final
 
-    # —— 这里开始是你要的“小修改”：自动命名 final-YYYY-M-D-HH-MM.mp4 —— #
+    # === 多文件分支
     if out_path is None:
         base_dir = Path(inputs[0]).resolve().parent
-        now = datetime.now()
-        # 用连字符替代冒号：final-2025-6-17-14-00.mp4
-        fname = f"final-{now.year}-{now.month}-{now.day}-{now.hour:02d}-{now.minute:02d}.mp4"
-        # 保险起见再做一次非法字符清理（Windows）
-        illegal = r'[<>:"/\\|?*\x00-\x1F]'
-        fname = re.sub(illegal, "_", fname)
-
-        cand = base_dir / fname
-        if cand.exists():
-            i = 1
-            while True:
-                fname2 = f"final-{now.year}-{now.month}-{now.day}-{now.hour:02d}-{now.minute:02d}-{i:03d}.mp4"
-                fname2 = re.sub(illegal, "_", fname2)
-                cand2 = base_dir / fname2
-                if not cand2.exists():
-                    cand = cand2
-                    break
-                i += 1
-        out_path = str(cand)
-    # —— 小修改结束 —— #
+        out_path = str(_gen_autoname(base_dir))
     out_path = str(Path(out_path))
 
     # —— 生成 filelist（必须是“可被其他进程读取的命名临时文件”）——

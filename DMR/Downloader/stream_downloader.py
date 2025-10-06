@@ -10,7 +10,7 @@ from datetime import datetime
 from DMR.Downloader.Danmaku import DanmakuDownloader
 from DMR.LiveAPI import *
 from DMR.utils import *
-
+from pathlib import Path
 
 class StreamDownloadTask():
     def __init__(self, 
@@ -278,6 +278,8 @@ class StreamDownloadTask():
         self.sess_id = uuid(8)
         self.segment_id = 1
 
+        in_session = False  # [MOD] 会话态：是否已进入本次直播的录制会话
+
         if not self.liveapi.Onair():
             self._pipeSend('liveend', '直播未开始', )
             live_end = True
@@ -288,6 +290,7 @@ class StreamDownloadTask():
                 restart_cnt = 0
                 if live_end:
                     # print(f"[检测][{self.taskname}] 未开播")
+                    in_session = False  # [MOD] 保证初始为非会话态
                     time.sleep(start_check_interval)
                     stop_waited += start_check_interval
                 else:
@@ -307,6 +310,14 @@ class StreamDownloadTask():
             try:
                 stop_waited = 0
                 live_end = False
+                if not in_session:  # [MOD] 仅首次进入会话时
+                    in_session = True  # [MOD] 标记已进入会话
+                    out_dir = Path(self.output_dir+'（弹幕版）')
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    now = datetime.now()  # 注意这里用的就是 datetime.now()
+                    with open(out_dir / "_livestart_times.txt", "a", encoding="utf-8", newline="\n") as f:
+                        f.write(now.isoformat(timespec="seconds") + "\n")
+
                 self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id)
                 self.start_once()
                 if self.liveapi.Onair():
