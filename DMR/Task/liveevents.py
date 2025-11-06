@@ -1,7 +1,9 @@
 import logging
 import os
+
 from .baseevents import BaseEvents
-from .merge_mp4 import merge_mp4
+from send2trash import send2trash
+from .merge_mp4 import merge_amplify_mp4
 from ..utils import *
 from pathlib import Path
 
@@ -299,7 +301,9 @@ class LiveEvents(BaseEvents):
 
         try:
             # 改动点2：不再提前 append 空 state；这里先做真正合并
-            final_path, meta = merge_mp4(videos_paths, return_info=True)
+            final_path, meta = merge_amplify_mp4(videos_paths, return_info=True)
+            for video in videos_paths:
+                send2trash(video)
         except Exception as e:
             # 改动点3：失败回滚——只回滚我设为 merging 的那批（merging -> ready）
             for entry in changed_entries:
@@ -318,28 +322,34 @@ class LiveEvents(BaseEvents):
             'dm_video':      {'status': None, 'file': None, 'wait': []},
         }
 
-        try:
-            txt_path = Path(final_path).parent / "_livestart_times.txt"
-            with open(txt_path, "r", encoding="utf-8") as f:
-                # 取最后一行（strip 去掉换行）
-                last_line = None
-                for line in f:
-                    if line.strip():
-                        last_line = line.strip()
-            if last_line:
-                start_time = datetime.fromisoformat(last_line)
-            else:
-                start_time = datetime.now()
-        except Exception:
-            start_time = datetime.now()
-
+        def get_live_start_time(start=True):
+            try:
+                if start:
+                    txt_path = Path(final_path).parent / "_livestart_times.txt"
+                else:
+                    txt_path = Path(final_path).parent / "_liveend_times.txt"
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    # 取最后一行（strip 去掉换行）
+                    last_line = None
+                    for line in f:
+                        if line.strip():
+                            last_line = line.strip()
+                if last_line:
+                    time = datetime.fromisoformat(last_line)
+                else:
+                    time = datetime.now()
+            except Exception:
+                time = datetime.now()
+            return time
 
         newvideo = VideoInfo(
             path=final_path,
             dtype='dm_video',
             file_id=uuid(),                     
             size=os.path.getsize(final_path),
-            ctime=start_time,
+            ctime=datetime.now(),
+            stime=get_live_start_time(start=True),
+            etime=get_live_start_time(start=False),
             dm_file_id=None,
             duration=meta["duration"],
             segment_id=new_seg_id,

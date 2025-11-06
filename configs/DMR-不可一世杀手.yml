@@ -6,7 +6,7 @@ common_event_args:
   # 启动自动上传
   auto_upload: True 
   # 启动自动清理
-  auto_clean: False
+  auto_clean: True
   # 原视频自动转码
   auto_transcode: False
   # 必须auto_render为True，且下面的upload_args.dm_video.realtime=false
@@ -23,7 +23,7 @@ download_args:
   # 录制输出文件夹，设置为空则使用任务名称作为文件夹
   output_dir: ./不可一世杀手
   # 录制文件名称格式，可使用关键字替换，默认效果：飞天狙想要努力变胖-2023年3月1日20点30分，注意这里不能含有冒号，斜杠等非法字符！！
-  output_name: '{STREAMER.NAME}-{CTIME.YEAR}.{CTIME.MONTH:02d}.{CTIME.DAY:02d}.{CTIME.HOUR:02d}点{CTIME.MINUTE:02d}分'
+  output_name: '手-{CTIME.MONTH}月{CTIME.DAY}日{CTIME.HOUR:02d}点{CTIME.MINUTE:02d}分'
   # 录播分段时间（秒），默认一个小时
   segment: 21600
   # 录制程序引擎，可选ffmpeg, streamgears 或者 streamlink
@@ -37,7 +37,7 @@ download_args:
   video: True
   # 延迟下播计时（分钟）
   # 使用这个功能可以把主播短暂下播又开播认定为同一场直播
-  stop_wait_time: 1
+  stop_wait_time: 15
   # 录制视频的格式，默认flv
   output_format: flv
 
@@ -103,7 +103,7 @@ upload_args:
     # 注意：实时上传可能无法上传很短的视频，尤其是在网速较快的情况下（B站对修改稿件的间隔有限制）
     realtime: false
     # 上传的视频最短长度，小于此长度的视频会被自动过滤，默认120s
-    min_length: 120
+    min_length: 30
     # 以下参数来自biliuprs，详细内容可以参考 https://biliup.github.io/biliup-rs/index.html
     # 上传线路，设置为空则由biliuprs自动选择
     line: ~
@@ -119,17 +119,18 @@ upload_args:
     cover: ''
     # 标题，可以使用关键字替换
     # 默认的例子：[飞天狙想要努力变胖/直播回放] 晚上七点半比赛 2023年2月24日 （带弹幕版）
-    title: '【手儿】{CTIME.MONTH}月{CTIME.DAY}日直播回放(弹幕版)'
+    title: '【手儿】{STIME.MONTH}月{STIME.DAY}日直播回放(弹幕版)'
     # 简介，可以使用关键字替换
     desc: |
       {STREAMER.NAME}的直播回放
       标题：{TITLE}
-      时间：{CTIME.YEAR}年{CTIME.MONTH:02d}月{CTIME.DAY:02d}日
+      开播时间：{STIME.YEAR}年{STIME.MONTH}月{STIME.DAY}日{STIME.HOUR}点{STIME.MINUTE}分{STIME.SECOND}秒(CST)
+      下播时间：{ETIME.YEAR}年{ETIME.MONTH}月{ETIME.DAY}日{ETIME.HOUR}点{ETIME.MINUTE}分{ETIME.SECOND}秒(CST)
       直播地址：{STREAMER.URL}
       录制工具：https://github.com/SmallPeaches/DanmakuRender
     # 动态内容，可以使用关键字替换
     dynamic: |
-      嗨!手儿{CTIME.YEAR}.{CTIME.MONTH}.{CTIME.DAY}的直播回放来了!
+      松弟们!手儿{STIME.YEAR}年{STIME.MONTH}月{STIME.DAY}日的直播回放来了!
     # 标签（一定要有！多个标签逗号分割）
     tag: '直播回放,不可一世杀手'
     # 延迟发布，单位秒，如果需要的话至少设置14400秒（4个小时）

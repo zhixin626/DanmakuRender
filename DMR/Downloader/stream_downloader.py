@@ -92,6 +92,7 @@ class StreamDownloadTask():
             segment_id=self.segment_id,
             size=os.path.getsize(filename),
             ctime=self.segment_start_time,
+            stime=self.live_start_time,
             duration=duration,
             resolution=(self.width, self.height),
             title=self.room_info['title'],
@@ -155,7 +156,7 @@ class StreamDownloadTask():
         
         self.segment_start_time = datetime.now()
         os.makedirs(self.output_dir,exist_ok=True)
-        
+
         stream_url = self.liveapi.GetStreamURL(**self.stream_option)
         stream_request_header = self.liveapi.GetStreamHeader()
         width, height = FFprobe.get_resolution(stream_url, stream_request_header)
@@ -310,15 +311,17 @@ class StreamDownloadTask():
             try:
                 stop_waited = 0
                 live_end = False
+                self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id)
+                # 记录开始时间
                 if not in_session:  # [MOD] 仅首次进入会话时
                     in_session = True  # [MOD] 标记已进入会话
                     out_dir = Path(self.output_dir+'（弹幕版）')
                     out_dir.mkdir(parents=True, exist_ok=True)
                     now = datetime.now()  # 注意这里用的就是 datetime.now()
+                    self.live_start_time=now
                     with open(out_dir / "_livestart_times.txt", "a", encoding="utf-8", newline="\n") as f:
                         f.write(now.isoformat(timespec="seconds") + "\n")
 
-                self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id)
                 self.start_once()
                 if self.liveapi.Onair():
                     raise RuntimeError(f'{self.taskname} 录制异常退出.')
@@ -340,6 +343,12 @@ class StreamDownloadTask():
 
             self.logger.info(f"[{self.taskname}]下播,本轮录制结束")
             self.logger.debug(f'{self.taskname} stop once.')
+            # 记录结束时间
+            out_dir = Path(self.output_dir+'（弹幕版）')
+            now = datetime.now()
+            with open(out_dir / "_liveend_times.txt", "a", encoding="utf-8", newline="\n") as f:
+                        f.write(now.isoformat(timespec="seconds") + "\n")
+
             self.stop_once()
 
 

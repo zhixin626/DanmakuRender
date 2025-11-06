@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple, Dict, Union
 import logging
 from datetime import datetime
 import re
+from send2trash import send2trash
 logger = logging.getLogger(__name__)
 
 def _probe_media(ffprobe: str, path: str) -> Dict[str, Union[str, float, int, Tuple[int, int]]]:
@@ -63,25 +64,44 @@ def _probe_media(ffprobe: str, path: str) -> Dict[str, Union[str, float, int, Tu
         "path": str(path),
         "size": os.path.getsize(path) if os.path.exists(path) else None,
     }
-def _gen_autoname(base_dir: Path) -> Path:
-    """生成 final-YYYY-M-D-HH-MM[(-NNN)].mp4 的不重名文件路径"""
-    now = datetime.now()
-    fname = f"final-{now.year}-{now.month}-{now.day}-{now.hour:02d}-{now.minute:02d}.mp4"
-    illegal = r'[<>:"/\\|?*\x00-\x1F]'
-    fname = re.sub(illegal, "_", fname)
+def get_live_start_time(dmfile_path,start=True):
+    try:
+        if start:
+            txt_path = Path(dmfile_path).parent / "_livestart_times.txt"
+        else:
+            txt_path = Path(dmfile_path).parent / "_liveend_times.txt"
+        with open(txt_path, "r", encoding="utf-8") as f:
+            # 取最后一行（strip 去掉换行）
+            last_line = None
+            for line in f:
+                if line.strip():
+                    last_line = line.strip()
+        if last_line:
+            time = datetime.fromisoformat(last_line)
+        else:
+            time = datetime.now()
+    except Exception:
+        time = datetime.now()
+    return time
+
+def _gen_autoname(file_path: Path) -> Path:
+    """生成 11月2日_merged[(-NNN)].mp4 的不重名文件路径"""
+    time = get_live_start_time(file_path)
+    base_dir=file_path.parent
+    fname = f"{time.month}月{time.day}日_merged.mp4"
     cand = base_dir / fname
     if cand.exists():
         i = 1
         while True:
-            fname2 = f"final-{now.year}-{now.month}-{now.day}-{now.hour:02d}-{now.minute:02d}-{i:03d}.mp4"
-            fname2 = re.sub(illegal, "_", fname2)
+            fname2 = f"{time.month}月{time.day}日{i:03d}_merged.mp4"
             cand2 = base_dir / fname2
             if not cand2.exists():
                 cand = cand2
                 break
             i += 1
     return cand
-def merge_mp4(
+
+def merge_amplify_mp4(
     mp4_list: List[str],
     out_path: Optional[str] = None,
     ffmpeg: str = r"tools/ffmpeg.exe",
@@ -102,38 +122,35 @@ def merge_mp4(
         src = Path(inputs[0]).resolve()
         base_dir = src.parent
 
-        # 1) 目标名：没给 out_path 就用 _gen_autoname(base_dir)
+        # 没给 out_path 就用 _gen_autoname(base_dir)
         if not out_path:
-            dst = _gen_autoname(base_dir)
+            dst = _gen_autoname(src)
         else:
             dst = Path(out_path)
-            if not dst.is_absolute():          # 相对路径 → 放到同目录
-                dst = (base_dir / dst).resolve()
-            # 若用户给了固定文件名且已存在，做个简单去重保护
-            if dst.exists() and dst != src:
-                i, stem, suffix = 1, dst.stem, (dst.suffix or ".mp4")
-                while True:
-                    cand = dst.with_name(f"{stem}-{i:03d}{suffix}")
-                    if not cand.exists():
-                        dst = cand
-                        break
-                    i += 1
 
-        # 2) 同盘改名（rename）
+        # 改名
         if src != dst:
             src.rename(dst)
+        out_path = str(dst)
+        # 进行音频增益至-1dB-----------------------------------------------------
+        try:
+            amplified = amplify_to_minus1db(out_path)
+            send2trash(out_path)                                # 删除放入垃圾桶
+            out_path  = amplified
+        except Exception as e:
+            logger.warning(f"amplify 失败，已跳过: {e}")
+        # 进行音频增益至-1dB-----------------------------------------------------
 
-        out_path_final = str(dst)
         if return_info:
-            info = _probe_media(ffprobe, out_path_final)
-            return out_path_final, info
-        return out_path_final
+            info = _probe_media(ffprobe, out_path)
+            return out_path, info
+        return out_path
 
     # === 多文件分支
     if out_path is None:
-        base_dir = Path(inputs[0]).resolve().parent
-        out_path = str(_gen_autoname(base_dir))
-    out_path = str(Path(out_path))
+        out_path = str(_gen_autoname( Path(inputs[0]).resolve() ))
+    else:
+        out_path = str(Path(out_path))
 
     # —— 生成 filelist（必须是“可被其他进程读取的命名临时文件”）——
     tmp = tempfile.NamedTemporaryFile(
@@ -164,16 +181,61 @@ def merge_mp4(
         ]
         # 正确的 logging 用法（占位符），避免你之前遇到的 logging 报错
         logger.debug("merge_mp4 cmd: %s", cmd)
-
         subprocess.run(cmd, check=True)
+
+        # 进行音频增益至-1dB-------------------------------------------------
+        try:
+            amplified = amplify_to_minus1db(out_path)
+            send2trash(out_path)                                # 删除放入垃圾桶
+            out_path = amplified
+        except Exception as e:
+            logger.warning(f"amplify 失败，已跳过: {e}")
+        # 进行音频增益至-1dB-------------------------------------------------
 
         if return_info:
             info = _probe_media(ffprobe, out_path)
             return out_path, info
         return out_path
+
     finally:
         # 删除临时清单
         try:
             os.remove(filelist)
         except OSError:
             pass
+
+def detect(file:str):
+    cmd = [
+            'tools/ffmpeg.exe',
+            '-hide_banner',
+            '-i',file,
+            '-vn',
+            '-af','volumedetect',
+            '-f','null','-'
+            ]
+    r = subprocess.run(cmd, text=True, capture_output=True ,encoding='utf-8')
+    m = re.search(r'max_volume:\s*([-\d\.]+)\s*dB', r.stderr)
+    if not m:
+        raise RuntimeError("未检测到 max_volume（可能没有音轨或滤镜未运行）")
+    return float(m.group(1))
+
+def amplify_to_minus1db(file:str):
+    peak = detect(file) # 检测最高音量max_volume
+    if peak is None:
+        raise RuntimeError("未检测到 max_volume")
+
+    gain_db = -1 - peak
+    if gain_db < 0:
+        gain_db = 0
+    out = Path(file).with_name(Path(file).stem + "_amplified.mp4")
+    cmd = [
+        'tools/ffmpeg.exe',
+        '-i', file,
+        '-af', f'volume={gain_db:.2f}dB,alimiter=limit=-1dB',
+        '-c:v', 'copy',
+        str(out)
+    ]
+    logger.info('开始进行音频增益')
+    result=subprocess.run(cmd, text=True, capture_output=True ,encoding='utf-8')
+    logger.info(f"检测峰值 {peak:.2f} dBFS → 放大 {gain_db:.2f} dB → 输出: {out}")
+    return str(out)
