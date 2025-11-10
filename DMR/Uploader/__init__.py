@@ -111,6 +111,7 @@ class Uploader():
                     data={
                         'config': task['config'],
                     },
+                    bvid=desc,  # zhixin 增加bvid
                 )
 
     def _upload_subprocess(self, task):

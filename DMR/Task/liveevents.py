@@ -3,7 +3,7 @@ import os
 
 from .baseevents import BaseEvents
 from send2trash import send2trash
-from .merge_mp4 import merge_amplify_mp4
+from .merge_mp4 import *
 from ..utils import *
 from pathlib import Path
 
@@ -13,6 +13,10 @@ class LiveEvents(BaseEvents):
         self.state_dict = {}
         self.ended_dict = {}
         self.logger = logging.getLogger(__name__)
+        self.is_add_to_list=False
+        self.is_live_end=False
+        self.bvid=None
+        self.is_desc_offtime=False
 
     @property
     def event_dict(self):
@@ -151,6 +155,23 @@ class LiveEvents(BaseEvents):
             ret_msgs += upload_msgs
 
         self._free_state_memory()
+
+        # 判断是否写入下播时间到简介里
+        self.is_live_end=True
+        dm_video = self.config.get('upload_args', {}).get('dm_video')
+        if isinstance(dm_video, list) and dm_video:
+            time_template=dm_video[0].get('desc_offtime')
+            if time_template and self.bvid and self.is_desc_offtime is False:
+                end_time=self.get_live_start_time(start=False)
+                result = replace_keywords(
+                    time_template,
+                    {"etime": end_time})
+                try:
+                    account=dm_video[0].get('account')
+                    add_offlinetime(self.bvid,result,account)
+                    self.is_desc_offtime=True
+                except Exception as e:
+                    self.logger.error(e)
         
         return ret_msgs
     
@@ -269,6 +290,27 @@ class LiveEvents(BaseEvents):
 
         return ret_msgs
 
+    def get_live_start_time(self,start=True):
+        self.output_dir=self.config.get('download_args').get('output_dir')
+        try:
+            if start:
+                txt_path = Path(self.output_dir+'（弹幕版）') / "_livestart_times.txt"
+            else:
+                txt_path = Path(self.output_dir+'（弹幕版）') / "_liveend_times.txt"
+            with open(txt_path, "r", encoding="utf-8") as f:
+                # 取最后一行（strip 去掉换行）
+                last_line = None
+                for line in f:
+                    if line.strip():
+                        last_line = line.strip()
+            if last_line:
+                time = datetime.fromisoformat(last_line)
+            else:
+                time = datetime.now()
+        except Exception:
+            time = datetime.now()
+        return time
+
     def check_for_merge(self, group_id):
         # 只合并 dm_video
         vtype = "dm_video"
@@ -302,8 +344,8 @@ class LiveEvents(BaseEvents):
         try:
             # 改动点2：不再提前 append 空 state；这里先做真正合并
             final_path, meta = merge_amplify_mp4(videos_paths, return_info=True)
-            for video in videos_paths:
-                send2trash(video)
+            if len(videos_paths)>1:
+                for video in videos_paths: send2trash(video)
         except Exception as e:
             # 改动点3：失败回滚——只回滚我设为 merging 的那批（merging -> ready）
             for entry in changed_entries:
@@ -322,34 +364,14 @@ class LiveEvents(BaseEvents):
             'dm_video':      {'status': None, 'file': None, 'wait': []},
         }
 
-        def get_live_start_time(start=True):
-            try:
-                if start:
-                    txt_path = Path(final_path).parent / "_livestart_times.txt"
-                else:
-                    txt_path = Path(final_path).parent / "_liveend_times.txt"
-                with open(txt_path, "r", encoding="utf-8") as f:
-                    # 取最后一行（strip 去掉换行）
-                    last_line = None
-                    for line in f:
-                        if line.strip():
-                            last_line = line.strip()
-                if last_line:
-                    time = datetime.fromisoformat(last_line)
-                else:
-                    time = datetime.now()
-            except Exception:
-                time = datetime.now()
-            return time
-
         newvideo = VideoInfo(
             path=final_path,
             dtype='dm_video',
             file_id=uuid(),                     
             size=os.path.getsize(final_path),
             ctime=datetime.now(),
-            stime=get_live_start_time(start=True),
-            etime=get_live_start_time(start=False),
+            stime=self.get_live_start_time(start=True),
+            etime=self.get_live_start_time(start=False),
             dm_file_id=None,
             duration=meta["duration"],
             segment_id=new_seg_id,
@@ -445,7 +467,36 @@ class LiveEvents(BaseEvents):
         if self.config['common_event_args'].get('auto_clean'):
             clean_msgs = self._check_for_clean()
             ret_msgs += clean_msgs
-        
+
+        # 判断是否加入合集
+        self.bvid=message.bvid
+        sectionId = None
+        dm_video = self.config.get('upload_args', {}).get('dm_video')
+        account=dm_video[0].get('account')
+        if isinstance(dm_video, list) and dm_video:
+            sectionId = dm_video[0].get('sectionId')
+        if sectionId and self.is_add_to_list is False:
+            # 开始加入合集
+            try:
+                add_to_list(self.bvid,sectionId,account)
+                self.is_add_to_list=True
+            except Exception as e:
+                self.logger.error(e)
+
+        # 判断是否写入下播时间到简介里
+        if isinstance(dm_video, list) and dm_video:
+            time_template=dm_video[0].get('desc_offtime')
+            if time_template and self.is_live_end and self.is_desc_offtime is False:
+                end_time=self.get_live_start_time(start=False)
+                result = replace_keywords(
+                    time_template,
+                    {"etime": end_time})
+                try:
+                    add_offlinetime(self.bvid,result,account)
+                    self.is_desc_offtime=True
+                except Exception as e:
+                    self.logger.error(e)
+
         return ret_msgs
 
     def onExit(self, *args, **kwargs) -> None:

@@ -9,7 +9,8 @@ common_event_args:
   auto_clean: True
   # 原视频自动转码
   auto_transcode: False
-  # 必须auto_render为True，且下面的upload_args.dm_video.realtime=false
+  # 必须auto_render为True
+  # 必须upload_args.dm_video.realtime=false
   # 会自动合并弹幕视频（如果auto_upload为True，则会上传合并后的视频）
   # 目的是防止网络短线导致的分段
   auto_merge: True
@@ -92,8 +93,14 @@ upload_args:
   
   # 弹幕视频
   dm_video: 
+    engine: biliuprs
     # 上传账号名称，程序依靠这个来识别不同的账号，如果打算传不同账号就要设置不同的名称
     account: 3546637425182939
+
+    # sectionId为合集号，可写‘shou’或‘leng’，需要去网页f12的edit看合集号是啥；
+    # 7184423是手儿，7184492是冷狗
+    sectionId: 'shou'
+
     # 上传cookies路径，如果设置为空将会保存到./login_info/{ACCOUNT}.json
     cookies: ~
     # 重试次数，如果上传遇到错误将会重试，设置为0表示不重试
@@ -124,8 +131,8 @@ upload_args:
     desc: |
       {STREAMER.NAME}的直播回放
       标题：{TITLE}
-      开播时间：{STIME.YEAR}年{STIME.MONTH}月{STIME.DAY}日{STIME.HOUR}点{STIME.MINUTE}分{STIME.SECOND}秒(CST)
-      下播时间：{ETIME.YEAR}年{ETIME.MONTH}月{ETIME.DAY}日{ETIME.HOUR}点{ETIME.MINUTE}分{ETIME.SECOND}秒(CST)
+      开播时间：{STIME.YEAR:02d}年{STIME.MONTH:02d}月{STIME.DAY:02d}日{STIME.HOUR:02d}点{STIME.MINUTE:02d}分{STIME.SECOND:02d}秒(UTC+8)
+      下播时间：{ETIME.YEAR:02d}年{ETIME.MONTH:02d}月{ETIME.DAY:02d}日{ETIME.HOUR:02d}点{ETIME.MINUTE:02d}分{ETIME.SECOND:02d}秒(UTC+8)
       直播地址：{STREAMER.URL}
       录制工具：https://github.com/SmallPeaches/DanmakuRender
     # 动态内容，可以使用关键字替换
@@ -139,6 +146,8 @@ upload_args:
     no_reprint: 1
     # 是否开启充电? 0-关闭 1-开启
     open_elec: 1
+    # 1开启水印 0关闭水印
+    extra_args: ['--extra-fields', '{"watermark":{"state":1}}']
 
   
   
