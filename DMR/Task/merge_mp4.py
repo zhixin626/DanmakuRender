@@ -2,11 +2,11 @@ import subprocess, os, json
 from pathlib import Path
 import tempfile
 from typing import List, Optional, Tuple, Dict, Union
-import logging
 from datetime import datetime
 import re
 from send2trash import send2trash
 import requests
+import logging
 logger = logging.getLogger(__name__)
 
 def _probe_media(ffprobe: str, path: str):
@@ -65,30 +65,64 @@ def _probe_media(ffprobe: str, path: str):
         "path": str(path),
         "size": os.path.getsize(path) if os.path.exists(path) else None,
     }
-def get_live_start_time(dmfile_path,start=True):
+
+def read_live_time_from_path(path, is_start=True):
+    path = Path(path)
+    logger.debug(f'放置开下播时间txt文件的文件夹是{path}')
+    txt_path = path / ("_livestart_times.txt" if is_start else "_liveend_times.txt")
     try:
-        if start:
-            txt_path = Path(dmfile_path).parent / "_livestart_times.txt"
-        else:
-            txt_path = Path(dmfile_path).parent / "_liveend_times.txt"
-        with open(txt_path, "r", encoding="utf-8") as f:
-            # 取最后一行（strip 去掉换行）
-            last_line = None
-            for line in f:
-                if line.strip():
-                    last_line = line.strip()
-        if last_line:
-            time = datetime.fromisoformat(last_line)
+        if txt_path.exists():
+            with open(txt_path, "r", encoding="utf-8") as f:
+                last_line = None
+                for line in f:
+                    if line.strip():
+                        last_line = line.strip()
+            if last_line:
+                try:
+                    time = datetime.fromisoformat(last_line)
+                except Exception:
+                    time = datetime.now()
+                    if logger:
+                        logger.warning(f"文件 {txt_path} 最后一行 '{last_line}' 解析失败，使用当前时间。")
+                else:
+                    return time
+            else:
+                time = datetime.now()
+                if logger:
+                    logger.warning(f"文件 {txt_path} 内容为空，使用当前时间。")
         else:
             time = datetime.now()
-    except Exception:
+            if logger:
+                logger.warning(f"文件 {txt_path} 不存在，使用当前时间。")
+    except Exception as e:
         time = datetime.now()
+        if logger:
+            logger.warning(f"读取 {txt_path} 出错：{e}，使用当前时间。")
+
     return time
+def format_duration(start: datetime, end: datetime) -> str:
+    delta = end - start
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 0:
+        total_seconds = -total_seconds  # 允许反向计算
+
+    days, rem = divmod(total_seconds, 86400)   # 一天 = 86400 秒
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+
+    if days > 0:
+        return f"{days}天{hours}小时{minutes}分钟"
+    elif hours > 0:
+        return f"{hours}小时{minutes}分钟"
+    elif minutes > 0:
+        return f"{minutes}分钟"
+    else:
+        return f"{seconds}秒"
 
 def _gen_autoname(file_path: Path) -> Path:
     """生成 11月2日_merged[(-NNN)].mp4 的不重名文件路径"""
-    time = get_live_start_time(file_path)
     base_dir=file_path.parent
+    time = read_live_time_from_path(base_dir,is_start=True)
     fname = f"{time.month}月{time.day}日_merged.mp4"
     cand = base_dir / fname
     if cand.exists():
@@ -108,6 +142,7 @@ def merge_amplify_mp4(
     ffmpeg: str = r"tools/ffmpeg.exe",
     ffprobe: str = r"tools/ffprobe.exe",
     return_info: bool = False,   # ← 新增：是否返回媒体信息
+    is_amplify: bool = True,
 ) -> Union[str, Tuple[str, Dict[str, Union[str, int, float, Tuple[int, int]]]]]:
     """
     1 个文件：直接返回原路径；
@@ -133,13 +168,15 @@ def merge_amplify_mp4(
         if src != dst:
             src.rename(dst)
         out_path = str(dst)
+
         # 进行音频增益至-1dB-----------------------------------------------------
-        try:
-            amplified = amplify_to_minus1db(out_path)
-            send2trash(out_path)                                # 删除放入垃圾桶
-            out_path  = amplified
-        except Exception as e:
-            logger.warning(f"amplify 失败，已跳过: {e}")
+        if is_amplify:
+            try:
+                amplified = amplify_to_minus1db(out_path)
+                send2trash(out_path)                                # 删除放入垃圾桶
+                out_path  = amplified
+            except Exception as e:
+                logger.warning(f"amplify 失败，已跳过: {e}")
         # 进行音频增益至-1dB-----------------------------------------------------
 
         if return_info:
@@ -185,12 +222,13 @@ def merge_amplify_mp4(
         subprocess.run(cmd, check=True)
 
         # 进行音频增益至-1dB-------------------------------------------------
-        try:
-            amplified = amplify_to_minus1db(out_path)
-            send2trash(out_path)                                # 删除放入垃圾桶
-            out_path = amplified
-        except Exception as e:
-            logger.warning(f"amplify 失败，已跳过: {e}")
+        if is_amplify:
+            try:
+                amplified = amplify_to_minus1db(out_path)
+                send2trash(out_path)                                # 删除放入垃圾桶
+                out_path = amplified
+            except Exception as e:
+                logger.warning(f"amplify 失败，已跳过: {e}")
         # 进行音频增益至-1dB-------------------------------------------------
 
         if return_info:
@@ -251,7 +289,7 @@ def amplify_to_minus1db(file:str):
     return str(out)
 
 def get_cookies(account):
-    login_json=fR"D:\DanmakuRender\.login_info\{account}.json"
+    login_json=Rf"D:\DanmakuRender\.login_info\{account}.json"
     with open(login_json,'r',encoding='utf-8') as f:
         data=json.load(f)
     cookies={}
@@ -272,7 +310,7 @@ def build_headers():
 def add_to_list(bvid,sectionId,account):
     sectionId_leng=7184492
     sectionId_shou=7184423
-    if isinstance(sectionId, (int, float)):  # 数字直接用
+    if isinstance(sectionId, int):  # 数字直接用
         pass
     elif isinstance(sectionId, str):
         if sectionId.lower() == "shou":
@@ -288,13 +326,16 @@ def add_to_list(bvid,sectionId,account):
 
     cookies=get_cookies(account)
     headers = build_headers()
-    info,cid,aid,title=get_info(bvid,account)
+    info=get_info(bvid,account)
+    video= info['videos'][0]
+    archive= info['archive']
     payload = {
     "sectionId": sectionId,
-    "episodes": [{
-        "title": title, # 合集里的标题
-        "cid": cid,     # 分p视频的id
-        "aid": aid
+    "episodes":
+        [{
+        "title": archive['title'], # 合集里的标题
+        "cid":   video['cid'],     # 分p视频的id
+        "aid":   archive["aid"]
         }]
     }
     params = {"csrf": cookies["bili_jct"]}
@@ -307,22 +348,23 @@ def add_to_list(bvid,sectionId,account):
     else:
         logger.info("失败:", rj)
 
+    reorder_section_once(sectionId,account,mode='last_to_first')
+
 def get_info(bvid,account):
     cookies=get_cookies(account)
     headers = build_headers()
     url_view='https://member.bilibili.com/x/vupre/web/archive/view'
     r1=requests.get(url_view,params={'bvid':bvid},headers=headers, cookies=cookies)
-    info = r1.json()["data"]
-    videos= r1.json()["data"]['videos'][0]
-    cid=videos['cid']
-    aid=videos['aid']
-    title=videos['title']
-    return info,cid,aid,title
+    j = r1.json()
+    if j.get("code") != 0:
+        raise RuntimeError(f"view失败: ")
+    info = j["data"]
+    return info
 
-def add_offlinetime(bvid: str, offline_time: str,account) :
-    def insert_offline_time(desc: str, offline_time: str) -> str:
+def add_livetime(bvid: str, text: str,account) :
+    def insert_after_title(desc: str, text: str) -> str:
         pattern = r"(开播时间：.*(?:\n|$))"
-        insert_text = f"下播时间：{offline_time}\n"
+        insert_text = f"{text}\n"
         # 如果找到了就替换，否则原样返回
         new_desc, count = re.subn(pattern, lambda m: m.group(1) + insert_text, desc)
         if count == 0:
@@ -333,24 +375,22 @@ def add_offlinetime(bvid: str, offline_time: str,account) :
     cookies=get_cookies(account)
     headers = build_headers()
     params = {"csrf": cookies["bili_jct"]}
-    url_view='https://member.bilibili.com/x/vupre/web/archive/view'
     url_edit='https://member.bilibili.com/x/vu/web/edit'
-    r1=requests.get(url_view,params={'bvid':bvid},headers=headers, cookies=cookies)
-    info = r1.json()["data"]
-    arc = info["archive"]
+    info=get_info(bvid,account)
+    archive = info["archive"]
     payload = {
-        "cover": arc["cover"].replace("http:", "").replace("https:", ""),
-        "cover43": arc["cover43"].replace("http:", "").replace("https:", ""),
-        "ai_cover": arc["ai_cover"],
-        "title": arc["title"],
-        "copyright": arc["copyright"],
-        "human_type2": arc["human_type2"]["id"],
-        "tid": arc["tid"],
-        "tag": arc["tag"],
-        "desc": insert_offline_time(arc["desc"],offline_time),
-        "dynamic": arc["dynamic"],
+        "cover": archive["cover"],
+        "cover43": archive["cover43"],
+        "ai_cover": archive["ai_cover"],
+        "title": archive["title"],
+        "copyright": archive["copyright"],
+        "human_type2": archive["human_type2"]["id"],
+        "tid": archive["tid"],
+        "tag": archive["tag"],
+        "desc": insert_after_title(archive["desc"],text),
+        "dynamic": archive["dynamic"],
         "recreate": -1,
-        "interactive": arc["interactive"],
+        "interactive": archive["interactive"],
         "videos": [
             {
                 "filename": v["filename"],
@@ -359,15 +399,15 @@ def add_offlinetime(bvid: str, offline_time: str,account) :
                 "cid": v["cid"]
             } for v in info["videos"]
         ],
-        "aid": arc["aid"],
+        "aid": archive["aid"],
         "handle_staff": False,
-        "mission_id": arc["mission_id"],
-        "is_only_self": arc["is_only_self"],
+        "mission_id": archive["mission_id"],
+        "is_only_self": archive["is_only_self"],
         "watermark": {"state": info["watermark"]["state"]},
-        "no_reprint": arc["no_reprint"],
-        "is_360": arc["is_360"],
-        "dolby": arc["is_dolby"],
-        "lossless_music": arc["lossless_music"],
+        "no_reprint": archive["no_reprint"],
+        "is_360": archive["is_360"],
+        "dolby": archive["is_dolby"],
+        "lossless_music": archive["lossless_music"],
         "new_web_edit": 1,
         "topic_grey": 1,
         "act_reserve_create": 0,
@@ -379,6 +419,91 @@ def add_offlinetime(bvid: str, offline_time: str,account) :
         data=json.dumps(payload).encode("utf-8"))
     rj = r.json()      # 或者：rj = json.loads(r.text)
     if rj.get("code") == 0:
-        logger.info("成功添加下播时间")
+        logger.info("成功添加直播时间到简介")
     else:
         logger.info("失败:", rj)
+
+def reorder_section_once(section_id: int, account: int, mode: str = "first_to_last"):
+    """
+    根据当前 section 的顺序，执行一次“首尾互换”（first_to_last / last_to_first）并提交到 B站接口。
+    :param section_id: 分区ID (sectionId)
+    :param account: 账号ID，用于读取 cookies
+    :param mode: "first_to_last" 或 "last_to_first"
+    :return: 提交后的返回JSON
+    """
+    url_section = "https://member.bilibili.com/x2/creative/web/season/section"
+    url_sort = 'https://member.bilibili.com/x2/creative/web/season/section/edit'
+
+    cookies = get_cookies(account)
+    headers = build_headers()
+
+    # 拉取分区信息
+    r = requests.get(
+        url_section,
+        headers=headers,
+        cookies=cookies,
+        params={'id': section_id}
+    )
+    j = r.json()
+
+    # 修改：增加返回码校验并在失败时记录日志
+    if j.get('code') != 0:
+        logger.error(f"获取分区信息失败: {j}")
+        return j
+
+    data = j.get('data') or {}
+    # 修改：这里兼容 data['sorts'] 和 data['episodes'] 两种字段名
+    episodes = data.get('sorts') or data.get('episodes') or []
+    section = data.get('section') or {}
+    section_id = section.get('id', section_id)  # 如果返回里有，以返回为准
+    season_id = section.get('seasonId')
+
+    if not episodes:
+        logger.error("当前分区无可排序的视频（episodes 为空）")
+        return {'code': -1, 'message': 'no episodes'}
+
+    # 原地定义的 reorder 子函数，基本保持你原逻辑
+    def reorder(mode_local="last_to_first"):
+        if mode_local == "last_to_first":
+            reordered = [episodes[-1]] + episodes[:-1]
+            new_sorts = [{'id': e['id'], 'sort': i + 1} for i, e in enumerate(reordered)]
+            return new_sorts
+        elif mode_local == "first_to_last":
+            reordered = episodes[1:] + [episodes[0]]
+            new_sorts = [{'id': e['id'], 'sort': i + 1} for i, e in enumerate(reordered)]
+            return new_sorts
+        else:
+            # 修改：增加非法 mode 的防御
+            raise ValueError(f"未知的排序模式: {mode_local}")
+
+    payload = {
+        'section': {
+            'id': section_id,
+            'seasonId': season_id,
+            'title': section.get('title', '正片'),
+            'type': section.get('type', 1),
+        },
+        'sorts': reorder(mode)  # 使用入参 mode
+    }
+
+    r2 = requests.post(
+        url_sort,
+        params={"csrf": cookies["bili_jct"]},
+        headers=headers,
+        cookies=cookies,
+        json=payload
+    )
+    # 修改：解析 JSON 并做成功/失败日志
+    try:
+        rj = r2.json()
+    except Exception:
+        logger.error(f"排序提交失败(非JSON响应): {r2.text}")
+        return {'code': -1, 'message': 'non-json response', 'raw': r2.text}
+
+    if rj.get("code") == 0:
+        # 修改：按你的要求增加成功信息
+        logger.info(f"成功调整合集分区顺序:{mode}")
+    else:
+        logger.error(f"调整失败: {rj}")
+
+    return rj

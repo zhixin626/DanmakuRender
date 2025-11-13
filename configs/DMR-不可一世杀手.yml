@@ -78,7 +78,7 @@ download_args:
     # 例如：[虎牙小助手, TwitchBot]
     username: ~
     # 最长弹幕长度，超过此长度的弹幕将被过滤，0表示不限制
-    max_length: 0
+    max_length: 60
   dm_template:
     # 不同类型弹幕的模板
     danmaku: ~
@@ -96,11 +96,6 @@ upload_args:
     engine: biliuprs
     # 上传账号名称，程序依靠这个来识别不同的账号，如果打算传不同账号就要设置不同的名称
     account: 3546637425182939
-
-    # sectionId为合集号，可写‘shou’或‘leng’，需要去网页f12的edit看合集号是啥；
-    # 7184423是手儿，7184492是冷狗
-    sectionId: 'shou'
-
     # 上传cookies路径，如果设置为空将会保存到./login_info/{ACCOUNT}.json
     cookies: ~
     # 重试次数，如果上传遇到错误将会重试，设置为0表示不重试
@@ -127,12 +122,18 @@ upload_args:
     # 标题，可以使用关键字替换
     # 默认的例子：[飞天狙想要努力变胖/直播回放] 晚上七点半比赛 2023年2月24日 （带弹幕版）
     title: '【手儿】{STIME.MONTH}月{STIME.DAY}日直播回放(弹幕版)'
+
+    # sectionId为合集号，可写‘shou’或‘leng’，需要去网页f12的edit看合集号是啥；
+    # 7184423是手儿，7184492是冷狗
+    sectionId: 'shou'
+    add_livetime_todesc: |-
+      开播时间：{STIME.YEAR:02d}年{STIME.MONTH:02d}月{STIME.DAY:02d}日{STIME.HOUR:02d}点{STIME.MINUTE:02d}分
+      下播时间：{ETIME.YEAR:02d}年{ETIME.MONTH:02d}月{ETIME.DAY:02d}日{ETIME.HOUR:02d}点{ETIME.MINUTE:02d}分(UTC+8)
+      直播时长：{TOTALTIME}
     # 简介，可以使用关键字替换
     desc: |
       {STREAMER.NAME}的直播回放
       标题：{TITLE}
-      开播时间：{STIME.YEAR:02d}年{STIME.MONTH:02d}月{STIME.DAY:02d}日{STIME.HOUR:02d}点{STIME.MINUTE:02d}分{STIME.SECOND:02d}秒(UTC+8)
-      下播时间：{ETIME.YEAR:02d}年{ETIME.MONTH:02d}月{ETIME.DAY:02d}日{ETIME.HOUR:02d}点{ETIME.MINUTE:02d}分{ETIME.SECOND:02d}秒(UTC+8)
       直播地址：{STREAMER.URL}
       录制工具：https://github.com/SmallPeaches/DanmakuRender
     # 动态内容，可以使用关键字替换

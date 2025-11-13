@@ -92,7 +92,7 @@ class StreamDownloadTask():
             segment_id=self.segment_id,
             size=os.path.getsize(filename),
             ctime=self.segment_start_time,
-            stime=self.live_start_time,
+            stime=self.live_start_time,    #<<<<<添加！！---------------------------
             duration=duration,
             resolution=(self.width, self.height),
             title=self.room_info['title'],
