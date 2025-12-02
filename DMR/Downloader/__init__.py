@@ -5,7 +5,7 @@ import threading
 
 from DMR.utils import *
 
-class Downloader():
+class Downloader(): # 被上层 class engine()初始化，在 add_plugin()里调用start()
     def __init__(self,
                  pipe:Tuple[queue.Queue, queue.Queue],
                  **kwargs,
@@ -38,7 +38,7 @@ class Downloader():
                 if message.target == 'downloader':
                     if message.event == 'stoptask':
                         self.stoptask(message.data)
-                    elif message.event == 'newtask':
+                    elif message.event == 'newtask': # onReady信息走这里
                         self.newtask(message)
                     elif message.event == 'exit':
                         break
@@ -54,10 +54,10 @@ class Downloader():
         else:
             raise ValueError(f'下载任务 {taskname} 不存在。')
         
-    def newtask(self, message:PipeMessage):
+    def newtask(self, message:PipeMessage):  #这里被onReady信息--> 上面的　 _pipeRecvMonitor调用
         taskname = message.data['taskname']
         dltype = message.data['dltype']
-        config = message.data['config']
+        config = message.data['config'] # 这里的config只是 'download_args'
         if taskname in self.download_tasks:
             raise ValueError(f'下载任务 {taskname} 已存在。')
         
@@ -77,7 +77,7 @@ class Downloader():
 
         self.download_tasks[taskname] = downloader_task(taskname=taskname, send_queue=self.send_queue, **config)
         self.download_tasks[taskname].start()
-        self._pipeSend(event='info', msg=f'下载任务 {taskname} 已启动。', dtype='str', data=taskname)
+        self._pipeSend(event='info', msg=f'下载任务 {taskname} 已启动。', dtype='str', data=taskname) # 这里会写入log file
         
     def start(self):
         self.stoped = False

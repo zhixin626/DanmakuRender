@@ -11,8 +11,9 @@ from DMR.Downloader.Danmaku import DanmakuDownloader
 from DMR.LiveAPI import *
 from DMR.utils import *
 from pathlib import Path
+from DMR.utils.render_with_manimgl import rendercover_with_manimgl_bg,render_zuozuovideo_with_manimgl_bg
 
-class StreamDownloadTask():
+class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中初始化
     def __init__(self, 
                  url, 
                  output_dir, 
@@ -28,9 +29,15 @@ class StreamDownloadTask():
                  advanced_video_args:dict=None,
                  advanced_dm_args:dict=None,
                  engine='ffmpeg', 
-                 debug=False, 
+                 debug=False,
+                 is_render_cover=False,
+                 # is_render_zuozuo_video=False,
+                 cover_name_color="#111111",
                  **kwargs
         ) -> None:
+        self.is_render_cover=is_render_cover
+        # self.is_render_zuozuo_video=is_render_zuozuo_video
+        self.cover_name_color=cover_name_color
         self.taskname = taskname
         self.url = url
         self.plat, self.rid = split_url(url)
@@ -274,53 +281,72 @@ class StreamDownloadTask():
         else:
             restart_interval_min, restart_interval_step, restart_interval_max = 0, 10, 60
         start_check_interval = self.advanced_video_args.get('start_check_interval', 60)  # 开播检测时间
-        stop_check_interval = self.advanced_video_args.get('stop_check_interval', 30)   # 下播检测间隔
+        stop_check_interval  = self.advanced_video_args.get('stop_check_interval' , 30)  # 下播检测间隔
         
         self.sess_id = uuid(8)
         self.segment_id = 1
 
-        in_session = False  # [MOD] 会话态：是否已进入本次直播的录制会话
+        in_session = False  # 未进入本次直播
 
         if not self.liveapi.Onair():
             self._pipeSend('liveend', '直播未开始', )
-            live_end = True
+            live_end = True  # 直播未开始（彻底下播）
             time.sleep(start_check_interval)
 
         while self.loop:
-            if not self.liveapi.Onair():
+            if not self.liveapi.Onair(): # 不在直播状态（未开播or已下播）
                 restart_cnt = 0
-                if live_end:
-                    # print(f"[检测][{self.taskname}] 未开播")
-                    in_session = False  # [MOD] 保证初始为非会话态
+                if in_session and not live_end and not record_liveend_time:  # 开播了但是不在直播状态 and 没有彻底下播 --> 刚下播
+                    # 记录结束时间
+                    self.logger.info(f"[{self.taskname}]下播,本轮录制结束")
+                    out_dir = Path(self.output_dir)
+                    now = datetime.now()
+                    with open(out_dir / "_liveend_times.txt", "a", encoding="utf-8", newline="\n") as f:
+                        f.write(now.isoformat(timespec="seconds") + "\n")
+                    record_liveend_time=True
+
+                if live_end:  # 不在直播状态 and 彻底下播
                     time.sleep(start_check_interval)
                     stop_waited += start_check_interval
-                else:
+
+                else:        # 不在直播状态 and 没有彻底下播
                     time.sleep(stop_check_interval)
                     stop_waited += stop_check_interval
 
-                if stop_waited > stop_wait_time and not live_end:
-                    live_end = True
-                    # self.logger.info(f"[{self.taskname}] 检测到直播已结束。")
+                if stop_waited > stop_wait_time and not live_end: # 没有彻底下播，但超过了检测彻底下播的时间
+                    live_end = True                               # 标记为 彻底下播
+                    in_session = False                            # 标记为 未进入了本次直播（退出本次直播）（未进入下一次直播）
                     self._pipeSend('liveend', '直播真的结束了', data=self.sess_id)
                     self.sess_id = uuid(8)
                     self.segment_id = 1
+                    # if self.is_render_zuozuo_video:
+                    #     render_zuozuovideo_with_manimgl_bg()
                 continue
 
-            # self.logger.info(f"[{self.taskname}] 正在直播，开始录制")
-
-            try:
-                stop_waited = 0
-                live_end = False
-                self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id)
+            try: # 在直播状态（开播）可能是刚开播，也肯能是录制过程出错情况下还在播
+                stop_waited         = 0
+                live_end            = False
+                record_liveend_time = False
                 # 记录开始时间
-                if not in_session:  # [MOD] 仅首次进入会话时
-                    in_session = True  # [MOD] 标记已进入会话
-                    out_dir = Path(self.output_dir+'（弹幕版）')
+                if not in_session:  # 在直播状态，没有进入本次直播 ---> 刚开播
+                    self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id)
+
+                    in_session = True  # 标记为进入了本次直播
+                    out_dir = Path(self.output_dir)
                     out_dir.mkdir(parents=True, exist_ok=True)
                     now = datetime.now()  # 注意这里用的就是 datetime.now()
                     self.live_start_time=now
                     with open(out_dir / "_livestart_times.txt", "a", encoding="utf-8", newline="\n") as f:
                         f.write(now.isoformat(timespec="seconds") + "\n")
+
+                    if self.is_render_cover: # 渲染封面
+                        _name=str(out_dir.stem)
+                        _time=f"{now.month}月{now.day}日"
+                        _color=self.cover_name_color
+                        rendercover_with_manimgl_bg(_name,_time,_color,output_dir=self.output_dir)
+
+                else: # 在直播状态，进入本次直播 ---> 录制过程出错情况
+                    self._pipeSend('default', '重启录制', dtype='str', data=self.sess_id)
 
                 self.start_once()
                 if self.liveapi.Onair():
@@ -328,27 +354,21 @@ class StreamDownloadTask():
             except KeyboardInterrupt:
                 self.stop()
                 exit(0)
-            except Exception as e:
+            except Exception as e: # 这一段就是发送出错信息，不干任何事
                 if self.liveapi.Onair():
                     self.logger.info(f"[异常][{self.taskname}]  录制过程中出错：{e}")
                     self.logger.info(f"[重启][{self.taskname}]  第 {restart_cnt + 1} 次重启，等待后重新开始录制...")
                     self.logger.exception(e)
                     self.stop_once()
-                    self._pipeSend('liveerror', f'录制过程出错:{e}', dtype='Exception', data=e)
+                    self._pipeSend('liveerror', f'录制过程出错:{e}', dtype='Exception', data=e) # 只会被liveevents发送log信息
                     time.sleep(min(restart_interval_min + restart_interval_step * restart_cnt, restart_interval_max))
                     restart_cnt += 1
                     continue
                 else:
                     self.logger.debug(e)
 
-            self.logger.info(f"[{self.taskname}]下播,本轮录制结束")
-            self.logger.debug(f'{self.taskname} stop once.')
-            # 记录结束时间
-            out_dir = Path(self.output_dir+'（弹幕版）')
-            now = datetime.now()
-            with open(out_dir / "_liveend_times.txt", "a", encoding="utf-8", newline="\n") as f:
-                        f.write(now.isoformat(timespec="seconds") + "\n")
 
+            self.logger.debug(f'{self.taskname} stop once.')
             self.stop_once()
 
 

@@ -8,15 +8,19 @@ common_event_args:
   # 启动自动清理
   auto_clean: True
   # 原视频自动转码
-  auto_transcode: False
-  # 必须auto_render为True
-  # 必须upload_args.dm_video.realtime=false
-  # 会自动合并弹幕视频（如果auto_upload为True，则会上传合并后的视频）
-  # 目的是防止网络短线导致的分段
-  auto_merge: True
+  auto_transcode: false
+
+  merge_args:
+    merge_type: ["dm_video"]
+    is_amplify: True
 
 # 下载参数
 download_args:
+  # 用manimgl渲染封面，默认放于output_dir文件夹，名称为cover.png
+  is_render_cover: True
+  # 封面的任务名(out_dir的名字)的颜色 "#DC75CD" light_pink ，"#58C4DD" blue_c ，"#FFFF00" yellow_c
+  cover_name_color: "#58C4DD"
+
   # 下载类型
   dltype: live
   # 直播间链接
@@ -24,9 +28,9 @@ download_args:
   # 录制输出文件夹，设置为空则使用任务名称作为文件夹
   output_dir: ./不可一世杀手
   # 录制文件名称格式，可使用关键字替换，默认效果：飞天狙想要努力变胖-2023年3月1日20点30分，注意这里不能含有冒号，斜杠等非法字符！！
-  output_name: '手-{CTIME.MONTH}月{CTIME.DAY}日{CTIME.HOUR:02d}点{CTIME.MINUTE:02d}分'
+  output_name: '手{CTIME.MONTH}月{CTIME.DAY}日{CTIME.HOUR:02d}点{CTIME.MINUTE:02d}分'
   # 录播分段时间（秒），默认一个小时
-  segment: 21600
+  segment: 18000
   # 录制程序引擎，可选ffmpeg, streamgears 或者 streamlink
   # 在使用streamgears作为录制引擎时不支持录制B站用hls流
   # 建议PC推流的直播使用ffmpeg录制，手机推流的直播使streamgears录制
@@ -118,7 +122,7 @@ upload_args:
     # 分区号，分区参考 https://biliup.github.io/tid-ref.html
     tid: 65
     # 封面，指向本地文件地址
-    cover: ''
+    cover: "D://DanmakuRender//不可一世杀手//cover.png"
     # 标题，可以使用关键字替换
     # 默认的例子：[飞天狙想要努力变胖/直播回放] 晚上七点半比赛 2023年2月24日 （带弹幕版）
     title: '【手儿】{STIME.MONTH}月{STIME.DAY}日直播回放(弹幕版)'
@@ -127,18 +131,18 @@ upload_args:
     # 7184423是手儿，7184492是冷狗
     sectionId: 'shou'
     add_livetime_todesc: |-
-      开播时间：{STIME.YEAR:02d}年{STIME.MONTH:02d}月{STIME.DAY:02d}日{STIME.HOUR:02d}点{STIME.MINUTE:02d}分
       下播时间：{ETIME.YEAR:02d}年{ETIME.MONTH:02d}月{ETIME.DAY:02d}日{ETIME.HOUR:02d}点{ETIME.MINUTE:02d}分(UTC+8)
       直播时长：{TOTALTIME}
     # 简介，可以使用关键字替换
     desc: |
       {STREAMER.NAME}的直播回放
       标题：{TITLE}
+      开播时间：{STIME.YEAR:02d}年{STIME.MONTH:02d}月{STIME.DAY:02d}日{STIME.HOUR:02d}点{STIME.MINUTE:02d}分
       直播地址：{STREAMER.URL}
       录制工具：https://github.com/SmallPeaches/DanmakuRender
     # 动态内容，可以使用关键字替换
     dynamic: |
-      松弟们!手儿{STIME.YEAR}年{STIME.MONTH}月{STIME.DAY}日的直播回放来了!
+      松弟萌，手儿{STIME.YEAR}年{STIME.MONTH}月{STIME.DAY}日的直播回放来了!
     # 标签（一定要有！多个标签逗号分割）
     tag: '直播回放,不可一世杀手'
     # 延迟发布，单位秒，如果需要的话至少设置14400秒（4个小时）
@@ -157,13 +161,13 @@ clean_args:
   all:
     # 清理方法，可选copy（复制），move（移动），delete（删除），默认不清理
     # 注意：清理过程不可逆！
-    method: delete
+    method: send2trash
     # 目标文件夹，文件夹不存在会自动创建，可以使用关键字替换
     dest: ~
     # 清理延迟（秒），默认86400（24小时）
-    delay: 86400
-    # 清理弹幕视频时同时清理原文件，默认false
+    delay: 43200
+    # 清理转码后的mp4，默认false
     # 请注意，此功能应该只在不上传原文件的情况下使用，否则会导致上传失败
-    w_srcfile: True
-    # 清理源文件时同时清理转码前文件（如果有的话），默认true
+    w_srcfile: false
+    # 清理flv和ass，默认true
     w_srcpre: True

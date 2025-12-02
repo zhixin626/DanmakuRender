@@ -10,7 +10,7 @@ from .engine import DMREngine
 from .Config import Config
 
 from IPython import embed
-class DanmakuRender():
+class DanmakuRender(): # 被 main.py直接 DanmakuRender(config, logger=logger, debug=args.debug) 并 start()
     def __init__(self, config:Config, **kwargs) -> None:
         self.logger = logging.getLogger('DMR')
         self.config = config
@@ -20,20 +20,24 @@ class DanmakuRender():
         self.engine = DMREngine()
 
     def start(self):
+        # engine初始化，给engine添加插件，给engine添加回放任务
         self.stoped = False
         os.makedirs('.temp', exist_ok=True)
         
         self.logger.debug(f'Global Config:\n{json.dumps(self.config.global_config, indent=4, ensure_ascii=False)}')
+        # 重点关注 self.config.replay_config（是个字典）（里面有common_event_args）
         self.logger.debug(f'Replay Config:\n{json.dumps(self.config.replay_config, indent=4, ensure_ascii=False)}')
+
         self.engine.start()
         plugin_enabled = self.config.get_config('dmr_engine_args')['enabled_plugins']
+
         for plugin_name in plugin_enabled:
             plugin_config = self.config.get_config(plugin_name+'_kernel_args')
             self.engine.add_plugin(plugin_name, plugin_config)
 
         for taskname in self.config.get_replaytasks():
             replay_config = self.config.get_replay_config(taskname)
-            self.engine.add_task(taskname, replay_config)
+            self.engine.add_task(taskname, replay_config)  # 调用engine的add_task
 
         threading.Thread(target=self._monintor, daemon=True).start()
 

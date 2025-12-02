@@ -113,16 +113,20 @@ class Bilibili(DMAPI):
                         'WELCOME': 'enter',
                         'NOTICE_MSG': 'broadcast',
                         'SUPER_CHAT_MESSAGE': 'super_chat',  # 新增此行
-                    }.get(j.get('cmd'), 'other')
+                    }.get(j.get('cmd'), 'other')  # 类型判断
 
-                    if 'DANMU_MSG' in j.get('cmd'):
+                    if 'DANMU_MSG' in j.get('cmd'): # 类型判断的兜底
                         msg["msg_type"] = "danmaku"
 
-                    if msg["msg_type"] == "danmaku":
+                    if msg["msg_type"] == "danmaku": # 普通弹幕类型
                         msg["name"] = j.get("info", ["", "", ["", ""]])[2][1] or j.get(
                             "data", {}
                         ).get("uname", "")
                         msg["color"] = f"{j.get('info', [[0, 0, 0, 16777215]])[0][3]:06x}"
+
+                        if msg.get("color") == "e33fff": # 把紫色改浅一点
+                            msg["color"] = "e866ff"
+
                         msg["content"] = j.get("info")[1]
                         try:
                             msg['timestamp'] = j.get('info')[0][4]/1000
@@ -136,7 +140,7 @@ class Bilibili(DMAPI):
                         except:
                             pass
 
-                    elif msg['msg_type'] == 'interactive_danmaku':
+                    elif msg['msg_type'] == 'interactive_danmaku': # 这个分支没用！
                         msg["msg_type"] = "danmaku"
                         msg['name'] = j.get('data', {}).get('uname', '')
                         msg['content'] = j.get('data', {}).get('msg', '')

@@ -1,7 +1,5 @@
 import html
 import random
-import subprocess
-import json
 import time
 import re
 import os
@@ -10,8 +8,6 @@ import glob
 from easydict import EasyDict as edict
 from os.path import exists, abspath, splitext, join
 from uuid import uuid1
-from datetime import datetime
-
 
 __all__ = [
     'rename_safe',

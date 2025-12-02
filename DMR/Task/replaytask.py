@@ -7,8 +7,9 @@ from .liveevents import LiveEvents
 from ..utils import *
 
 
-class ReplayTask():
+class ReplayTask(): # 被 class DMREngine() 初始化 并在add_task里调用 start()
     def __init__(self, taskname, config:dict, pipe:Tuple[queue.Queue, queue.Queue]):
+        # 这里传入的config就是每一个任务的config
         self.send_queue, self.recv_queue = pipe
         self.taskname = taskname
         self.config = config
@@ -17,7 +18,7 @@ class ReplayTask():
         self._event_dict = {}
         self.stoped = True
 
-    def add_event(self, event, trigger):
+    def add_event(self, event, trigger): # 被自身的start函数调用 用来生成self._event_dict
         if self._event_dict.get(event) != None:
             self._event_dict[event].append(trigger)
         self._event_dict[event] = [trigger]
@@ -36,7 +37,7 @@ class ReplayTask():
                     funcs = self._event_dict.get(event) or self._event_dict.get(msg.event)
                     if isinstance(funcs, list):
                         for func in funcs:
-                            ret_msgs = func(msg)
+                            ret_msgs = func(msg)  # onReady会返回一个message
                             if not ret_msgs:
                                 continue
                             elif isinstance(ret_msgs, list):
@@ -70,10 +71,10 @@ class ReplayTask():
                 self.logger.error(f'Message:{msg} raise an error: {e}')
                 self.logger.exception(e)
 
-    def start(self):
+    def start(self): # 被上层 engine()的 add_task函数调用
         self.stoped = False
         self._piperecvprocess = threading.Thread(target=self._pipeRecvMonitor, daemon=True)
-        self._piperecvprocess.start()
+        self._piperecvprocess.start()  # 开起聆听
 
         for event, trigger in self.event_class.event_dict.items():
             if isinstance(trigger, (list, tuple, set)):

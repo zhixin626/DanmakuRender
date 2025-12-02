@@ -110,6 +110,9 @@ class Cleaner():
                     elif method == 'delete':
                         from .delete import delete
                         delete.delete(f)
+                    elif method == 'send2trash':
+                        from send2trash import send2trash
+                        send2trash(f)
                     elif method == 'custom':
                         from ..utils import runcmd
                         cmds = [replace_keywords(str(x), file) for x in clean_args.get('command')]

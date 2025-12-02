@@ -17,3 +17,14 @@ replay-**.yml
 **.xml
 *.yml
 \-*
+*.zip
+*.part
+_livestart_times.txt
+_liveend_times.txt
+佐佐酱/
+*（弹幕版）/
+*（转码后）/
+不可以是杀手/
+月亮3/
+佐佐酱/
+少年不太冷/

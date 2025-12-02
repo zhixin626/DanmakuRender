@@ -545,6 +545,10 @@ clean_args:
     delay: 0
     w_srcfile: False
     w_srcpre: True
+  send2trash:
+    delay: 43200
+    w_srcfile: False
+    w_srcpre: True
 
 webservice_kernel_args:
   web_api: True

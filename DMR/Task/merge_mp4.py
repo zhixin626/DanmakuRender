@@ -6,10 +6,10 @@ from datetime import datetime
 import re
 from send2trash import send2trash
 import requests
-import logging
+import logging,time,threading
 logger = logging.getLogger(__name__)
 
-def _probe_media(ffprobe: str, path: str):
+def probe_media(ffprobe: str, path: Union[str,Path]):
     """
     用 ffprobe 获取基本信息：duration（秒，float），分辨率（width,height），
     以及格式/比特率等。字段缺失时做容错。
@@ -22,7 +22,7 @@ def _probe_media(ffprobe: str, path: str):
         "-show_entries", "stream=width,height",
         "-show_entries", "format=duration,bit_rate,format_name",
         "-of", "json",
-        path
+        str(path)
     ]
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
@@ -68,7 +68,7 @@ def _probe_media(ffprobe: str, path: str):
 
 def read_live_time_from_path(path, is_start=True):
     path = Path(path)
-    logger.debug(f'放置开下播时间txt文件的文件夹是{path}')
+    # logger.debug(f'放置开下播时间txt文件的文件夹是{path}')
     txt_path = path / ("_livestart_times.txt" if is_start else "_liveend_times.txt")
     try:
         if txt_path.exists():
@@ -119,10 +119,9 @@ def format_duration(start: datetime, end: datetime) -> str:
     else:
         return f"{seconds}秒"
 
-def _gen_autoname(file_path: Path) -> Path:
+def autoname(base_dir: Path,stime:datetime) -> Path:
     """生成 11月2日_merged[(-NNN)].mp4 的不重名文件路径"""
-    base_dir=file_path.parent
-    time = read_live_time_from_path(base_dir,is_start=True)
+    time = stime
     fname = f"{time.month}月{time.day}日_merged.mp4"
     cand = base_dir / fname
     if cand.exists():
@@ -138,110 +137,79 @@ def _gen_autoname(file_path: Path) -> Path:
 
 def merge_amplify_mp4(
     mp4_list: List[str],
-    out_path: Optional[str] = None,
+    stime: datetime,
     ffmpeg: str = r"tools/ffmpeg.exe",
     ffprobe: str = r"tools/ffprobe.exe",
-    return_info: bool = False,   # ← 新增：是否返回媒体信息
     is_amplify: bool = True,
-) -> Union[str, Tuple[str, Dict[str, Union[str, int, float, Tuple[int, int]]]]]:
-    """
-    1 个文件：直接返回原路径；
-    多个文件：使用 concat demuxer 极速合并（-c copy，不重编码）。
-    当 return_info=True 时，返回 (out_path, info_dict)；否则仅返回 out_path。
-    """
-    inputs = [str(Path(p)) for p in mp4_list if p]
+    remover=True,
+    ):
+
+    inputs = [Path(p) for p in mp4_list if p]
     if not inputs:
         raise ValueError("mp4_list 为空")
 
+    src = inputs[0]
+    base_dir = src.parent
+    new_name = autoname(base_dir, stime)
+    out_path = new_name
+
     # === 单文件分支
     if len(inputs) == 1:
-        src = Path(inputs[0]).resolve()
-        base_dir = src.parent
-
-        # 没给 out_path 就用 _gen_autoname(base_dir)
-        if not out_path:
-            dst = _gen_autoname(src)
-        else:
-            dst = Path(out_path)
-
-        # 改名
-        if src != dst:
-            src.rename(dst)
-        out_path = str(dst)
-
+        src.rename(out_path)
         # 进行音频增益至-1dB-----------------------------------------------------
         if is_amplify:
-            try:
-                amplified = amplify_to_minus1db(out_path)
-                send2trash(out_path)                                # 删除放入垃圾桶
-                out_path  = amplified
-            except Exception as e:
-                logger.warning(f"amplify 失败，已跳过: {e}")
-        # 进行音频增益至-1dB-----------------------------------------------------
+            out_path = amplify_to_minus1db(out_path,remover=True)
 
-        if return_info:
-            info = _probe_media(ffprobe, out_path)
-            return out_path, info
-        return out_path
+        info = probe_media(ffprobe, out_path)
+
+        return str(out_path),info
 
     # === 多文件分支
-    if out_path is None:
-        out_path = str(_gen_autoname( Path(inputs[0]).resolve() ))
     else:
-        out_path = str(Path(out_path))
-
-    # —— 生成 filelist（必须是“可被其他进程读取的命名临时文件”）——
-    tmp = tempfile.NamedTemporaryFile(
-        prefix="ff_filelist_",
-        suffix=".txt",
-        mode="w",
-        encoding="utf-8",
-        delete=False,    # Windows 下要先关闭句柄
-    )
-    try:
-        for p in inputs:
-            tmp.write(f"file '{Path(p).resolve().as_posix()}'\n")
-        tmp.flush()
-        filelist = tmp.name
-    finally:
-        tmp.close()  # 先关闭，让 FFmpeg 能读取
-
-    try:
-        cmd = [
-            ffmpeg, "-y",
-            "-f", "concat",
-            "-loglevel", "error",
-            "-safe", "0",
-            "-i", filelist,
-            "-c", "copy",
-            "-movflags", "+faststart",
-            out_path,
-        ]
-        # 正确的 logging 用法（占位符），避免你之前遇到的 logging 报错
-        logger.debug("merge_mp4 cmd: %s", cmd)
-        subprocess.run(cmd, check=True)
-
-        # 进行音频增益至-1dB-------------------------------------------------
-        if is_amplify:
-            try:
-                amplified = amplify_to_minus1db(out_path)
-                send2trash(out_path)                                # 删除放入垃圾桶
-                out_path = amplified
-            except Exception as e:
-                logger.warning(f"amplify 失败，已跳过: {e}")
-        # 进行音频增益至-1dB-------------------------------------------------
-
-        if return_info:
-            info = _probe_media(ffprobe, out_path)
-            return out_path, info
-        return out_path
-
-    finally:
-        # 删除临时清单
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="ff_filelist_",
+            suffix=".txt",
+            mode="w",
+            encoding="utf-8",
+            delete=False,    # Windows 下要先关闭句柄
+        )
         try:
+            for p in inputs:
+                tmp.write(f"file '{Path(p).resolve().as_posix()}'\n")
+            tmp.flush()
+            filelist = tmp.name
+        finally:
+            tmp.close()  # 先关闭，让 FFmpeg 能读取
+
+        try:
+            cmd = [
+                ffmpeg, "-y",
+                "-f", "concat",
+                "-loglevel", "error",
+                "-safe", "0",
+                "-i", filelist,
+                "-c", "copy",
+                "-movflags", "+faststart",
+                out_path,
+            ]
+            # 正确的 logging 用法（占位符），避免你之前遇到的 logging 报错
+            logger.debug("merge_mp4 cmd: %s", cmd)
+            subprocess.run(cmd, check=True)
+
+            # 进行音频增益至-1dB-------------------------------------------------
+            if is_amplify:
+                out_path = amplify_to_minus1db(out_path,remover=True)
+
+            if remover:
+                for video in inputs: send2trash(str(video))
+
+            info = probe_media(ffprobe, out_path)
+
+            return str(out_path),info
+
+        finally:
+
             os.remove(filelist)
-        except OSError:
-            pass
 
 def detect(file:str):
     cmd = [
@@ -258,21 +226,21 @@ def detect(file:str):
         raise RuntimeError("未检测到 max_volume（可能没有音轨或滤镜未运行）")
     return float(m.group(1))
 
-def amplify_to_minus1db(file:str):
-    peak = detect(file) # 检测最高音量max_volume
+def amplify_to_minus1db(file:Path,remover=True) -> Path:
+    peak = detect(str(file)) # 检测最高音量max_volume
     if peak is None:
         raise RuntimeError("未检测到 max_volume")
 
     gain_db = -1 - peak
     if gain_db < 0:
         gain_db = 0
-    out = Path(file).with_name(Path(file).stem + "_amplified.mp4")
+    out = file.with_name(file.stem + "_amplified.mp4")
     cmd = [
         'tools/ffmpeg.exe',
         '-y',                # ← 覆盖输出，避免交互
         '-nostdin',          # ← 不读取标准输入
         '-hide_banner',
-        '-i', file,
+        '-i', str(file),
         '-af', f'volume={gain_db:.2f}dB,alimiter=limit=-1dB',
         '-c:v', 'copy',
         '-c:a', 'aac',
@@ -286,7 +254,9 @@ def amplify_to_minus1db(file:str):
         logger.error("ffmpeg 失败：%s", result.stderr.strip().splitlines()[-1] if result.stderr else "未知错误")
         raise RuntimeError("ffmpeg 执行失败")
     logger.info(f"检测峰值 {peak:.2f} dBFS → 放大 {gain_db:.2f} dB → 输出: {out}")
-    return str(out)
+    if remover:
+        send2trash(str(file))
+    return out
 
 def get_cookies(account):
     login_json=Rf"D:\DanmakuRender\.login_info\{account}.json"
@@ -299,6 +269,7 @@ def get_cookies(account):
         if name and value:
             cookies[name]=value
     return cookies
+
 def build_headers():
     return {
     "Content-Type": "application/json; charset=UTF-8",
@@ -345,10 +316,10 @@ def add_to_list(bvid,sectionId,account):
     rj=r.json()
     if rj.get("code") == 0:
         logger.info(f"成功添加到合集{sectionId}")
+        reorder_section_once(sectionId,account,mode='last_to_first')
     else:
-        logger.info("失败:", rj)
+        logger.info(f"失败添加到合集:{rj}")
 
-    reorder_section_once(sectionId,account,mode='last_to_first')
 
 def get_info(bvid,account):
     cookies=get_cookies(account)
@@ -462,7 +433,6 @@ def reorder_section_once(section_id: int, account: int, mode: str = "first_to_la
         logger.error("当前分区无可排序的视频（episodes 为空）")
         return {'code': -1, 'message': 'no episodes'}
 
-    # 原地定义的 reorder 子函数，基本保持你原逻辑
     def reorder(mode_local="last_to_first"):
         if mode_local == "last_to_first":
             reordered = [episodes[-1]] + episodes[:-1]
@@ -473,7 +443,6 @@ def reorder_section_once(section_id: int, account: int, mode: str = "first_to_la
             new_sorts = [{'id': e['id'], 'sort': i + 1} for i, e in enumerate(reordered)]
             return new_sorts
         else:
-            # 修改：增加非法 mode 的防御
             raise ValueError(f"未知的排序模式: {mode_local}")
 
     payload = {
@@ -507,3 +476,123 @@ def reorder_section_once(section_id: int, account: int, mode: str = "first_to_la
         logger.error(f"调整失败: {rj}")
 
     return rj
+
+def sync_section_episode_titles(account: int, section_id: int,debug=False):
+    """
+    将合集某个分P列表中，列表标题与视频标题不一致的部分，
+    自动把“列表标题”改成“视频标题”（只处理找到的第一个不一致的）。
+    """
+    url_section = "https://member.bilibili.com/x2/creative/web/season/section"
+
+    # 公共部分：cookies / headers
+    cookies = get_cookies(account)
+    headers = build_headers()
+
+    # ---------- 内部工具函数 ----------
+
+    def _fetch_section_data(sec_id: int) -> dict:
+        """获取分区(section)的完整数据结构"""
+        r = requests.get(
+            url_section,
+            headers=headers,
+            cookies=cookies,
+            params={"id": sec_id},
+        )
+        r.raise_for_status()
+        j = r.json()
+        data = j.get("data") or {}
+        return data
+
+    def _build_sorts(episodes: list) -> list:
+        """构造提交用的 sorts 列表"""
+        sorts = []
+        for idx, ep in enumerate(episodes, start=1):
+            sorts.append({
+                "id": ep.get("id"),
+                "sort": idx,
+            })
+        return sorts
+
+    def _set_list_title_same_as_video_title(episode: dict, episodes: list):
+        """把该分P的列表标题改成视频标题"""
+        url_episode_edit = "https://member.bilibili.com/x2/creative/web/season/section/episode/edit"
+
+        payload = {
+            "aid": episode.get("aid"),
+            "cid": episode.get("cid"),
+            "id": episode.get("id"),
+            "order": episode.get("order"),
+            "seasonId": episode.get("seasonId"),
+            "sectionId": episode.get("sectionId"),
+            "title": episode.get("archiveTitle"),   # 关键：改成视频标题
+            "sorts": _build_sorts(episodes),        # 整个分P的排序一起带上
+        }
+
+        r = requests.post(
+            url_episode_edit,
+            headers=headers,
+            cookies=cookies,
+            params={"csrf": cookies["bili_jct"]},
+            data=json.dumps(payload).encode("utf-8"),
+        )
+        r.raise_for_status()
+
+        # 2. 逻辑层检查（非常重要）
+        res = r.json()
+        if res.get("code") != 0:
+            raise RuntimeError(
+                f"B站返回错误: code={res.get('code')}, message={res.get('message')}"
+            )
+
+        return True   # 明确返回成功
+
+    # ---------- 主流程 ----------
+
+    data = _fetch_section_data(section_id)
+    episodes = data.get("episodes") or []
+
+    if not episodes:
+        logger.info(f"section_id={section_id} 下没有分P episodes")
+        return
+
+    changed = False
+
+    for idx, ep in enumerate(episodes):
+        archive_title = ep.get("archiveTitle")
+        list_title = ep.get("title")
+
+        if archive_title == list_title:
+            continue
+
+        logger.info(f"第 {idx} 个视频标题不一致")
+        if debug:
+            print(f"第 {idx} 个视频标题不一致")
+        try:
+            time.sleep(3)
+            _set_list_title_same_as_video_title(ep, episodes)
+            logger.info(f"已将列表标题:{list_title},改为视频标题:{archive_title}")
+            if debug:
+                print(f"已将列表标题:{list_title},改为视频标题:{archive_title}")
+        except Exception as e:
+            logger.error(f"修改失败: {e}")
+            if debug:
+                print(f"修改失败: {e}")
+
+        changed = True
+
+    if not changed:
+        logger.info("所有分P的列表标题都已经和视频标题一致")
+        if debug:
+            print("所有分P的列表标题都已经和视频标题一致")
+
+def sync_section_episode_titles_bg(account: int, section_id: int,debug=False):
+    t = threading.Thread(
+        target=sync_section_episode_titles,
+        args=(account, section_id),
+        kwargs={"debug": debug},
+        daemon=True,  # 后台线程，主进程退出时无需等待它
+    )
+    t.start()
+
+# if __name__ == '__main__':
+#     sync_section_episode_titles(3546637425182939,7517357,debug=True)

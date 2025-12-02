@@ -26,16 +26,16 @@ class SimpleDanmaku():
         self.color = color      # 弹幕颜色，6位16进制颜色码
         self.content = content  # 弹幕内容，可能是纯文本或其他格式
 
-        for key, value in kwargs.items():
+        for key, value in kwargs.items(): # dm.uname 将 kwargs 中的任意键值对动态添加为对象属性
             self.__dict__[key] = value
 
         # text属性表示最终显示的字符串
         self.text = text if text is not None else self.content
 
-    def __getitem__(self, key):
+    def __getitem__(self, key): # dm["uname"] 这是让你的对象可以像字典一样用中括号访问字段
         return self.__dict__[key]
 
-    def __iter__(self):
+    def __iter__(self): # 可以遍历 for k, v in dm: print(k, v)
         for key, value in self.__dict__.items():
             yield key, value
 

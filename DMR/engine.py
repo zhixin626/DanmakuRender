@@ -11,7 +11,7 @@ from .WebService import WebService
 from .utils import *
 
 
-class DMREngine():
+class DMREngine(): # 被上层__init__调用 先被init初始化，后add_plugin，add_task
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.task_dict = {}
@@ -19,7 +19,7 @@ class DMREngine():
         self.recv_queue = None
         self.stoped = True
         
-    def pipeSend(self, message:PipeMessage):
+    def pipeSend(self, message:PipeMessage):  # 第一次是被自己的add_task调用，发送给replay_task一个ready信息
         target = message.target
         self.logger.debug(message)
         if target == 'engine':
@@ -36,7 +36,7 @@ class DMREngine():
             self.plugin_dict['uploader']['send_queue'].put(message)
         elif target == 'cleaner':
             self.plugin_dict['cleaner']['send_queue'].put(message)
-        elif target == 'downloader':
+        elif target == 'downloader':  # onReady 的信息会走这里（target=downloader）
             self.plugin_dict['downloader']['send_queue'].put(message)
         else:
             # raise Exception(f'Unknown target {target}.')
@@ -54,12 +54,12 @@ class DMREngine():
                     elif message.event == 'deltask':
                         self.del_task(message.data)
                 else:
-                    self.pipeSend(message)
+                    self.pipeSend(message) # onReady 的信息会走这里（target=downloader）
             except Exception as e:
                 self.logger.error(f'Message:{message} raise an error.')
                 self.logger.exception(e)
     
-    def start(self):
+    def start(self): # 被上层__init__调用（1）
         self.stoped = False
         self.recv_queue = queue.Queue()
         self._piperecvprocess = threading.Thread(target=self._pipeRecvMonitor, daemon=True)
@@ -79,7 +79,7 @@ class DMREngine():
                 self.pipeSend(PipeMessage('engine', f'replay/{name}', 'ready'))
                 self.logger.debug(f'Task {name} started.')
 
-    def add_plugin(self, name, config):
+    def add_plugin(self, name, config): # 被上层__init__调用 （2）
         send_queue = queue.Queue()
         if name == 'render':
             plugin = Render((self.recv_queue, send_queue), **config)
@@ -106,9 +106,9 @@ class DMREngine():
             'status': 0 if self.stoped else 1,
         }
 
-    def add_task(self, taskname, config):
+    def add_task(self, taskname, config): # 被上层DanmakuRender()调用 （3） ，这里传入的config就是每一个任务的config
         send_queue = queue.Queue()
-        task = ReplayTask(taskname, config, (self.recv_queue, send_queue))
+        task = ReplayTask(taskname, config, (self.recv_queue, send_queue))  # 初始化
         self.task_dict[taskname] = {
             'class': task,
             'config': config,
@@ -116,8 +116,8 @@ class DMREngine():
             'status': 0 if self.stoped else 1,
         }
         if self.stoped == False:
-            task.start()
-            self.pipeSend(PipeMessage('engine', f'replay/{taskname}', 'ready'))
+            task.start()                                                    # 初始化后直接开启（task开启了聆听）
+            self.pipeSend(PipeMessage('engine', f'replay/{taskname}', 'ready')) # 重点！！发送ready信息给replaytask
             self.logger.debug(f'Task {taskname} started.')
         else:
             self.logger.debug(f'Task {taskname} created.')

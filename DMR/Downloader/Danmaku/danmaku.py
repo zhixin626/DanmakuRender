@@ -36,7 +36,7 @@ class DanmakuDownloader():
         self.dm_template = dm_template if dm_template else {}
         self.dm_delay_fixed = self.advanced_dm_args.get('dm_delay_fixed', 6)
         self.dm_auto_restart = self.advanced_dm_args.get('dm_auto_restart', 300)
-        self.dm_extra_inputs = self.advanced_dm_args.get('dm_extra_inputs', [])
+        self.dm_extra_inputs = self.advanced_dm_args.get('dm_extra_inputs', []) # dm_extra_inputs是个list！
         self.dm_file_min_time = self.advanced_dm_args.get('dm_file_min_time', 10)
 
         self.dm_filter = dm_filter.copy() if dm_filter else {}
@@ -146,19 +146,19 @@ class DanmakuDownloader():
         return True
 
     def start_dmc(self):
-        async def danmu_monitor(url:str=None):
+        async def danmu_monitor(url:str=None): # 监督员
             if not url:
                 url = self.url  
-            q = asyncio.Queue()
+            q = asyncio.Queue() # 可以调用 q.put() q.get()来放置 拿弹幕 ，异步的，不阻塞cpu
 
-            async def dmc_task():
-                dmc = DanmakuClient(url, q, **self.dm_stream_option)
+            async def dmc_task(): # “工人 + 保险”
+                dmc = DanmakuClient(url, q, **self.dm_stream_option) # 会往q里放弹幕
                 try:
                     await dmc.start()
-                except asyncio.CancelledError:
+                except asyncio.CancelledError: #说明task被cancel了（弹幕获取超时或外部取消）
                     await dmc.stop()
                     self.logger.debug('Cancel the future.')
-                except Exception as e:
+                except Exception as e: # 可能内部有raise RuntimeError之类的
                     await dmc.stop()
                     self.logger.exception(e)
                 
@@ -166,9 +166,10 @@ class DanmakuDownloader():
             last_dm_time = datetime.now().timestamp()
             retry = 0
 
-            while not self.stoped:
+            while not self.stoped: #这是 弹幕监控调度器（做ABC三件事）
+                # ✔ A. 消费弹幕
                 try:
-                    dm = q.get_nowait()
+                    dm = q.get_nowait() # 立即取队列元素，如果队列空就抛异常
                     if not isinstance(dm, SimpleDanmaku):
                         dm = SimpleDanmaku(
                             dtype=dm.get('msg_type', 'other'),
@@ -193,13 +194,18 @@ class DanmakuDownloader():
                 except asyncio.QueueEmpty:
                     pass
                 
+                # ✔ B. 监控弹幕获取是否断开（task.done）
                 if task.done():
+                    # task.done() 为 True 的几种可能：
+                    # dmc_task 正常结束（几乎不可能，因为里面是长期跑的）
+                    # dmc_task 里抛了普通异常（最常见）
+                    # 之前某处把这个 task cancel 掉并且协程已经处理完 CancelledError 退出了
                     self.logger.error(f'{self.url} 弹幕下载线程异常退出，正在重试...')
                     try:
                         self.logger.debug(task.result())
                     except:
                         self.logger.exception(task.exception())
-                    task.cancel()
+                    task.cancel() # 这里估计是多余的
                     retry += 1
                     last_dm_time = datetime.now().timestamp()
                     await asyncio.sleep(min(15*retry,60))
@@ -207,15 +213,19 @@ class DanmakuDownloader():
                     self.logger.info(f"{self.url} 弹幕下载线程已重启。")
                     continue
 
+                # ✔ C. 监控弹幕是否超时（dm_auto_restart）
                 if self.dm_auto_restart and datetime.now().timestamp()-last_dm_time>self.dm_auto_restart:
                     self.logger.error(f'{self.url} 获取弹幕超时，正在重试...')
+                    # 调用task.cancel()后task 里执行到某个 await 时，立刻抛出 asyncio.CancelledError
                     task.cancel()
                     last_dm_time = datetime.now().timestamp()
                     task = asyncio.create_task(dmc_task())
                     self.logger.info(f"{self.url} 弹幕下载线程已重启。")
                     continue
                 
+                # ✔ D. 避免大量空循环（await sleep(0.1)）
                 await asyncio.sleep(0.1)
+
             task.cancel()
             try:
                 await task
@@ -223,7 +233,7 @@ class DanmakuDownloader():
                 self.logger.debug("DMC task cancelled.")
 
         danmu_monitor_sets = []
-        for url in [self.url] + self.dm_extra_inputs:
+        for url in [self.url] + self.dm_extra_inputs: # list + list = newlist
             danmu_monitor_sets.append(danmu_monitor(url))
         new_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(new_loop)

@@ -63,9 +63,9 @@ class DanmakuClient:
             self.__hs = aiohttp.ClientSession()
             self.__site_api = site_class.get(self.plat)
         elif site_class_v2.get(self.plat):
-            self.__site_class = site_class_v2.get(self.plat)
+            self.__site_class = site_class_v2.get(self.plat) # self.__site_class 比如是bilibili
         elif site_class_v3.get(self.plat):
-            self.__hs = aiohttp.ClientSession()
+            self.__hs = aiohttp.ClientSession() # http session 会话管理器 ；requests.Session → 同步版 session
             self.__site_api = site_class_v3.get(self.plat)(**self.__kwargs)
         else:
             raise Exception(f'Error URL {url}')
@@ -79,7 +79,7 @@ class DanmakuClient:
             ssl_context=ctx, 
             headers=getattr(self.__site_api, 'headers', {}),
             proxy=os.getenv('http_proxy') or os.getenv('https_proxy'),
-        )
+        ) # ws:websocket ;用 ClientSession 创建一个 WebSocket 连接 ;返回一个可发送/接收消息的对象
         for reg_data in reg_datas:
             if type(reg_data) == str:
                 await self.__ws.send_str(reg_data)
@@ -106,9 +106,10 @@ class DanmakuClient:
             
             result = self.__site_api.decode_msg(msg.data)
             if isinstance(result, tuple):
+                # b站无ack，抖音有ack
                 ms, ack = result
                 if ack is not None:
-                    # 发送ack包
+                    # 发送ack包 ： ack = acknowledgement，确认包 / 回执包。
                     if type(ack) == str:
                         await self.__ws.send_str(ack)
                     else:
@@ -130,6 +131,8 @@ class DanmakuClient:
             self.__site_class = self.__site_class(rid=self.rid, q=self._dm_queue)
             await self.__site_class.start()
 
+    # 这个stop函数只被外部调用(damaku.py)，只有fetch_danmaku，heartbeats运行出错了，
+    # 抛出异常，被外部扑获，才会调用stop结束
     async def stop(self):
         self.__stop = True
         if self.__site_api != None:
