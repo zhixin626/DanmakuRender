@@ -122,9 +122,11 @@ def rename_safe(src:str, dst:str, retry:int=10):
 
     if exists(dst):
         cnt = len(glob.glob(splitext(dst)[0] + '*'))
+        # splitext("d:/video.mp4")-->("d:/video", ".mp4")
+        # glob.glob("video*")会匹配video.mp4 video(1).mp4 video_backup.txt
         dst = splitext(dst)[0] + f'({cnt})' + splitext(dst)[1]
     
-    while retry_cnt < retry:
+    while retry_cnt < retry: # 循环尝试 rename，如果文件被占用就等一会儿再试，直到成功或超时。
         try:
             os.rename(src, dst)
             return dst

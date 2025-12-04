@@ -14,9 +14,11 @@ class cover(InteractiveScene):
             time = sys.argv[4]
             color= sys.argv[5]
         else:
-            name = "默认标题"
-            time = "默认时间"
-            color = LIGHT_PINK
+            name = "不可一世杀手"
+            time = "12月1日"
+            color = "#83C167"
+
+        # F
 
         height=FRAME_HEIGHT
         width=height*4/3

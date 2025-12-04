@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 # douyin_shortcodes.py
 import re
-import logging
-
-logger = logging.getLogger(__name__)
 
 # 映射：短码 -> emoji（若没映射就保持原样）
 EMOJI_MAP = {
@@ -25,7 +22,7 @@ EMOJI_MAP = {
     "发怒":"😡",
     "亲亲":"😚",
     "笑哭":"😂",
-    "捂脸":"🤦",
+    "捂脸":"",
     "比心":"🤞", 
     "调皮":"😛",
     "心碎":"💔",

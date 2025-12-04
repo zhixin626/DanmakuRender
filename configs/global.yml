@@ -534,6 +534,11 @@ clean_args:
     delay: 172800
     w_srcfile: False
     w_srcpre: True
+  # zhixin修改此处
+  send2trash:
+    delay: 43200
+    w_srcfile: False
+    w_srcpre: True
   # 自定义命令
   custom: 
     # 命令行参数，可以使用关键字替换

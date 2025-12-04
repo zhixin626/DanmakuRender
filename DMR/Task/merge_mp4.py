@@ -7,9 +7,13 @@ import re
 from send2trash import send2trash
 import requests
 import logging,time,threading
+
+from DMR.utils.utils import rename_safe, safe_filename
 logger = logging.getLogger(__name__)
 
-def probe_media(ffprobe: str, path: Union[str,Path]):
+def probe_media(
+    path: Union[str,Path],
+    ffprobe: str = r"tools/ffprobe.exe"):
     """
     用 ffprobe 获取基本信息：duration（秒，float），分辨率（width,height），
     以及格式/比特率等。字段缺失时做容错。
@@ -100,6 +104,7 @@ def read_live_time_from_path(path, is_start=True):
             logger.warning(f"读取 {txt_path} 出错：{e}，使用当前时间。")
 
     return time
+
 def format_duration(start: datetime, end: datetime) -> str:
     delta = end - start
     total_seconds = int(delta.total_seconds())
@@ -119,50 +124,22 @@ def format_duration(start: datetime, end: datetime) -> str:
     else:
         return f"{seconds}秒"
 
-def autoname(base_dir: Path,stime:datetime) -> Path:
-    """生成 11月2日_merged[(-NNN)].mp4 的不重名文件路径"""
-    time = stime
-    fname = f"{time.month}月{time.day}日_merged.mp4"
-    cand = base_dir / fname
-    if cand.exists():
-        i = 1
-        while True:
-            fname2 = f"{time.month}月{time.day}日{i:03d}_merged.mp4"
-            cand2 = base_dir / fname2
-            if not cand2.exists():
-                cand = cand2
-                break
-            i += 1
-    return cand
-
-def merge_amplify_mp4(
+def merge_mp4(
     mp4_list: List[str],
-    stime: datetime,
-    ffmpeg: str = r"tools/ffmpeg.exe",
-    ffprobe: str = r"tools/ffprobe.exe",
-    is_amplify: bool = True,
     remover=True,
+    ffmpeg: str = r"tools/ffmpeg.exe",
     ):
-
     inputs = [Path(p) for p in mp4_list if p]
     if not inputs:
         raise ValueError("mp4_list 为空")
 
-    src = inputs[0]
-    base_dir = src.parent
-    new_name = autoname(base_dir, stime)
-    out_path = new_name
+    fist_file = Path(inputs[0])
+    out_path = safe_filename(str(fist_file.parent/f"{fist_file.stem}_merged.mp4"))
 
     # === 单文件分支
     if len(inputs) == 1:
-        src.rename(out_path)
-        # 进行音频增益至-1dB-----------------------------------------------------
-        if is_amplify:
-            out_path = amplify_to_minus1db(out_path,remover=True)
-
-        info = probe_media(ffprobe, out_path)
-
-        return str(out_path),info
+        fist_file.rename(out_path)
+        return str(out_path)
 
     # === 多文件分支
     else:
@@ -192,23 +169,11 @@ def merge_amplify_mp4(
                 "-movflags", "+faststart",
                 out_path,
             ]
-            # 正确的 logging 用法（占位符），避免你之前遇到的 logging 报错
-            logger.debug("merge_mp4 cmd: %s", cmd)
             subprocess.run(cmd, check=True)
-
-            # 进行音频增益至-1dB-------------------------------------------------
-            if is_amplify:
-                out_path = amplify_to_minus1db(out_path,remover=True)
-
             if remover:
                 for video in inputs: send2trash(str(video))
-
-            info = probe_media(ffprobe, out_path)
-
-            return str(out_path),info
-
+            return str(out_path)
         finally:
-
             os.remove(filelist)
 
 def detect(file:str):
@@ -216,50 +181,51 @@ def detect(file:str):
             'tools/ffmpeg.exe',
             '-hide_banner',
             '-i',file,
-            '-vn',
+            '-vn', # video none 禁用视频流，不处理视频
             '-af','volumedetect',
-            '-f','null','-'
+            '-f','null', # null muxer 不真正产生文件，所有输出数据都直接丢弃
+            '-', # 表示输出到 stdout（标准输出） 真正的媒体数据 → stdout
             ]
     r = subprocess.run(cmd, text=True, capture_output=True ,encoding='utf-8')
-    m = re.search(r'max_volume:\s*([-\d\.]+)\s*dB', r.stderr)
+    m = re.search(r'max_volume:\s*([-\d\.]+)\s*dB', r.stderr) # 日志 / 消息 / volumedetect 输出 → stderr
     if not m:
         raise RuntimeError("未检测到 max_volume（可能没有音轨或滤镜未运行）")
     return float(m.group(1))
 
-def amplify_to_minus1db(file:Path,remover=True) -> Path:
+def amplify_mp4(file,target_db=-1,remover=True,extra_gain_db=0) -> Path:
+    file=Path(file)
     peak = detect(str(file)) # 检测最高音量max_volume
-    if peak is None:
-        raise RuntimeError("未检测到 max_volume")
 
-    gain_db = -1 - peak
+    gain_db = target_db - peak + extra_gain_db
     if gain_db < 0:
         gain_db = 0
-    out = file.with_name(file.stem + "_amplified.mp4")
+
+    dst = safe_filename(str(file.parent/f"{file.stem}_amplified.mp4"))
+    # dst = file.with_name(file.stem + "_amplified.mp4")
     cmd = [
         'tools/ffmpeg.exe',
         '-y',                # ← 覆盖输出，避免交互
-        '-nostdin',          # ← 不读取标准输入
+        '-nostdin',          # ← 不读取标准输入 防止 FFmpeg 卡住等待用户输入
         '-hide_banner',
         '-i', str(file),
-        '-af', f'volume={gain_db:.2f}dB,alimiter=limit=-1dB',
+        '-af', f'volume={gain_db:.2f}dB,alimiter=limit=0.891', # audio filter音频滤镜
         '-c:v', 'copy',
         '-c:a', 'aac',
         '-movflags', '+faststart',
-        str(out)
+        str(dst)
     ]
     logger.info('开始进行音频增益')
     result=subprocess.run(cmd, text=True, capture_output=True ,encoding='utf-8')
     if result.returncode != 0:
-        # 打印一段 stderr 便于排错
         logger.error("ffmpeg 失败：%s", result.stderr.strip().splitlines()[-1] if result.stderr else "未知错误")
         raise RuntimeError("ffmpeg 执行失败")
-    logger.info(f"检测峰值 {peak:.2f} dBFS → 放大 {gain_db:.2f} dB → 输出: {out}")
+    logger.info(f"检测峰值 {peak:.2f} dBFS → 放大 {gain_db:.2f} dB → 输出: {dst}")
     if remover:
         send2trash(str(file))
-    return out
+    return Path(dst)
 
 def get_cookies(account):
-    login_json=Rf"D:\DanmakuRender\.login_info\{account}.json"
+    login_json=f"D:/DanmakuRender/.login_info/{account}.json"
     with open(login_json,'r',encoding='utf-8') as f:
         data=json.load(f)
     cookies={}
@@ -278,7 +244,7 @@ def build_headers():
     "User-Agent": "Mozilla/5.0"
     }
 
-def add_to_list(bvid,sectionId,account):
+def add_to_list(bvid,sectionId,account=3546637425182939):
     sectionId_leng=7184492
     sectionId_shou=7184423
     if isinstance(sectionId, int):  # 数字直接用
@@ -332,6 +298,72 @@ def get_info(bvid,account):
     info = j["data"]
     return info
 
+def parse_sectionId(sectionId):
+    Id_dict = {
+        "shou": 7184423,
+        "leng": 7184492,
+        "yue": 7490007,
+        "zuo": 7517357,
+    }
+    if isinstance(sectionId,int):
+        return sectionId
+    if isinstance(sectionId, str):
+        if sectionId in Id_dict:
+            return Id_dict[sectionId]
+        raise ValueError(f"未知的 sectionId 字符串：{sectionId}")
+    else:
+        raise ValueError(f"sectionId 类型不合法：{type(sectionId)}")
+
+def build_edit_payload(bvid,account)-> dict:
+    """
+    根据 get_info 返回的 info，构造编辑接口用的 payload。
+    不做任何修改逻辑，只是“原样搬运”。
+    """
+    info=get_info(bvid,account)
+    cookies=get_cookies(account)
+    archive = info["archive"]
+    videos = info["videos"]
+    watermark = info.get("watermark", {})
+    payload = {
+        "cover": archive["cover"],
+        "cover43": archive.get("cover43", ""),
+        "ai_cover": archive.get("ai_cover", ""),
+        "title": archive["title"],
+        "copyright": archive["copyright"],
+        "human_type2": archive["human_type2"]["id"] if archive.get("human_type2") else 0,
+        "tid": archive["tid"],
+        "tag": archive["tag"],
+        "desc": archive["desc"],
+        "dynamic": archive.get("dynamic", ""),
+        "recreate": -1,
+        "interactive": archive.get("interactive", 0),
+        "videos": [
+            {
+                "filename": v["filename"],
+                "title": v["title"],
+                "desc": v.get("desc", ""),
+                "cid": v["cid"],
+            }
+            for v in videos
+        ],
+        "aid": archive["aid"],
+        "handle_staff": False,
+        "mission_id": archive.get("mission_id"),
+        "is_only_self": archive.get("is_only_self", 0),
+        "watermark": {"state": watermark.get("state", 0)},
+        "no_reprint": archive.get("no_reprint", 1),
+        "is_360": archive.get("is_360", 0),
+        "dolby": archive.get("is_dolby", 0),
+        "lossless_music": archive.get("lossless_music", 0),
+        "new_web_edit": 1,
+        "topic_grey": 1,
+        "act_reserve_create": 0,
+        "subtitle": {"open": 0, "lan": ""},
+        "web_os": 1,
+        "csrf": cookies["bili_jct"],
+    }
+    return payload
+
 def add_livetime(bvid: str, text: str,account) :
     def insert_after_title(desc: str, text: str) -> str:
         pattern = r"(开播时间：.*(?:\n|$))"
@@ -347,52 +379,20 @@ def add_livetime(bvid: str, text: str,account) :
     headers = build_headers()
     params = {"csrf": cookies["bili_jct"]}
     url_edit='https://member.bilibili.com/x/vu/web/edit'
-    info=get_info(bvid,account)
-    archive = info["archive"]
-    payload = {
-        "cover": archive["cover"],
-        "cover43": archive["cover43"],
-        "ai_cover": archive["ai_cover"],
-        "title": archive["title"],
-        "copyright": archive["copyright"],
-        "human_type2": archive["human_type2"]["id"],
-        "tid": archive["tid"],
-        "tag": archive["tag"],
-        "desc": insert_after_title(archive["desc"],text),
-        "dynamic": archive["dynamic"],
-        "recreate": -1,
-        "interactive": archive["interactive"],
-        "videos": [
-            {
-                "filename": v["filename"],
-                "title": v["title"],
-                "desc": v["desc"],
-                "cid": v["cid"]
-            } for v in info["videos"]
-        ],
-        "aid": archive["aid"],
-        "handle_staff": False,
-        "mission_id": archive["mission_id"],
-        "is_only_self": archive["is_only_self"],
-        "watermark": {"state": info["watermark"]["state"]},
-        "no_reprint": archive["no_reprint"],
-        "is_360": archive["is_360"],
-        "dolby": archive["is_dolby"],
-        "lossless_music": archive["lossless_music"],
-        "new_web_edit": 1,
-        "topic_grey": 1,
-        "act_reserve_create": 0,
-        "subtitle": {"open": 0, "lan": ""},
-        "web_os": 1,
-        "csrf": cookies["bili_jct"]
-    }
-    r=requests.post(url_edit,headers=headers,cookies=cookies,params=params,
+    payload = build_edit_payload(bvid,account)
+    payload["desc"] = insert_after_title(payload["desc"], text)
+
+    r=requests.post(
+        url_edit,
+        headers=headers,
+        cookies=cookies,
+        params=params,
         data=json.dumps(payload).encode("utf-8"))
-    rj = r.json()      # 或者：rj = json.loads(r.text)
-    if rj.get("code") == 0:
+    j = r.json()
+    if j.get("code") == 0:
         logger.info("成功添加直播时间到简介")
     else:
-        logger.info("失败:", rj)
+        logger.info(f"添加直播时间失败:{j}")
 
 def reorder_section_once(section_id: int, account: int, mode: str = "first_to_last"):
     """
@@ -424,10 +424,10 @@ def reorder_section_once(section_id: int, account: int, mode: str = "first_to_la
 
     data = j.get('data') or {}
     # 修改：这里兼容 data['sorts'] 和 data['episodes'] 两种字段名
-    episodes = data.get('sorts') or data.get('episodes') or []
-    section = data.get('section') or {}
+    episodes   = data.get('episodes') or []
+    section    = data.get('section')  or {}
     section_id = section.get('id', section_id)  # 如果返回里有，以返回为准
-    season_id = section.get('seasonId')
+    season_id  = section.get('seasonId')
 
     if not episodes:
         logger.error("当前分区无可排序的视频（episodes 为空）")
@@ -492,6 +492,7 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
 
     def _fetch_section_data(sec_id: int) -> dict:
         """获取分区(section)的完整数据结构"""
+        time.sleep(3)
         r = requests.get(
             url_section,
             headers=headers,
@@ -528,6 +529,7 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
             "sorts": _build_sorts(episodes),        # 整个分P的排序一起带上
         }
 
+        time.sleep(3)
         r = requests.post(
             url_episode_edit,
             headers=headers,
@@ -547,7 +549,6 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
         return True   # 明确返回成功
 
     # ---------- 主流程 ----------
-
     data = _fetch_section_data(section_id)
     episodes = data.get("episodes") or []
 
@@ -564,26 +565,24 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
         if archive_title == list_title:
             continue
 
-        logger.info(f"第 {idx} 个视频标题不一致")
-        if debug:
-            print(f"第 {idx} 个视频标题不一致")
+        logger.info(f"第{idx}个不一致,列表标题为:{list_title},将改为:{archive_title}")
+        # if debug:
+        #     print(f"第 {idx} 个视频标题不一致,视频标题为:{archive_title},列表标题为:{list_title}")
         try:
-            time.sleep(3)
             _set_list_title_same_as_video_title(ep, episodes)
-            logger.info(f"已将列表标题:{list_title},改为视频标题:{archive_title}")
-            if debug:
-                print(f"已将列表标题:{list_title},改为视频标题:{archive_title}")
-        except Exception as e:
-            logger.error(f"修改失败: {e}")
-            if debug:
-                print(f"修改失败: {e}")
+            logger.info(f"第{idx}个修改成功")
+            # if debug:
+            #     print(f"已将列表标题:{list_title},改为视频标题:{archive_title}")
+        except Exception:
+            # 内部有logger信息
+            pass
 
         changed = True
 
     if not changed:
         logger.info("所有分P的列表标题都已经和视频标题一致")
-        if debug:
-            print("所有分P的列表标题都已经和视频标题一致")
+        # if debug:
+        #     print("所有分P的列表标题都已经和视频标题一致")
 
 def sync_section_episode_titles_bg(account: int, section_id: int,debug=False):
     t = threading.Thread(

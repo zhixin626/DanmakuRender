@@ -1,8 +1,6 @@
 import logging
 import os
-
 from .baseevents import BaseEvents
-from send2trash import send2trash
 from .merge_mp4 import *
 from ..utils import *
 from pathlib import Path
@@ -13,6 +11,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.state_dict = {}
         self.ended_dict = {}
         self.logger = logging.getLogger(__name__)
+        self.is_sync= False
+        self.bvid=None # 在这里初始化防止先进入了onLiveEnd 需要判断self.bvid
 
     @property
     def event_dict(self):
@@ -39,6 +39,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.logger.info(f'{self.name}: {message.msg}')
 
     def onLiveStart(self, message:PipeMessage):
+        self.logger.info(f'{self.name}: {message.msg}')
         self.is_add_to_list  = False
         self.is_live_end     = False
         self.is_desc_offtime = False
@@ -46,7 +47,37 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.src_path        = Path(str(self.config['download_args']['output_dir']))
         self.dmvideo_path    = Path(str(self.config['download_args']['output_dir']) + '（弹幕版）')
         self.transcode_path  = Path(str(self.config['download_args']['output_dir']) + '（转码后）')
-        self.logger.info(f'{self.name}: {message.msg}')
+        self.check_sync_list_name()
+        self.check_render_cover()
+
+    def check_render_cover(self):
+        cover_args=self.config['common_event_args'].get("cover_args", {})
+        is_render_cover=cover_args.get("is_render_cover")
+        if is_render_cover: # 渲染封面
+            _name=cover_args.get("name","")
+            _now=datetime.now()
+            _time=f"{_now.month}月{_now.day}日"
+            _color=cover_args.get("name_color","#111111")
+            output_dir=cover_args.get("output_dir","./covers")
+            from DMR.utils.render_with_manimgl import rendercover_with_manimgl_bg
+            rendercover_with_manimgl_bg(_name,_time,_color,output_dir=output_dir)
+
+    def check_sync_list_name(self):
+        is_sync   = self.config['common_event_args'].get("sync_list_name", {}).get("is_sync")
+        if not is_sync or self.is_sync:
+            # self.is_sync会在onLiveEnd和初始化的时候标记为 false
+            # self.is_sync会在sync后标记为true
+            self.logger.debug("不同步视频名为列表视频名")
+            return
+        else:
+            account   = self.config['common_event_args'].get("sync_list_name", {}).get("account")
+            sectionId = self.config['common_event_args'].get("sync_list_name", {}).get("sectionId")
+            try:
+                sync_section_episode_titles_bg(account,sectionId)
+                self.is_sync = True
+            except Exception:
+                # 内部会有logger信息
+                pass
 
     def _state_snapshot(self):
         """只提取可读信息：status / file.path / wait"""
@@ -172,6 +203,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         return ret_msgs
     
     def onLiveEnd(self, message:PipeMessage):
+        self.is_live_end=True
+        self.is_sync= False # 给下一次开播 重新同步视频名和列表名做准备
         self.logger.info(f'{self.name}: {message.msg}.')
         group_id = message.data
         if group_id is None:
@@ -187,45 +220,41 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.check_for_merge(group_id)
 
         # ---------------- 佐佐视频：渲染 + 上传 + 加合集 ----------------
-        if self.config['common_event_args'].get('render_upload_zuozuo_video'):
+        zuozuo_video_args=self.config['common_event_args'].get('zuozuo_video_args',{})
+        if zuozuo_video_args.get("is_render",False):
             from DMR.utils.render_with_manimgl import render_zuozuovideo_with_manimgl
-            from DMR.utils.upload_video import upload_zuozuo_video
             stime     = read_live_time_from_path(self.src_path, is_start=True)
             etime     = read_live_time_from_path(self.src_path, is_start=False)
             duration  = format_duration(stime, etime)
-            sectionId = 7517357
-            account   = 3546637425182939
-
             self.logger.info("开始渲染佐佐视频")
             try:
-                zuozuo_video_path = render_zuozuovideo_with_manimgl()
+                zuozuo_video_path = render_zuozuovideo_with_manimgl(self.src_path)
             except Exception as e:
                 self.logger.error(f"佐佐视频渲染失败: {e}")
                 # 渲染都失败了，后面上传/加合集就完全没意义，直接跳过佐佐逻辑
                 zuozuo_video_path = None
 
-            if not zuozuo_video_path or not os.path.exists(zuozuo_video_path):
-                self.logger.error(f"佐佐视频渲染失败，找不到文件: {zuozuo_video_path}")
-            else:
-                # 渲染 OK，再尝试上传
-                self.logger.info("开始上传佐佐视频")
+            if zuozuo_video_args.get("is_upload",False) and zuozuo_video_path:
+                from DMR.utils.upload_video import upload_zuozuo_video
+                # self.logger.info("开始上传佐佐视频")
                 success, bvid, log_text = upload_zuozuo_video(
-                    zuozuo_video_path,
+                    str(zuozuo_video_path),
                     stime,
                     etime,
                     duration,
-                    account=account,
+                    is_only_self=zuozuo_video_args.get("is_only_self",True),
+                    cover_path=self.config['common_event_args'].get('cover_args',{}).get("output_dir")+"/cover.png"
                 )
 
                 if not success or not bvid:
                     self.logger.error(f"佐佐视频上传失败，不加入合集。上传日志：\n{log_text}")
                 else:
+                    sectionId = parse_sectionId("zuo")
                     self.logger.info(
                         f"佐佐视频上传成功，bvid={bvid}，准备加入合集 sectionId={sectionId}"
                     )
                     try:
-                        add_to_list(bvid, sectionId, account)
-                        sync_section_episode_titles_bg(account, sectionId)
+                        add_to_list(bvid,sectionId)
                     except Exception as e:
                         self.logger.error(f"佐佐视频加入合集/同步标题失败: {e}")
 
@@ -246,7 +275,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             if time_template and self.bvid and not self.is_desc_offtime:
                 self.add_livetime_wrapper(time_template,self.bvid)
         
-        self.is_live_end=True
+
         return ret_msgs
     
     def add_livetime_wrapper(self,time_template,bvid):
@@ -424,74 +453,29 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # debug-------------------------------
 
         return ret_msgs
-
     def check_for_merge(self, group_id):
-        # 保留：所有都 ready 才能合并（all-ready gate）
-        # self.logger.info('START:check_for_merge')
-        # self._log_state('check_for_merge-BEFORE')
-        merge_type = self.config['common_event_args'].get("merge_args", {}).get("merge_type")
-        is_amplify = self.config['common_event_args'].get("merge_args", {}).get("is_amplify", True)
-        if not merge_type or group_id not in self.ended_dict:
-            # reason = []
-            # if not merge_type:
-            #     reason.append("merge_type 为空或未配置")
-            # if group_id not in self.ended_dict:
-            #     reason.append(f"group_id {group_id} 不在 ended_dict 中")
-            # self.logger.debug(f"退出 check_for_merge（原因：{', '.join(reason)}）")
+        # is_merge / merge_type / 音量相关配置
+        merge_cfg      = self.config['common_event_args'].get("merge_args", {}) or {}
+        is_merge       = merge_cfg.get("is_merge")
+        merge_type     = merge_cfg.get("merge_type")  # e.g. ['src_video', 'dm_video']
+        is_amplify     = merge_cfg.get("is_amplify", True)
+        extra_gain_db  = merge_cfg.get("extra_gain_db", 0)
+
+        # 基础防御：不开启合并 / 没有这个 group / merge_type 为空 → 直接退出
+        if (not is_merge) or (group_id not in self.ended_dict) or (not merge_type):
             return
 
-        for vt in merge_type:
-            for vs in self.state_dict[group_id]:
-                if vs[vt]['status'] not in ('ready', 'uploaded'):
-                    self.logger.debug(
-                    f"退出 check_for_merge：{vt} 中存在未 ready/uploaded 的分段 → {vs[vt]['status']}"
-                    )
-                    return
-
+        # 所有 seg 的起止时间（你原来的逻辑）
         stime = read_live_time_from_path(self.src_path, is_start=True)
         etime = read_live_time_from_path(self.src_path, is_start=False)
-        target_slot = {'src_video': 'src_video', 'dm_video': 'dm_video'}
 
-        # 收集合并、标记 merging
-        changed = {vt: [] for vt in merge_type}
-        groups  = {vt: [] for vt in merge_type}        # 路径
-        tails   = {vt: None for vt in merge_type}      # 用来拷贝元信息
-        for vt in merge_type:
-            for vs in self.state_dict[group_id]:
-                entry = vs[vt]
-                entry['status'] = 'merging'
-                changed[vt].append(entry)
-                groups[vt].append(entry['file'].path)
-                tails[vt] = entry['file']
-        self.logger.info("准备合并：%s"," | ".join(f"{vt}:{len(groups[vt])}段" for vt in merge_type))
+        # vt -> 目标 slot 名（你原来就是这两个）
+        target_slot = {
+            'src_video': 'src_video',
+            'dm_video':  'dm_video',
+        }
 
-        try:
-            # 逐类型合并
-            merged = {}  # vt -> (path, meta)
-            for vt in merge_type:
-                merged_path, meta = merge_amplify_mp4(
-                    groups[vt],
-                    stime=stime,
-                    remover=True,
-                    is_amplify=is_amplify,
-                )
-                merged[vt] = (merged_path, meta)
-
-        except Exception as e:
-            # 失败回滚
-            for vt in merge_type:
-                for entry in changed[vt]:
-                    entry['status'] = 'ready'
-            self.logger.debug("合并失败: %s", e)
-            self.logger.info("合并失败")
-            return
-
-        # 成功：旧分段标记 merged
-        for vt in merge_type:
-            for entry in changed[vt]:
-                entry['status'] = 'merged'
-
-        # 组装新占位（只填我们这次做的类型）
+        # 新占位：先建一个空壳，后面每个 vt 填自己那一格
         new_state = {
             'src_video':     {'status': None, 'file': None, 'wait': []},
             'src_video_pre': {'status': None, 'file': None, 'wait': []},
@@ -499,30 +483,210 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         }
         new_seg_id = len(self.state_dict[group_id]) + 1
 
-        for vt in merge_type:
-            out_path, meta = merged[vt]
-            dst = target_slot.get(vt, vt)
-            tail = tails[vt]
+        # ---------- 小函数：只管 merge 某一种 vt ----------
+        def _merge_one_type(vt: str) -> bool:
+            """
+            只合并某一种 vt：
+              1. 检查该 vt 所有分段是否 ready/uploaded
+              2. 标记 merging
+              3. 调用 merge_amplify_mp4
+              4. 成功则标记老分段为 merged，并在 new_state 里写入新的 VideoInfo
+              5. 失败则回滚这一种 vt 的状态
+            返回:
+              True  表示该 vt 合并成功
+              False 表示该 vt 当前不应该合并（比如有未 ready 的段）
+            """
+            # 1. 先检查状态：有任何不是 ready/uploaded 的就直接退出
+            entries = []
+            for vs in self.state_dict[group_id]:
+                entry = vs.get(vt)
+                if entry is None:
+                    self.logger.debug("group %s 中缺少类型 %s 的占位", group_id, vt)
+                    return False
+                if entry['status'] not in ('ready', 'uploaded'):
+                    self.logger.debug(
+                        "退出 %s 合并：存在未 ready/uploaded 的分段 → %s",
+                        vt, entry['status']
+                    )
+                    return False
+                entries.append(entry)
+
+            if not entries:
+                self.logger.debug("group %s 的类型 %s 没有任何分段，跳过", group_id, vt)
+                return False
+
+            # 2. 标记为 merging，并记录旧状态，方便回滚
+            changed = []
+            for entry in entries:
+                changed.append((entry, entry['status']))
+                entry['status'] = 'merging'
+
+            # 3. 收集路径、找一个 tail 方便拷贝元信息
+            paths = [e['file'].path for e in entries]
+            tail  = entries[-1]['file']  # 你原来就是用最后一个作 tail
+
+            self.logger.info("准备合并类型 %s：共 %d 段", vt, len(paths))
+
+            try:
+                output_path = merge_mp4(paths,remover=True)
+                if is_amplify:
+                    output_path= amplify_mp4(
+                        output_path,
+                        target_db=-1,
+                        extra_gain_db=extra_gain_db,
+                        remover=True)
+                meta=probe_media(output_path)
+            except Exception as e:
+                # 4. 合并失败：只回滚这一种 vt 的状态
+                for entry, old_status in changed:
+                    entry['status'] = old_status
+                self.logger.debug("合并类型 %s 失败: %s", vt, e)
+                self.logger.info("合并类型 %s 失败", vt)
+                return False
+
+            # 5. 合并成功：旧分段标记为 merged
+            for entry, _ in changed:
+                entry['status'] = 'merged'
+
+            # 6. 写新占位：只填这个 vt 对应的 slot
+            dst = target_slot.get(vt, vt)  # 默认映射自己
             newvideo = VideoInfo(
-                path=out_path,
-                dtype=dst,
-                file_id=uuid(),
-                size=os.path.getsize(out_path),
-                ctime=datetime.now(),
-                stime=stime,
-                etime=etime,
-                dm_file_id=None,
-                duration=meta.get('duration'),
-                segment_id=new_seg_id,
-                taskname=tail.taskname,
-                group_id=group_id,
-                streamer=tail.streamer,
-                title=tail.title,
-                resolution=meta.get('resolution'),
+                path      = str(output_path),
+                dtype     = dst,
+                file_id   = uuid(),
+                size      = os.path.getsize(output_path),
+                ctime     = datetime.now(),
+                stime     = stime,
+                etime     = etime,
+                dm_file_id= "",
+                duration  = meta.get('duration') or 0,
+                segment_id= new_seg_id,
+                taskname  = tail.taskname,
+                group_id  = group_id,
+                streamer  = tail.streamer,
+                title     = tail.title,
+                resolution= meta.get('resolution') or (0,0),
             )
             new_state[dst] = {'status': 'ready', 'file': newvideo, 'wait': []}
 
+            self.logger.info("类型 %s 合并成功 → %s", vt, output_path)
+            return True
+
+        # ---------- 外层：对每一种 merge_type 单独调用小函数 ----------
+        any_merged = False
+        for vt in merge_type:
+            ok = _merge_one_type(vt)
+            if ok:
+                any_merged = True
+
+        # 如果一个都没合并成功，就不追加新占位
+        if not any_merged:
+            self.logger.info("check_for_merge: 所有 merge_type 都未合并成功，结束")
+            return
+
+        # 至少有一个 vt 合并成功：追加新的 state
         self.state_dict[group_id].append(new_state)
+
+    # def check_for_merge(self, group_id):
+    #     # 保留：所有都 ready 才能合并（all-ready gate）
+    #     # self.logger.info('START:check_for_merge')
+    #     # self._log_state('check_for_merge-BEFORE')
+    #     is_merge   = self.config['common_event_args'].get("merge_args", {}).get("is_merge")
+    #     merge_type = self.config['common_event_args'].get("merge_args", {}).get("merge_type")
+    #     is_amplify = self.config['common_event_args'].get("merge_args", {}).get("is_amplify", True)
+    #     extra_gain_db = self.config['common_event_args'].get("merge_args", {}).get("extra_gain_db", 0)
+    #     if not is_merge or group_id not in self.ended_dict:
+    #         # reason = []
+    #         # if not merge_type:
+    #         #     reason.append("merge_type 为空或未配置")
+    #         # if group_id not in self.ended_dict:
+    #         #     reason.append(f"group_id {group_id} 不在 ended_dict 中")
+    #         # self.logger.debug(f"退出 check_for_merge（原因：{', '.join(reason)}）")
+    #         return
+
+    #     for vt in merge_type:
+    #         for vs in self.state_dict[group_id]:
+    #             if vs[vt]['status'] not in ('ready', 'uploaded'):
+    #                 self.logger.debug(
+    #                 f"退出 check_for_merge：{vt} 中存在未 ready/uploaded 的分段 → {vs[vt]['status']}"
+    #                 )
+    #                 return
+
+    #     stime = read_live_time_from_path(self.src_path, is_start=True)
+    #     etime = read_live_time_from_path(self.src_path, is_start=False)
+    #     target_slot = {'src_video': 'src_video', 'dm_video': 'dm_video'}
+
+    #     # 收集合并、标记 merging
+    #     changed = {vt: [] for vt in merge_type}
+    #     groups  = {vt: [] for vt in merge_type}        # 路径
+    #     tails   = {vt: None for vt in merge_type}      # 用来拷贝元信息
+    #     for vt in merge_type:
+    #         for vs in self.state_dict[group_id]:
+    #             entry = vs[vt]
+    #             entry['status'] = 'merging'
+    #             changed[vt].append(entry)
+    #             groups[vt].append(entry['file'].path)
+    #             tails[vt] = entry['file']
+    #     self.logger.info("准备合并：%s"," | ".join(f"{vt}:{len(groups[vt])}段" for vt in merge_type))
+
+    #     try:
+    #         # 逐类型合并
+    #         merged = {}  # vt -> (path, meta)
+    #         for vt in merge_type:
+    #             merged_path, meta = merge_amplify_mp4(
+    #                 groups[vt],
+    #                 remover=True,
+    #                 is_amplify=is_amplify,
+    #                 extra_gain_db=extra_gain_db,
+    #             )
+    #             merged[vt] = (merged_path, meta)
+
+    #     except Exception as e:
+    #         # 失败回滚
+    #         for vt in merge_type:
+    #             for entry in changed[vt]:
+    #                 entry['status'] = 'ready'
+    #         self.logger.debug("合并失败: %s", e)
+    #         self.logger.info("合并失败")
+    #         return
+
+    #     # 成功：旧分段标记 merged
+    #     for vt in merge_type:
+    #         for entry in changed[vt]:
+    #             entry['status'] = 'merged'
+
+    #     # 组装新占位（只填我们这次做的类型）
+    #     new_state = {
+    #         'src_video':     {'status': None, 'file': None, 'wait': []},
+    #         'src_video_pre': {'status': None, 'file': None, 'wait': []},
+    #         'dm_video':      {'status': None, 'file': None, 'wait': []},
+    #     }
+    #     new_seg_id = len(self.state_dict[group_id]) + 1
+
+    #     for vt in merge_type:
+    #         out_path, meta = merged[vt]
+    #         dst = target_slot.get(vt, vt)
+    #         tail = tails[vt]
+    #         newvideo = VideoInfo(
+    #             path=out_path,
+    #             dtype=dst,
+    #             file_id=uuid(),
+    #             size=os.path.getsize(out_path),
+    #             ctime=datetime.now(),
+    #             stime=stime,
+    #             etime=etime,
+    #             dm_file_id=None,
+    #             duration=meta.get('duration'),
+    #             segment_id=new_seg_id,
+    #             taskname=tail.taskname,
+    #             group_id=group_id,
+    #             streamer=tail.streamer,
+    #             title=tail.title,
+    #             resolution=meta.get('resolution'),
+    #         )
+    #         new_state[dst] = {'status': 'ready', 'file': newvideo, 'wait': []}
+
+    #     self.state_dict[group_id].append(new_state)
     
     def _check_for_clean(self, group_id=None):
         ret_msgs = []
@@ -658,7 +822,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             # 开始加入合集
             try:
                 add_to_list(self.bvid,sectionId,account)
-                sync_section_episode_titles_bg(account,sectionId)
                 self.is_add_to_list=True
             except Exception as e:
                 self.logger.error(e)

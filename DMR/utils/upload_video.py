@@ -5,14 +5,16 @@ import os
 import re
 import tempfile
 import time
+import json
 logger = logging.getLogger(__name__)
-
 
 def upload_zuozuo_video(
     file_path: str,
     stime: datetime,
     etime: datetime,
     duration: str,
+    cover_path:str,
+    is_only_self=True,
     account: str = "3546637425182939",   # 账号ID，可按需改
     biliuprs_path: str = r"D:\DanmakuRender\tools\biliup.exe",
     max_retry: int = 3,
@@ -42,7 +44,13 @@ def upload_zuozuo_video(
         f"{etime.hour}时{etime.minute}分\n"
         f"直播时长: {duration}\n"
     )
-    title = f"【佐佐酱】{stime.month}月{stime.day}日直播回放"
+    title = f"【佐佐酱】{stime.month}月{stime.day}日"
+
+    extra_fields = {
+    "watermark": {"state": 0},
+    "is_only_self": 1 if is_only_self else 0,
+    "no_disturbance": 1,
+    }
 
     base_cmd = [
         biliuprs_path,
@@ -55,11 +63,11 @@ def upload_zuozuo_video(
         "--no-reprint", "1",
         "--open-elec", "1",
         "--source", "",
-        "--tag", "直播回放,佐佐酱",
+        "--tag", "佐佐酱",
         "--tid", "65",
         "--title", title,
-        "--cover","D://DanmakuRender//佐佐酱//cover.png",
-        "--extra-fields", '{"watermark":{"state":0},"is_only_self":0}',
+        "--cover",cover_path,
+        "--extra-fields",json.dumps(extra_fields, ensure_ascii=False),
         file_path,
     ]
 

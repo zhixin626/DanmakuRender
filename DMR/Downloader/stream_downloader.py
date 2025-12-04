@@ -30,14 +30,8 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                  advanced_dm_args:dict=None,
                  engine='ffmpeg', 
                  debug=False,
-                 is_render_cover=False,
-                 # is_render_zuozuo_video=False,
-                 cover_name_color="#111111",
                  **kwargs
         ) -> None:
-        self.is_render_cover=is_render_cover
-        # self.is_render_zuozuo_video=is_render_zuozuo_video
-        self.cover_name_color=cover_name_color
         self.taskname = taskname
         self.url = url
         self.plat, self.rid = split_url(url)
@@ -297,13 +291,16 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             if not self.liveapi.Onair(): # 不在直播状态（未开播or已下播）
                 restart_cnt = 0
                 if in_session and not live_end and not record_liveend_time:  # 开播了但是不在直播状态 and 没有彻底下播 --> 刚下播
-                    # 记录结束时间
                     self.logger.info(f"[{self.taskname}]下播,本轮录制结束")
+
+                    # 记录下播时间--------------------------------------------------------------
                     out_dir = Path(self.output_dir)
+                    out_dir.mkdir(parents=True, exist_ok=True)
                     now = datetime.now()
                     with open(out_dir / "_liveend_times.txt", "a", encoding="utf-8", newline="\n") as f:
                         f.write(now.isoformat(timespec="seconds") + "\n")
                     record_liveend_time=True
+                    # 记录下播时间--------------------------------------------------------------
 
                 if live_end:  # 不在直播状态 and 彻底下播
                     time.sleep(start_check_interval)
@@ -319,8 +316,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                     self._pipeSend('liveend', '直播真的结束了', data=self.sess_id)
                     self.sess_id = uuid(8)
                     self.segment_id = 1
-                    # if self.is_render_zuozuo_video:
-                    #     render_zuozuovideo_with_manimgl_bg()
                 continue
 
             try: # 在直播状态（开播）可能是刚开播，也肯能是录制过程出错情况下还在播
@@ -329,21 +324,18 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 record_liveend_time = False
                 # 记录开始时间
                 if not in_session:  # 在直播状态，没有进入本次直播 ---> 刚开播
-                    self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id)
-
                     in_session = True  # 标记为进入了本次直播
+                    self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id)
+                    now = datetime.now()
+                    self.live_start_time=now
+
+                    # 记录开播时间--------------------------------------------------------------
                     out_dir = Path(self.output_dir)
                     out_dir.mkdir(parents=True, exist_ok=True)
-                    now = datetime.now()  # 注意这里用的就是 datetime.now()
-                    self.live_start_time=now
+                    now = datetime.now()
                     with open(out_dir / "_livestart_times.txt", "a", encoding="utf-8", newline="\n") as f:
                         f.write(now.isoformat(timespec="seconds") + "\n")
-
-                    if self.is_render_cover: # 渲染封面
-                        _name=str(out_dir.stem)
-                        _time=f"{now.month}月{now.day}日"
-                        _color=self.cover_name_color
-                        rendercover_with_manimgl_bg(_name,_time,_color,output_dir=self.output_dir)
+                    # 记录开播时间--------------------------------------------------------------
 
                 else: # 在直播状态，进入本次直播 ---> 录制过程出错情况
                     self._pipeSend('default', '重启录制', dtype='str', data=self.sess_id)
