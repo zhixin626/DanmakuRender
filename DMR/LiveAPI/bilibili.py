@@ -112,6 +112,23 @@ class bilibili(BaseAPI):
                        **kwargs) -> str:
         avail_urls = self.get_stream_urls(**kwargs)
 
+        # 如果显式指定要 FLV，则优先在 FLV 里选「可录制的最高画质 H.264 FLV」
+        if stream_type == "flv":
+            flv_avc = [
+                u for u in avail_urls
+                if u["stream_type"].lower() == "flv-avc"
+            ]
+
+            if not flv_avc:
+                raise RuntimeError("没有可录制的 H.264 FLV（flv-avc）流")
+
+            max_q = max(u["quality"] for u in flv_avc)
+            best = [u for u in flv_avc if u["quality"] == max_q]
+            chosen = random.choice(best)
+            return chosen["stream_url"]
+
+        # -------------------------------------------------------------
+
         # 有可能返回的流存在多种质量，因为H.265和H.264压缩策略不同
         max_quality = max(avail_urls, key=lambda x: x['quality'])['quality']
         avail_urls = [max_res_urls for max_res_urls in avail_urls if max_res_urls['quality'] == max_quality]
@@ -152,7 +169,15 @@ class bilibili(BaseAPI):
             logger.warning(f'Bilibili{self.rid}没有满足 {stream_cdn},{stream_type} 的流，将使用默认选项.')
             return random.choice(avail_urls)['stream_url']
         else:
-            return random.choice(selected_urls)
+            selected_url=random.choice(selected_urls)
+            logger.info(
+                "\n================ 最终选择的录制流 ================\n"
+                f"URL : {selected_url}\n"
+                f"CDN : {re.search(r'//([^/]+)/', selected_url).group(1) if '//' in selected_url else '未知'}\n"
+                f"类型: {'FLV' if '.flv' in selected_url else 'HLS / fMP4'}\n"
+                "================================================\n"
+            )
+            return selected_url
 
     def get_info(self) -> tuple:
         try:
@@ -180,6 +205,8 @@ class bilibili(BaseAPI):
     def get_stream_header(self) -> dict:
         return self.header
 
-if __name__ == '__main__':
-    api = bilibili('13308358')    
-    print(api.get_stream_url()) 
+# if __name__ == '__main__':
+#     api = bilibili('14988219')
+#     cookie=r"D:\DanmakuRender\.login_info\bili_watch_cookies.json"
+#     from pprint import pprint
+#     pprint(api.get_stream_urls(bili_watch_cookies=cookie))

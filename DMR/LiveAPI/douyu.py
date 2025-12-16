@@ -465,3 +465,6 @@ class DouyuUtils:
             'auth': auth,
             'ts': ts,
         }
+if __name__ == '__main__':
+    api=douyu(3125893)
+    print(api.onair())

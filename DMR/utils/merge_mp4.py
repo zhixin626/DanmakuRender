@@ -1,19 +1,34 @@
-import subprocess, os, json
-from pathlib import Path
+import subprocess
+import os
+import json
 import tempfile
-from typing import List, Optional, Tuple, Dict, Union
-from datetime import datetime
 import re
-from send2trash import send2trash
 import requests
 import logging,time,threading
 
-from DMR.utils.utils import rename_safe, safe_filename
+from pathlib import Path
+from typing import List,Dict, Union
+from datetime import datetime
+from send2trash import send2trash
+from DMR.utils.utils import safe_filename
 logger = logging.getLogger(__name__)
-
+__all__=[
+    "probe_media",
+    "merge_mp4",
+    "amplify_mp4",
+    "read_live_time_from_path",
+    "add_to_list",
+    "add_livetime",
+    "sync_section_episode_titles_bg",
+    "format_duration",
+    "parse_sectionId",
+    "build_headers",
+    "get_cookies",
+    ]
 def probe_media(
     path: Union[str,Path],
-    ffprobe: str = r"tools/ffprobe.exe"):
+    ffprobe: str = r"ffprobe"
+    ): # 不要删，被liveevents调用
     """
     用 ffprobe 获取基本信息：duration（秒，float），分辨率（width,height），
     以及格式/比特率等。字段缺失时做容错。
@@ -53,8 +68,10 @@ def probe_media(
     try:
         fmt_dict = data.get("format") or {}
         # ffprobe 的 duration 是字符串
-        duration = float(fmt_dict.get("duration")) if fmt_dict.get("duration") else None
-        bit_rate = int(fmt_dict.get("bit_rate")) if fmt_dict.get("bit_rate") else None
+        duration_raw = fmt_dict.get("duration")
+        duration = float(duration_raw) if isinstance(duration_raw, str) else None
+        bit_rate_raw = fmt_dict.get("bit_rate")
+        bit_rate = int(bit_rate_raw) if isinstance(bit_rate_raw, str) else None
         fmt = fmt_dict.get("format_name")
     except Exception:
         pass
@@ -127,7 +144,7 @@ def format_duration(start: datetime, end: datetime) -> str:
 def merge_mp4(
     mp4_list: List[str],
     remover=True,
-    ffmpeg: str = r"tools/ffmpeg.exe",
+    ffmpeg: str = r"ffmpeg",
     ):
     inputs = [Path(p) for p in mp4_list if p]
     if not inputs:
@@ -153,6 +170,8 @@ def merge_mp4(
         try:
             for p in inputs:
                 tmp.write(f"file '{Path(p).resolve().as_posix()}'\n")
+                # .resolve()=====转成绝对路径 消掉 . 和 ..
+                # .as_posix()====posix风格 用斜杠/而不是反斜杠\
             tmp.flush()
             filelist = tmp.name
         finally:
@@ -178,7 +197,7 @@ def merge_mp4(
 
 def detect(file:str):
     cmd = [
-            'tools/ffmpeg.exe',
+            'ffmpeg',
             '-hide_banner',
             '-i',file,
             '-vn', # video none 禁用视频流，不处理视频
@@ -194,7 +213,7 @@ def detect(file:str):
 
 def amplify_mp4(file,target_db=-1,remover=True,extra_gain_db=0) -> Path:
     file=Path(file)
-    peak = detect(str(file)) # 检测最高音量max_volume
+    peak       = detect(str(file)) # 检测最高音量max_volume
 
     gain_db = target_db - peak + extra_gain_db
     if gain_db < 0:
@@ -203,14 +222,14 @@ def amplify_mp4(file,target_db=-1,remover=True,extra_gain_db=0) -> Path:
     dst = safe_filename(str(file.parent/f"{file.stem}_amplified.mp4"))
     # dst = file.with_name(file.stem + "_amplified.mp4")
     cmd = [
-        'tools/ffmpeg.exe',
+        'ffmpeg',
         '-y',                # ← 覆盖输出，避免交互
         '-nostdin',          # ← 不读取标准输入 防止 FFmpeg 卡住等待用户输入
         '-hide_banner',
         '-i', str(file),
         '-af', f'volume={gain_db:.2f}dB,alimiter=limit=0.891', # audio filter音频滤镜
-        '-c:v', 'copy',
-        '-c:a', 'aac',
+        '-c:v', 'copy', #
+        '-c:a', 'aac', # AAC = 高级音频编码（Advanced Audio Coding）
         '-movflags', '+faststart',
         str(dst)
     ]
@@ -277,6 +296,7 @@ def add_to_list(bvid,sectionId,account=3546637425182939):
     }
     params = {"csrf": cookies["bili_jct"]}
     url = "https://member.bilibili.com/x2/creative/web/season/section/episodes/add"
+    time.sleep(5)
     r=requests.post(url,headers=headers,cookies=cookies,
         params=params,data=json.dumps(payload).encode("utf-8"))
     rj=r.json()
@@ -365,7 +385,7 @@ def build_edit_payload(bvid,account)-> dict:
     return payload
 
 def add_livetime(bvid: str, text: str,account) :
-    def insert_after_title(desc: str, text: str) -> str:
+    def insert_after(desc: str, text: str) -> str:
         pattern = r"(开播时间：.*(?:\n|$))"
         insert_text = f"{text}\n"
         # 如果找到了就替换，否则原样返回
@@ -380,8 +400,9 @@ def add_livetime(bvid: str, text: str,account) :
     params = {"csrf": cookies["bili_jct"]}
     url_edit='https://member.bilibili.com/x/vu/web/edit'
     payload = build_edit_payload(bvid,account)
-    payload["desc"] = insert_after_title(payload["desc"], text)
-
+    payload["desc"] = insert_after(payload["desc"], text)
+    # print(payload["desc"])
+    time.sleep(5)
     r=requests.post(
         url_edit,
         headers=headers,
@@ -477,21 +498,22 @@ def reorder_section_once(section_id: int, account: int, mode: str = "first_to_la
 
     return rj
 
-def sync_section_episode_titles(account: int, section_id: int,debug=False):
+def sync_section_episode_titles(
+    account: int,
+    section_id: Union[int, str],
+    debug: bool = False,
+) -> dict:
     """
-    将合集某个分P列表中，列表标题与视频标题不一致的部分，
-    自动把“列表标题”改成“视频标题”（只处理找到的第一个不一致的）。
+    返回一个字典，里面包含：
+    - changed: 修改成功的分P列表
+    - errors: 修改失败的分P列表及错误
     """
     url_section = "https://member.bilibili.com/x2/creative/web/season/section"
 
-    # 公共部分：cookies / headers
     cookies = get_cookies(account)
     headers = build_headers()
 
-    # ---------- 内部工具函数 ----------
-
     def _fetch_section_data(sec_id: int) -> dict:
-        """获取分区(section)的完整数据结构"""
         time.sleep(3)
         r = requests.get(
             url_section,
@@ -505,7 +527,6 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
         return data
 
     def _build_sorts(episodes: list) -> list:
-        """构造提交用的 sorts 列表"""
         sorts = []
         for idx, ep in enumerate(episodes, start=1):
             sorts.append({
@@ -515,7 +536,6 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
         return sorts
 
     def _set_list_title_same_as_video_title(episode: dict, episodes: list):
-        """把该分P的列表标题改成视频标题"""
         url_episode_edit = "https://member.bilibili.com/x2/creative/web/season/section/episode/edit"
 
         payload = {
@@ -525,8 +545,8 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
             "order": episode.get("order"),
             "seasonId": episode.get("seasonId"),
             "sectionId": episode.get("sectionId"),
-            "title": episode.get("archiveTitle"),   # 关键：改成视频标题
-            "sorts": _build_sorts(episodes),        # 整个分P的排序一起带上
+            "title": episode.get("archiveTitle"),  # 改成视频标题
+            "sorts": _build_sorts(episodes),
         }
 
         time.sleep(3)
@@ -539,7 +559,6 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
         )
         r.raise_for_status()
 
-        # 2. 逻辑层检查（非常重要）
         res = r.json()
         if res.get("code") != 0:
             raise RuntimeError(
@@ -549,14 +568,21 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
         return True   # 明确返回成功
 
     # ---------- 主流程 ----------
+    section_id = parse_sectionId(section_id)
     data = _fetch_section_data(section_id)
     episodes = data.get("episodes") or []
 
     if not episodes:
         logger.info(f"section_id={section_id} 下没有分P episodes")
-        return
+        return {
+            "section_id": section_id,
+            "changed": [],
+            "errors": [],
+            "message": "没有分P",
+        }
 
-    changed = False
+    changed_list: List[Dict] = []
+    error_list: List[Dict] = []
 
     for idx, ep in enumerate(episodes):
         archive_title = ep.get("archiveTitle")
@@ -565,24 +591,45 @@ def sync_section_episode_titles(account: int, section_id: int,debug=False):
         if archive_title == list_title:
             continue
 
-        logger.info(f"第{idx}个不一致,列表标题为:{list_title},将改为:{archive_title}")
-        # if debug:
-        #     print(f"第 {idx} 个视频标题不一致,视频标题为:{archive_title},列表标题为:{list_title}")
+        logger.info(f"第{idx}个不一致, 列表标题为:{list_title}, 将改为:{archive_title}")
+
         try:
             _set_list_title_same_as_video_title(ep, episodes)
             logger.info(f"第{idx}个修改成功")
-            # if debug:
-            #     print(f"已将列表标题:{list_title},改为视频标题:{archive_title}")
-        except Exception:
-            # 内部有logger信息
-            pass
 
-        changed = True
+            changed_list.append({
+                "index": idx,
+                "episode_id": ep.get("id"),
+                "aid": ep.get("aid"),
+                "old_title": list_title,
+                "new_title": archive_title,
+            })
 
-    if not changed:
+        except Exception as e:
+            logger.exception("修改第%d个分P失败: %s", idx, e)
+            error_list.append({
+                "index": idx,
+                "episode_id": ep.get("id"),
+                "aid": ep.get("aid"),
+                "old_title": list_title,
+                "new_title": archive_title,
+                "error": str(e),
+            })
+
+    if not changed_list and not error_list:
         logger.info("所有分P的列表标题都已经和视频标题一致")
-        # if debug:
-        #     print("所有分P的列表标题都已经和视频标题一致")
+        return {
+            "section_id": section_id,
+            "changed": [],
+            "errors": [],
+            "message": "所有分P标题本来就一致",
+        }
+
+    return {
+        "section_id": section_id,
+        "changed": changed_list,
+        "errors": error_list,
+    }
 
 def sync_section_episode_titles_bg(account: int, section_id: int,debug=False):
     t = threading.Thread(
@@ -593,5 +640,8 @@ def sync_section_episode_titles_bg(account: int, section_id: int,debug=False):
     )
     t.start()
 
-# if __name__ == '__main__':
-#     sync_section_episode_titles(3546637425182939,7517357,debug=True)
+if __name__ == '__main__':
+    # 运行：python -m DMR.utils.merge_mp4
+    file=r"D:\DanmakuRender\Tasks\不可一世杀手（弹幕版）\手12月11日23点03分（弹幕版）_merged_clipped.mp4"
+    amplify_mp4(file,remover=False,extra_gain_db=16)
+    # amplify_mp4(file,remover=False,extra_gain_db=10)

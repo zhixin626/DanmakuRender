@@ -58,7 +58,7 @@ class FFmpegDownloader():
                                                             '-probesize','50000000',
                                                             '-thread_queue_size', '16'])
         ffmpeg_args = [
-            self.ffmpeg, '-y',
+            self.ffmpeg, '-y','-hide_banner',
             '-headers', ''.join('%s: %s\r\n' % x for x in self.header.items()),
             *ffmpeg_stream_args,
             '-i', self.stream_url,
@@ -158,7 +158,7 @@ class FFmpegDownloader():
                                 if l > 0 and r > 0:
                                     downloaded_duration = line[l+5:r]
                                 try:
-                                    h, m, s = int(downloaded_duration.split(':')[0]), int(downloaded_duration.split(':')[0]), float(downloaded_duration.split(':')[2])
+                                    h, m, s = int(downloaded_duration.split(':')[0]), int(downloaded_duration.split(':')[1]), float(downloaded_duration.split(':')[2])
                                     downloaded_duration_ms = h * 3600 + m * 60 + s
                                     time_error = downloaded_duration_ms - datetime.now().timestamp() + self.start_time + (speed - 1)
                                     self.stable_callback(time_error)

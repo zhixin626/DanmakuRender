@@ -8,7 +8,8 @@ import glob
 from easydict import EasyDict as edict
 from os.path import exists, abspath, splitext, join
 from uuid import uuid1
-
+from typing import Union
+from pathlib import Path
 __all__ = [
     'rename_safe',
     'isvideo',
@@ -138,14 +139,22 @@ def rename_safe(src:str, dst:str, retry:int=10):
 
     return False
 
-def safe_filename(filename:str) -> str:
-    if not exists(filename):
+def safe_filename(filename: Union[str, Path]) -> Union[str, Path]:
+    is_path = isinstance(filename, Path)
+    path = filename if is_path else Path(filename)
+
+    if not path.exists():
         return filename
 
-    if exists(filename):
-        cnt = len(glob.glob(splitext(filename)[0] + '*'))
-        filename = splitext(filename)[0] + f'({cnt})' + splitext(filename)[1]
-    return filename
+    root = path.with_suffix("")   # 等价于 splitext(filename)[0]
+    ext = path.suffix             # 等价于 splitext(filename)[1]
+
+    i = 1
+    while True:
+        candidate = root.with_name(f"{root.name}({i})").with_suffix(ext)
+        if not candidate.exists():
+            return candidate if is_path else str(candidate)
+        i += 1
 
 def isvideo(path: str) -> bool:
     ext = path.split('.')[-1]

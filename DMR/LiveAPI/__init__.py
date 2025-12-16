@@ -136,3 +136,15 @@ def UrlAvailable(plat,rid=None) -> bool:
         return api.is_available()
     except:
         return None
+
+# if __name__ == '__main__':
+    # python -m DMR.LiveAPI.__init__
+    # url="https://live.bilibili.com/14988219"
+    # cookie=r"D:\DanmakuRender\.login_info\bili_watch_cookies.json"
+    # liveapi=LiveAPI(url)
+    # print(liveapi.raw_url)
+    # print(liveapi.rid)
+    # print(liveapi.Onair())
+    # print(liveapi.GetRoomInfo())
+    # print(liveapi.GetStreamerInfo())
+    # print(liveapi.GetStreamURL(bili_watch_cookies=cookie))

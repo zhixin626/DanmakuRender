@@ -13,21 +13,21 @@ class Config():
 
     def __init__(self, global_config_path:str, replay_config_path:List[str]) -> None:
         with open(self._base_config_path, 'r', encoding='utf-8') as f:
-            self._base_config = yaml.safe_load(f)
+            self._base_config = yaml.safe_load(f) # default.yml
 
-        self.global_config_path = global_config_path
+        self.global_config_path = global_config_path # configs/global.yml
         if isinstance(replay_config_path, str):
-            self.replay_config_path = sorted(glob.glob(os.path.join(replay_config_path, 'DMR-**.yml')))
+            self.replay_config_path = sorted(glob.glob(os.path.join(replay_config_path, 'DMR-**.yml'))) # configs/DMR-**.yml
         else:
             self.replay_config_path = replay_config_path
         
-        self.global_config = deepcopy(self._base_config)
+        self.global_config = deepcopy(self._base_config) # default.yml
         self.replay_config = {}
 
         with open(global_config_path, 'r', encoding='utf-8') as f:
-            _global_config = yaml.safe_load(f)
+            _global_config = yaml.safe_load(f) # configs/global.yml
         
-        self.global_config = merge_dict(self.global_config, _global_config)
+        self.global_config = merge_dict(self.global_config, _global_config) # configs/global.yml + default.yml
 
         for toolname, path in self.global_config.get('executable_tools_path',{}).items():
             if not path:
@@ -35,18 +35,18 @@ class Config():
             else:
                 ToolsList.set(toolname, path)
 
-        for config_path in self.replay_config_path:
+        for config_path in self.replay_config_path: # configs/DMR-**.yml
             with open(config_path, 'r', encoding='utf-8') as f:
-                _replay_config = yaml.safe_load(f)
+                _replay_config = yaml.safe_load(f) # DMR-test.yml
             taskname = os.path.splitext(os.path.basename(config_path))[0].split('-', 1)[-1]
             replay_config = {}
             # self.replay_config[taskname] = replay_config
             common_args = _replay_config.get('common_event_args')
             replay_config['common_event_args'] = deepcopy(common_args)
             
-            global_download_args = self.global_config['download_args']
+            global_download_args = self.global_config['download_args'] # configs/global.yml + default.yml 的 download_args
             dltype = _replay_config.get('download_args', {}).get('dltype', 'live')
-            replay_config['download_args'] = deepcopy(global_download_args[dltype])
+            replay_config['download_args'] = deepcopy(global_download_args[dltype]) # configs/global.yml + default.yml 的 download_args的live
             if _replay_config.get('download_args'):
                 replay_config['download_args'] = merge_dict(replay_config['download_args'], _replay_config['download_args'])
 

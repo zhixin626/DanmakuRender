@@ -62,3 +62,22 @@ def check_update(version):
             print('')
     except Exception as e:
         print(f'检查更新失败, {e}')
+
+if __name__ == '__main__':
+    import requests
+
+    url = "https://www.wikipedia.org"
+    url2 = "https://www.google.com"
+    headers = {
+    "User-Agent": "MyTestScript/1.0 (contact: your_email@example.com)"
+    }
+    proxies = {
+    "http":  "http://127.0.0.1:7897",
+    "https": "http://127.0.0.1:7897",
+    }
+    r = requests.get(url2, timeout=10,headers=headers,proxies=proxies)
+
+    print("status code:", r.status_code)
+    print("content length:", len(r.text))
+    print("first 200 chars:")
+    print(r.text[:200])

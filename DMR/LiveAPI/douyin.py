@@ -207,5 +207,10 @@ class douyin(BaseAPI):
         return title, uname, face_url, keyframe_url
 
 if __name__ == '__main__':
-    api = douyin('458897981613')
-    print(api.get_stream_url())
+    from DMR.utils import split_url
+    url='https://www.douyu.com/3125893'
+    platform,rid=split_url(url)
+    print(platform,rid)
+    api = douyin(rid)
+
+    # print(api.onair())
