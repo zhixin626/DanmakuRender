@@ -1,6 +1,26 @@
-import subprocess
+import subprocess,os
 from pathlib import Path
 from DMR.utils.utils import safe_filename
+from upload_only import strip_quotes
+import colorlog,logging
+handler = colorlog.StreamHandler()
+handler.setFormatter(
+    colorlog.ColoredFormatter(
+        "%(asctime)s %(log_color)s%(levelname)s%(reset)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        log_colors={
+            "DEBUG": "cyan",
+            "INFO": "green",
+            "WARNING": "yellow",
+            "ERROR": "red",
+            "CRITICAL": "red,bg_white",
+        },
+    )
+)
+logger = logging.getLogger()
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
 def parse_time_input(s: str) -> int:
     """
     支持两种输入：
@@ -31,17 +51,16 @@ def parse_time_input(s: str) -> int:
 
 def main():
     # ---------- 输入部分 ----------
-    src = input("请输入需要截取的视频路径：\n").strip()
+    while True:
+        src = strip_quotes(input("请输入需要截取的视频路径：\n").strip())
+        if not src:
+            print("输入为空，请重新输入")
+            continue
+        if not os.path.exists(src):
+            print("路径不存在，请重新输入")
+            continue
+        break
 
-    if not src:
-        src="D:/DanmakuRender/Tasks/佐佐酱（弹幕版）/佐11月30日（弹幕）.mp4"
-        print(f"输入路径为空，[debug]将使用默认路径{src}")
-
-
-    if src.startswith('"') and src.endswith('"'):
-        src = src[1:-1]
-    if src.startswith("'") and src.endswith("'"):
-        src = src[1:-1]
     src_path = Path(src)
     if not src_path.exists():
         print(f"文件不存在：{src_path}")

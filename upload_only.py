@@ -7,7 +7,7 @@ from DMR.utils import *
 from DMR.utils.utils import replace_keywords
 import requests
 from DMR.LiveAPI import LiveAPI
-from DMR.utils.merge_mp4 import probe_media
+from DMR.utils.merge_mp4 import *
 from DMR.Uploader.biliwebapi import BiliWebApi
 from DMR.utils.dataclass import VideoInfo
 
@@ -26,7 +26,8 @@ handler.setFormatter(
         },
     )
 )
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger("DMR")
+logger = logging.getLogger() # root
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
@@ -388,13 +389,10 @@ def main():
     re_add_to_list = parse_yn("是否需要加入到合集[y/n], 回车默认为y：\n", default=True)
 
     if engine =="biliuprs":
-        show_cmd = parse_yn("是否需要展示cmd命令[y/n], 回车默认为y：\n", default=True)
-        show_progress = parse_yn("是否需要展示进度条[y/n], 回车默认为y：\n", default=True)
-
         upload_video(
             video_path,
-            show_progress_bar=show_progress,
-            show_cmd=show_cmd,
+            show_progress_bar=True,
+            show_cmd=True,
             re_change_desc=re_change_desc,
             re_add_to_list=re_add_to_list,
             re_render_cover=re_render_cover,
@@ -405,11 +403,10 @@ def main():
             re_change_desc=re_change_desc,
             re_add_to_list=re_add_to_list,
             re_render_cover=re_render_cover
-            )
+        )
 
 if __name__ == "__main__":
     main()
-    # file="D:/DanmakuRender/Tasks文件/不可一世杀手（弹幕版）/手12月15日23点02分（弹幕版）_merged_amplified.mp4"
-    # _re_change_desc(file,bvid="BV1Yeq8BwE7S")
+
 
 

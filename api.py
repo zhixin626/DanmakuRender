@@ -18,17 +18,12 @@ def ping():
     return {"pong": True}
 
 class SyncReq(BaseModel):
-    secret: str
     account:int
     sectionId: Union[int, str]
 
 @app.post("/synctitle")
 def syn_title(req: SyncReq):
-    if req.secret != "zhixin626":
-        raise HTTPException(status_code=401, detail="登录失败")
-
     result = sync_section_episode_titles(req.account, req.sectionId)
-
     lines: list[str] = []
 
     # 顶部 message（比如“本次检测到 xx 个分P 标题不一致”之类）

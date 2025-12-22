@@ -39,7 +39,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.logger.info(f'{self.name}: {message.msg}')
 
     def onLiveStart(self, message:PipeMessage):
-        self.logger.info(f'{self.name}: {message.msg}')
         self.is_already_add_to_list  = False
         self.is_already_change_desc = False
         self.is_live_end     = False
@@ -68,7 +67,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         if not is_sync or self.is_sync:
             # self.is_sync会在onLiveEnd和初始化的时候标记为 false
             # self.is_sync会在sync后标记为true
-            self.logger.debug("不同步视频名为列表视频名")
+            self.logger.debug("跳过:sync_list_name")
             return
         else:
             account   = self.config['common_event_args'].get("sync_list_name", {}).get("account")
@@ -202,50 +201,46 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         #                                         "auto_render": self.config['common_event_args'].get('auto_render')})
 
         return ret_msgs
-    def check_zuozuo_video(self):
-        # ---------------- 佐佐视频：渲染 + 上传 + 加合集 ----------------
-        zuozuo_video_args=self.config['common_event_args'].get('zuozuo_video_args',{})
-        is_upload=zuozuo_video_args.get("is_upload",False)
-        if is_upload:
-            from DMR.utils.render_with_manimgl import render_zuozuovideo_with_manimgl
-            stime     = read_live_time_from_path(self.src_path, is_start=True)
-            etime     = read_live_time_from_path(self.src_path, is_start=False)
-            duration  = format_duration(stime, etime)
-            self.logger.info("开始渲染佐佐视频")
-            try:
-                zuozuo_video_path = render_zuozuovideo_with_manimgl(self.src_path)
-            except Exception as e:
-                self.logger.error(f"佐佐视频渲染失败: {e}")
-                zuozuo_video_path = None
+    # def check_zuozuo_video(self):
+    #     # ---------------- 佐佐视频：渲染 + 上传 + 加合集 ----------------
+    #     zuozuo_video_args=self.config['common_event_args'].get('zuozuo_video_args',{})
+    #     is_upload=zuozuo_video_args.get("is_upload",False)
+    #     account=zuozuo_video_args.get("account",False)
+    #     if is_upload:
+    #         from DMR.utils.render_with_manimgl import render_zuozuovideo_with_manimgl
+    #         stime     = read_live_time_from_path(self.src_path, is_start=True)
+    #         etime     = read_live_time_from_path(self.src_path, is_start=False)
+    #         duration  = format_duration(stime, etime)
+    #         self.logger.info("开始渲染佐佐视频")
+    #         try:
+    #             zuozuo_video_path = render_zuozuovideo_with_manimgl(self.src_path)
+    #         except Exception as e:
+    #             self.logger.error(f"佐佐视频渲染失败: {e}")
+    #             zuozuo_video_path = None
 
-            if zuozuo_video_path:
-                from DMR.utils.upload_video import upload_zuozuo_video
-                # self.logger.info("开始上传佐佐视频")
-                success, bvid, log_text = upload_zuozuo_video(
-                    str(zuozuo_video_path),
-                    stime,
-                    etime,
-                    duration,
-                    is_only_self=zuozuo_video_args.get("is_only_self",True),
-                    cover_path=self.config['common_event_args'].get('cover_args',{}).get("output_dir")+"/cover.png"
-                )
+    #         if zuozuo_video_path:
+    #             from DMR.utils.upload_video import upload_zuozuo_video
+    #             # self.logger.info("开始上传佐佐视频")
+    #             success, bvid, log_text = upload_zuozuo_video(
+    #                 str(zuozuo_video_path),
+    #                 stime,
+    #                 etime,
+    #                 duration,
+    #                 is_only_self=zuozuo_video_args.get("is_only_self",True),
+    #                 cover_path=self.config['common_event_args'].get('cover_args',{}).get("output_dir")+"/cover.png"
+    #             )
 
-                if not success or not bvid:
-                    self.logger.error(f"佐佐视频上传失败，不加入合集。上传日志：\n{log_text}")
-                else:
-                    sectionId = parse_sectionId("zuo")
-                    self.logger.info(
-                        f"佐佐视频上传成功，bvid={bvid}，准备加入合集 sectionId={sectionId}"
-                    )
-                    try:
-                        add_to_list(bvid,sectionId)
-                    except Exception as e:
-                        self.logger.error(f"佐佐视频加入合集/同步标题失败: {e}")
+    #             if not success or not bvid:
+    #                 self.logger.error(f"佐佐视频上传失败，不加入合集。上传日志：\n{log_text}")
+    #             else:
+    #                 try:
+    #                     add_to_list(bvid,sectionId,account)
+    #                 except Exception as e:
+    #                     self.logger.error(f"佐佐视频加入合集/同步标题失败: {e}")
 
     def onLiveEnd(self, message:PipeMessage):
         self.is_live_end=True
         self.is_sync= False # 给下一次开播 重新同步视频名和列表名做准备
-        self.logger.info(f'{self.name}: {message.msg}.')
         group_id = message.data
         if group_id is None:
             return
@@ -259,7 +254,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # 检查是否合并
         self.check_for_merge(group_id)
 
-        self.check_zuozuo_video()
+        # self.check_zuozuo_video()
 
         ret_msgs = []
         if self.config['common_event_args'].get('auto_upload'):
@@ -790,10 +785,10 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # 判断是否加入合集
         self.bvid=message.bvid
         after_upload_args = self.config["common_event_args"].get('after_upload_args',{})
-        add_to_list=after_upload_args.get("add_to_list",False)
+        need_add_to_list=after_upload_args.get("add_to_list",False)
         account=after_upload_args.get('account',None)
         sectionId = after_upload_args.get('sectionId',None)
-        if add_to_list and not self.is_already_add_to_list:
+        if need_add_to_list and not self.is_already_add_to_list:
             try:
                 add_to_list(self.bvid,sectionId,account)
                 self.is_already_add_to_list=True

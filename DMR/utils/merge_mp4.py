@@ -7,24 +7,20 @@ import requests
 import logging,time,threading
 
 from pathlib import Path
+from wcwidth import wcswidth
 from typing import List,Dict, Union
 from datetime import datetime
 from send2trash import send2trash
 from DMR.utils.utils import safe_filename
 logger = logging.getLogger(__name__)
-__all__=[
-    "probe_media",
-    "merge_mp4",
-    "amplify_mp4",
-    "read_live_time_from_path",
-    "add_to_list",
-    "add_livetime",
-    "sync_section_episode_titles_bg",
-    "format_duration",
-    "parse_sectionId",
-    "build_headers",
-    "get_cookies",
-    ]
+COLORS = {
+    "gray":   "\033[90m",
+    "green":  "\033[32m",
+    "yellow": "\033[33m",
+    "red":    "\033[31m",
+    "blue":   "\033[34m",
+    "reset":  "\033[0m",
+}
 def probe_media(
     path: Union[str,Path],
     ffprobe: str = r"ffprobe"
@@ -263,23 +259,8 @@ def build_headers():
     "User-Agent": "Mozilla/5.0"
     }
 
-def add_to_list(bvid,sectionId,account=3546637425182939):
-    sectionId_leng=7184492
-    sectionId_shou=7184423
-    if isinstance(sectionId, int):  # 数字直接用
-        pass
-    elif isinstance(sectionId, str):
-        if sectionId.lower() == "shou":
-            sectionId = sectionId_shou
-        elif sectionId.lower() == "leng":
-            sectionId = sectionId_leng
-        elif sectionId.isdigit():  # 如果是数字字符串
-            sectionId = int(sectionId)
-        else:
-            raise ValueError(f"未知的 sectionId 标识: {sectionId!r}")
-    else:
-        raise TypeError(f"sectionId 类型不合法: {type(sectionId)}")
-
+def add_to_list(bvid,sectionId,account):
+    sectionId=parse_sectionId(sectionId,account)
     cookies=get_cookies(account)
     headers = build_headers()
     info=get_info(bvid,account)
@@ -296,7 +277,7 @@ def add_to_list(bvid,sectionId,account=3546637425182939):
     }
     params = {"csrf": cookies["bili_jct"]}
     url = "https://member.bilibili.com/x2/creative/web/season/section/episodes/add"
-    time.sleep(5)
+    time.sleep(3)
     r=requests.post(url,headers=headers,cookies=cookies,
         params=params,data=json.dumps(payload).encode("utf-8"))
     rj=r.json()
@@ -318,13 +299,23 @@ def get_info(bvid,account):
     info = j["data"]
     return info
 
-def parse_sectionId(sectionId):
-    Id_dict = {
-        "shou": 7184423,
-        "leng": 7184492,
-        "yue": 7490007,
-        "zuo": 7517357,
-    }
+def parse_sectionId(sectionId,account):
+    if account == 3546637425182939:
+        Id_dict = {
+            "shou": 7184423,
+            "leng": 7184492,
+            "yue": 7490007,
+            "zuo": 7517357,
+        }
+    elif account==3546981263739190:
+        Id_dict = {
+            "shou": 7710291,
+            "leng": 7710297,
+            "yue": 7710283,
+            "zuo": 7722925,
+        }
+    else:
+        raise RuntimeError("未知account")
     if isinstance(sectionId,int):
         return sectionId
     if isinstance(sectionId, str):
@@ -387,12 +378,12 @@ def build_edit_payload(bvid,account)-> dict:
 def add_livetime(bvid: str, text: str,account) :
     def insert_after(desc: str, text: str) -> str:
         pattern = r"(开播时间：.*(?:\n|$))"
-        insert_text = f"{text}\n"
-        # 如果找到了就替换，否则原样返回
-        new_desc, count = re.subn(pattern, lambda m: m.group(1) + insert_text, desc)
+        def repl(m):
+            sep = "" if m.group(1).endswith("\n") else "\n"
+            return m.group(1) + sep + text.rstrip("\r\n") + "\n"
+        new_desc, count = re.subn(pattern, repl, desc)
         if count == 0:
-            # 如果没有找到匹配行，就在末尾补上
-            new_desc = desc.rstrip() + "\n" + insert_text
+            new_desc = desc.rstrip() + "\n" + text.rstrip("\r\n") + "\n"
         return new_desc
 
     cookies=get_cookies(account)
@@ -402,7 +393,7 @@ def add_livetime(bvid: str, text: str,account) :
     payload = build_edit_payload(bvid,account)
     payload["desc"] = insert_after(payload["desc"], text)
     # print(payload["desc"])
-    time.sleep(5)
+    time.sleep(3)
     r=requests.post(
         url_edit,
         headers=headers,
@@ -501,18 +492,12 @@ def reorder_section_once(section_id: int, account: int, mode: str = "first_to_la
 def sync_section_episode_titles(
     account: int,
     section_id: Union[int, str],
-    debug: bool = False,
 ) -> dict:
     """
     返回一个字典，里面包含：
     - changed: 修改成功的分P列表
     - errors: 修改失败的分P列表及错误
     """
-    url_section = "https://member.bilibili.com/x2/creative/web/season/section"
-
-    cookies = get_cookies(account)
-    headers = build_headers()
-
     def _fetch_section_data(sec_id: int) -> dict:
         time.sleep(3)
         r = requests.get(
@@ -568,7 +553,11 @@ def sync_section_episode_titles(
         return True   # 明确返回成功
 
     # ---------- 主流程 ----------
-    section_id = parse_sectionId(section_id)
+    url_section = "https://member.bilibili.com/x2/creative/web/season/section"
+    cookies = get_cookies(account)
+    headers = build_headers()
+
+    section_id = parse_sectionId(section_id,account)
     data = _fetch_section_data(section_id)
     episodes = data.get("episodes") or []
 
@@ -640,8 +629,21 @@ def sync_section_episode_titles_bg(account: int, section_id: int,debug=False):
     )
     t.start()
 
-if __name__ == '__main__':
-    # 运行：python -m DMR.utils.merge_mp4
-    file=r"D:\DanmakuRender\Tasks\不可一世杀手（弹幕版）\手12月11日23点03分（弹幕版）_merged_clipped.mp4"
-    amplify_mp4(file,remover=False,extra_gain_db=16)
-    # amplify_mp4(file,remover=False,extra_gain_db=10)
+
+def pad_disp(s: str, width: int, align: str = "left", fill: str = " "):
+    s = str(s)
+    w = wcswidth(s)
+    if w < 0:  # 遇到不可见控制符等，兜底
+        w = len(s)
+
+    pad = max(0, width - w)
+
+    if align == "left":
+        return s + fill * pad
+    elif align == "right":
+        return fill * pad + s
+    elif align == "center":
+        left = pad // 2
+        return fill * left + s + fill * (pad - left)
+    else:
+        raise ValueError("align must be left/right/center")

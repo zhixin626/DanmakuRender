@@ -29,7 +29,7 @@ def rendercover_with_manimgl(name, time,color,year,output_dir,is_open=False,extr
 
     subprocess.run(cmd, check=True)
 
-def rendercover_with_manimgl_bg(name: str, time: str,color,year,output_dir:str,debug=False):
+def rendercover_with_manimgl_bg(name: str, time: str,color,year,output_dir:str):
     """
     后台异步生成封面，不阻塞主线程，会打印成功日志或错误日志。
     """
@@ -37,14 +37,10 @@ def rendercover_with_manimgl_bg(name: str, time: str,color,year,output_dir:str,d
         try:
             rendercover_with_manimgl(name, time,color,year,output_dir)
         except Exception as e:
-            logger.exception(f"封面生成失败:name={name},time={time},error={e}")
-            if debug:
-                print(f"封面生成失败:name={name},time={time},error={e}")
+            logger.exception(f"封面生成失败 name:{name},time:{time},year:{year},error:{e}")
             return
-        logger.info(f"封面生成成功:name={name},time={time}")
-        if debug:
-            print(f"封面生成成功:name={name},time={time}")
-    # 后台线程
+        logger.info(f"封面生成成功  name:{name}  time:{time}  year:{year}")
+
     t = threading.Thread(target=worker, daemon=True)
     t.start()
 

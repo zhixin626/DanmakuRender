@@ -129,6 +129,7 @@ class VideoInfo(FileInfo):
                 ctime:datetime=None,
                 stime:datetime=None,
                 etime:datetime=None,
+                totaltime:datetime=None,
                 duration:int=None,
                 resolution:Tuple[int, int]=None,
                 title:str=None,
@@ -142,6 +143,7 @@ class VideoInfo(FileInfo):
                 **kwargs):
         self.etime=etime
         self.stime=stime
+        self.totaltime=totaltime
         self.streamer = streamer
         self.duration = duration
         self.resolution = resolution

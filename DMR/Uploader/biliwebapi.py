@@ -344,7 +344,7 @@ class BiliWebApi:
         videos.append(video_part)  # 添加已经上传的视频
 
         ret = self.submit(submit_api=submit_api, videos=videos)
-        logger.info(f"上传成功: {ret}")
+        # logger.info(f"上传成功: {ret}")
         bvid = ret['data']['bvid']
         videos.bvid = bvid
         return True, bvid
@@ -372,8 +372,9 @@ class BiliWebApi:
 
         # print("-----------")
         # print(upload_id, chunks, chunk_size, total_size)
-        logger.info(
-            f"{file_name} - upload_id: {upload_id}, chunks: {chunks}, chunk_size: {chunk_size}, total_size: {total_size}")
+
+        # logger.info(
+        #     f"{file_name} - upload_id: {upload_id}, chunks: {chunks}, chunk_size: {chunk_size}, total_size: {total_size}")
         
         
         if isinstance(stream_queue, (str, os.PathLike)):
@@ -445,7 +446,7 @@ class BiliWebApi:
             try:
                 r = self._session.post(url, params=p, json={"parts": parts}, headers=headers, timeout=15).json()
                 if r.get('OK') == 1:
-                    logger.info(f'{file_name} uploaded >> {n / 1000 / 1000:.2f}MB, {n / 1000 / 1000 / cost:.2f}MB/s. {r}')
+                    # logger.info(f'{file_name} uploaded >> {n / 1000 / 1000:.2f}MB, {n / 1000 / 1000 / cost:.2f}MB/s. {r}')
                     return {"title": splitext(file_name)[0], "filename": splitext(basename(upos_uri))[0], "desc": ""}
                 raise IOError(r)
             except IOError:

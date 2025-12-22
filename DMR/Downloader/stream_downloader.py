@@ -11,7 +11,17 @@ from DMR.Downloader.Danmaku import DanmakuDownloader
 from DMR.LiveAPI import *
 from DMR.utils import *
 from pathlib import Path
+from DMR.utils.merge_mp4 import COLORS, format_duration,pad_disp
 from DMR.utils.seconds_until import is_now_in_time_ranges,get_start_check_interval
+from enum import Enum
+class StreamState(str, Enum):
+    OFFLINE = "offline"                  # 稳态：不在播
+    LIVE = "live"                        # 稳态：直播中（允许录）
+    REPLAY = "replay"                    # 稳态：回放/录像中（禁录）
+    LIVE_END = "live_end"        # 瞬时态：直播刚结束（要发 liveend）
+    REPLAY_END = "replay_end"    # 瞬时态：回放刚结束（不发 liveend，仅复位）
+    LIVE_START = "live_start"
+    REPLAY_START = "replay_start"
 
 class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中初始化
     def __init__(self, 
@@ -32,8 +42,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                  debug=False,
                  **kwargs
         ) -> None:
-        self.debug = debug
-        self.debug_end=False
         self.taskname = taskname
         self.url = url
         self.plat, self.rid = split_url(url)
@@ -44,6 +52,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.send_queue = send_queue
         self.logger = logging.getLogger(__name__)
         self.kwargs = kwargs
+        self.debug = debug
         self.segment = segment
         self.danmaku = danmaku
         self.video = video
@@ -57,7 +66,14 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         #     raise NotImplementedError(f'No Downloader Named {self.engine}.')
 
         os.makedirs(self.output_dir,exist_ok=True)
-    
+    @property
+    def taskname_disp(self) -> str:
+        return (
+            f"{COLORS['yellow']}"
+            f"{pad_disp(str(self.taskname), 15)}"
+            f"{COLORS['reset']}"
+        )
+
     def _pipeSend(self, event, msg, target=None, dtype=None, data=None, **kwargs):
         if self.send_queue:
             target = target if target else f'replay/{self.taskname}'
@@ -94,7 +110,9 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             segment_id=self.segment_id,
             size=os.path.getsize(filename),
             ctime=self.segment_start_time,
-            stime=self.live_start_time,    #<<<<<添加！！---------------------------
+            stime=self.live_start_time if hasattr(self,"live_start_time") else datetime.now(),    #<<<<<添加！！---------------------------
+            etime=self.live_end_time if hasattr(self,"live_end_time") else datetime.now(),    #<<<<<添加！！---------------------------
+            totaltime=format_duration(self.live_start_time,self.live_end_time) if hasattr(self,"live_end_time") and hasattr(self,"live_start_time") else "0",
             duration=duration,
             resolution=(self.width, self.height),
             title=self.room_info['title'],
@@ -147,7 +165,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.segment_start_time = datetime.now()
         self.segment_id += 1
 
-    def start_once(self):
+    def start_once(self, mode: str = "normal_mode"):
         self.stoped = False
         
         # init segment info
@@ -255,55 +273,65 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         if self.video:
             futures.append(self.executor.submit(video_thread))
         
-        while not self.stoped:
-            timeout = 60  # 默认情况
+        if mode == "normal_mode":
 
-            # >>>>>>>>>>>>>>> debug模式<<<<<<<<<<<<<<
-            if self.debug:
-                debug_time = self.advanced_video_args.get("debug_time", 180)
-                elapsed = (datetime.now() - self.live_start_time).total_seconds()
-                if elapsed >= debug_time:
-                    self.logger.info(f"{self.taskname}:达到{debug_time}秒录制限制,结束本次录制")
-                    self.debug_end=True
+            while not self.stoped:
+
+                try:
+                    for future in as_completed(futures, timeout=60):
+                        return future.result()
+                except TimeoutError:
+                    if self.liveapi.Onair() == False:
+                        self.logger.debug('LIVE END.')
+                        return
+
+        elif mode == "test_mode":
+            self.logger.info(f"正在进行test_mode录制,时长{self.test_max_seconds}秒...")
+
+            while not self.stoped:
+                elapsed = (datetime.now() - self.segment_start_time).total_seconds()
+                if elapsed >= self.test_max_seconds:
+                    self.logger.info(f"{self.taskname_disp}: 达到 {self.test_max_seconds}s 测试上限，后续禁录")
                     return
-                # 还没到时间，就按剩余时间来缩短这一轮 timeout
-                remaining = debug_time - elapsed
+                remaining = self.test_max_seconds - elapsed
                 timeout = max(1, min(60, remaining))
-            # >>>>>>>>>>>>>>> debug模式 <<<<<<<<<<<<<<
 
-            try:
-                for future in as_completed(futures, timeout=timeout):
-                    return future.result()
-            except TimeoutError:
-                if self.liveapi.Onair() == False:
-                    self.logger.debug('LIVE END.')
+                try:
+                    for future in as_completed(futures, timeout=timeout):
+                        return future.result()
+                except TimeoutError:
+                    if self.liveapi.Onair() == False:
+                        self.logger.debug('LIVE END.')
+                        return
+
+        elif mode == "firstsegment_mode":
+            self.logger.info(f"{self.taskname_disp}:正在进行firstsegment_mode录制,时长{self.firstsegment_seconds}秒...")
+
+            while not self.stoped:
+                elapsed = (datetime.now() - self.segment_start_time).total_seconds()
+                if elapsed >= self.firstsegment_seconds:
+                    self.logger.info(f"{self.taskname_disp}:达到{self.firstsegment_seconds}秒，执行一次受控切段")
+                    self.stop_once()                   # ⭐关键：触发 downloader.stop() -> segment_callback 链路
                     return
+                remaining = self.firstsegment_seconds - elapsed
+                timeout = max(1, min(60, remaining))
+
+                try:
+                    for future in as_completed(futures, timeout=timeout):
+                        return future.result()
+                except TimeoutError:
+                    if self.liveapi.Onair() == False:
+                        self.logger.debug('LIVE END.')
+                        return
+
+    def get_effective_onair(self):
+        if getattr(self, "test_mode_end", False):
+            return False
+        else:
+            return self.liveapi.Onair()
+
 
     def start_helper(self):
-        self.loop = True
-        record_liveend_time = False
-        restarting_since_error = False
-        enable_record_windows=self.advanced_video_args.get("record_windows",{}).get("enabled",False)
-
-        stop_waited = 0  # 已经等待的时间（下播但是还没停止）
-        stop_wait_time = int(self.stop_wait_time*60)    # 设定的等待时间
-        live_end = True # 彻底下播了
-        in_session = False  # 未进入本次直播
-        self.debug=self.advanced_video_args.get("debug",False)
-
-        restart_cnt = 0     # 出错重启次数
-        restart_interval = self.advanced_video_args.get('restart_interval', (0, 10, 60))  # 重启间隔时间
-        if isinstance(restart_interval, (int, float)):
-            restart_interval_min = restart_interval_step = restart_interval_max = restart_interval
-        else:
-            restart_interval_min, restart_interval_step, restart_interval_max = restart_interval
-        # start_check_interval = self.advanced_video_args.get('start_check_interval', 60)  # 开播检测时间
-        stop_check_interval  = self.advanced_video_args.get('stop_check_interval' , 30)  # 下播检测间隔
-        
-        self.sess_id = uuid(8)
-        self.segment_id = 1
-
-
         def write_time_to_txt(mode: str):
             out_dir = Path(self.output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -317,95 +345,179 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             with open(out_dir / file, "a", encoding="utf-8", newline="\n") as f:
                 f.write(now.isoformat(timespec="seconds") + "\n")
 
-        def allow_record():
-            onair = self.liveapi.Onair()
-            if not onair:
-                return False
-            else:
-                allow_record=True
-                if enable_record_windows:
-                    ranges = self.advanced_video_args.get("record_windows", {}).get("ranges", [])
-                    if ranges and (not is_now_in_time_ranges(ranges)):
-                        allow_record = False
-                if restarting_since_error:
-                    allow_record=True
-                if self.debug_end:
-                    allow_record = False
-                return allow_record
+        def in_record_window(now=None) -> bool:
+            if not enable_record_windows:
+                return True
+            ranges = self.advanced_video_args.get("record_windows", {}).get("ranges", [])
+            return is_now_in_time_ranges(ranges, now=now)
 
-        if not allow_record():
-            self._pipeSend('liveend', '直播未开始', )
-            interval = get_start_check_interval(self.advanced_video_args)
-            time.sleep(interval)
+        def update_state(state):
+            now = datetime.now()
+            now_onair = self.get_effective_onair()
 
+            # 初始化
+            if state is None:
+                if now_onair:
+                    state = StreamState.LIVE_START if trust_onair_at_startup else StreamState.REPLAY_START
+                else:
+                    state = StreamState.OFFLINE
+                return state
+
+            if state in (StreamState.LIVE_END, StreamState.REPLAY_END):
+                return StreamState.OFFLINE
+
+            if now_onair:
+                if state == StreamState.OFFLINE:
+                    return (StreamState.LIVE_START if in_record_window(now) else StreamState.REPLAY_START)
+
+                if state == StreamState.LIVE_START:
+                    return StreamState.LIVE
+                if state == StreamState.REPLAY_START:
+                    return StreamState.REPLAY
+
+                # LIVE/REPLAY 稳态保持
+                return state
+
+            # now_onair == False
+            if state == StreamState.LIVE:
+                return StreamState.LIVE_END
+            if state == StreamState.REPLAY:
+                return StreamState.REPLAY_END
+
+            return StreamState.OFFLINE
+
+
+        # =================初始化=========================================================================
+        self.loop = True
+        enable_record_windows = self.advanced_video_args.get("record_windows", {}).get("enabled", False)
+        trust_onair_at_startup = self.advanced_video_args.get("trust_onair_at_startup",True)
+
+        stop_waited = 0
+        stop_wait_time = int(self.stop_wait_time * 60)
+        stop_check_interval = self.advanced_video_args.get('stop_check_interval', 30)
+        # ===============testmode====================
+        tm = self.advanced_video_args.get("test_mode", {}) or {}
+        self.test_enabled = bool(tm.get("enabled", False))
+        self.test_max_seconds = int(tm.get("max_record_seconds", 180))
+        self.test_mode_end = False
+        # ===============first_segment_mode====================
+        fs = self.advanced_video_args.get("firstsegment", {}) or {}
+        self.firstsegment_enabled = bool(fs.get("enabled", False))
+        self.firstsegment_seconds = int(fs.get("seconds", 180))
+        self.firstsegment_mode_end = False
+
+        restart_cnt = 0
+        restart_interval = self.advanced_video_args.get('restart_interval', (0, 10, 60))
+        if isinstance(restart_interval, (int, float)):
+            restart_interval_min = restart_interval_step = restart_interval_max = restart_interval
+        else:
+            restart_interval_min, restart_interval_step, restart_interval_max = restart_interval
+
+        self.sess_id = uuid(8)
+        self.segment_id = 1
+
+        # ======第一次开启程序=================================
+        state = update_state(None)
+        if state == StreamState.OFFLINE:
+            self.logger.info(f"{self.taskname_disp}💤未开播")
+
+        # 进入loop前的初始化
+        live_truely_end = True
+        state = None
         while self.loop:
-            if not allow_record(): # 不在直播状态（未开播or已下播）
-                restart_cnt = 0
-                if in_session and not live_end and not record_liveend_time:  # 开播了但是不在直播状态 and 没有彻底下播 --> 刚下播
-                    self.logger.info(f"[{self.taskname}]下播,本轮录制结束")
-                    write_time_to_txt("end") # 记录下播时间
-                    record_liveend_time=True
+            state = update_state(state)
+            # ---------- REPLAY end----------
+            if state == StreamState.REPLAY_END:
+                self.logger.info(f"{self.taskname_disp}📺回放结束")
+                continue
 
-                if live_end:  # 不在直播状态 and 彻底下播
+            # ---------- REPLAY start----------(1)
+            if state == StreamState.REPLAY_START:
+                self.logger.info(f"{self.taskname_disp}📺回放开始")
+                time.sleep(stop_check_interval)
+                continue
+            # ---------- REPLAY ing ----------
+            if state == StreamState.REPLAY:
+                time.sleep(stop_check_interval)
+                continue
+            # --------- LIVE_END / REPLAY_END ----------
+            if state == StreamState.LIVE_END:
+                self.logger.info(f"{self.taskname_disp}⌛下播,本轮录制结束")
+                now = datetime.now()
+                self.live_end_time = now
+                write_time_to_txt("end")
+                stop_waited = 0
+                live_truely_end = False
+                continue
+
+            # ---------- OFFLINE ----------(2)
+            if state == StreamState.OFFLINE:
+                restart_cnt = 0
+                if live_truely_end:
                     interval = get_start_check_interval(self.advanced_video_args)
                     time.sleep(interval)
-
-                else:        # 不在直播状态 and 没有彻底下播
+                else:
                     time.sleep(stop_check_interval)
                     stop_waited += stop_check_interval
 
-                if stop_waited > stop_wait_time and not live_end: # 没有彻底下播，但超过了检测彻底下播的时间
-                    live_end = True                               # 标记为 彻底下播
-                    in_session = False                            # 标记为 未进入了本次直播（退出本次直播）（未进入下一次直播）
+                if stop_waited > stop_wait_time and not live_truely_end:
+                    live_truely_end = True
                     self._pipeSend('liveend', '直播真的结束了', data=self.sess_id)
-                    self.sess_id = uuid(8) # 重新初始化
+                    self.logger.info(f"{self.taskname_disp}🔴直播真的结束了")
+                    self.sess_id = uuid(8)
                     self.segment_id = 1
-
                 continue
 
-
-            try: # 在直播状态（开播）可能是刚开播，也肯能是录制过程出错情况下还在播
-                stop_waited             = 0
-                live_end                = False
-                record_liveend_time     = False
-                restarting_since_error  = False
-                # 记录开始时间
-                if not in_session:  # 在直播状态，没有进入本次直播 ---> 刚开播
-                    in_session = True  # 标记为进入了本次直播
+            # ---------- LIVE_START ----------
+            if state == StreamState.LIVE_START:
+                if live_truely_end:
                     self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id)
-
+                    self.logger.info(f"{self.taskname_disp}🔔直播开始")
                     now = datetime.now()
-                    self.live_start_time=now   # 不能删
-                    write_time_to_txt("start") # 记录开播时间
+                    self.live_start_time = now
+                    write_time_to_txt("start")
+                else:
+                    self.logger.info(f"{self.taskname_disp}🔄再次开播,重启录制")
+                state = StreamState.LIVE # 直接切换为稳态 防止不知名bug
+                continue
 
-                else: # 在直播状态，进入本次直播 ---> 录制过程出错情况
-                    self._pipeSend('default', '重启录制', dtype='str', data=self.sess_id)
+            # ---------- LIVE：允许录制 ----------(3)
+            try:
+                stop_waited = 0
+                live_truely_end = False
 
-                self.start_once()
-                if self.liveapi.Onair() and not self.debug: # 非debug模式下
+                if self.test_enabled:
+                    self.start_once(mode="test_mode")
+                    self.test_mode_end = True # 给get_effective_onair()用,让后续开播都不视为未开播|模拟正常下播
+                elif self.firstsegment_enabled and not self.firstsegment_mode_end:
+                    self.start_once(mode="firstsegment_mode")
+                    self.firstsegment_mode_end=True
+                    continue
+                else:
+                    self.start_once(mode="normal_mode")
+
+                if update_state(state) == StreamState.LIVE:
                     raise RuntimeError(f'{self.taskname} 录制异常退出.')
 
             except KeyboardInterrupt:
                 self.stop()
                 exit(0)
-            except Exception as e: # 这一段就是发送出错信息，不干任何事
-                if self.liveapi.Onair():
-                    # self.logger.info(f"[异常][{self.taskname}]  录制过程中出错：{e}")
-                    self.logger.info(f"[重启][{self.taskname}]  第 {restart_cnt + 1} 次重启，等待后重新开始录制...")
-                    self.logger.exception(e) # 带traceback的error信息
+
+            except Exception as e:
+                if update_state(state) == StreamState.LIVE:
+                    self.logger.info(f"{self.taskname_disp}🔄第{restart_cnt + 1}次重启,等待后重新开始录制...")
+                    self.logger.exception(e)
                     self.stop_once()
-                    # self._pipeSend('liveerror', f'录制过程出错:{e}', dtype='Exception', data=e) # 只会被liveevents发送log信息
                     time.sleep(min(restart_interval_min + restart_interval_step * restart_cnt, restart_interval_max))
+                    self.logger.info(f"{self.taskname_disp}🔄重启录制")
                     restart_cnt += 1
-                    restarting_since_error=True
                     continue
                 else:
-                    self.logger.debug(e)
-
-
+                    self.logger.debug(f"Downloader异常退出:{e}")
 
             self.logger.debug(f'{self.taskname} stop once.')
             self.stop_once()
+
 
 
     def start(self):
@@ -415,8 +527,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
     
     def stop(self):
         self.loop = False
-        if hasattr(self, "_sleep_event"):
-            self._sleep_event.set()   # 立刻打断“睡眠到中午”
         self.stop_once()
         self._pipeSend('livestop', '录制终止', dtype='str', data=self.sess_id if hasattr(self, 'sess_id') else None)
 
