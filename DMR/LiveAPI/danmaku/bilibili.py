@@ -2,8 +2,7 @@ from datetime import datetime
 import json, re, select, random, traceback
 import asyncio, aiohttp, zlib, brotli
 from struct import pack, unpack
-
-from DMR.utils import random_user_agent, SuperChatDanmaku, SimpleDanmaku
+from DMR.utils import random_user_agent, SuperChatDanmaku, SimpleDanmaku,GiftDanmaku
 from DMR.LiveAPI.bilivideo_utils import encode_wbi, getWbiKeys
 from .DMAPI import DMAPI
 
@@ -46,15 +45,31 @@ class Bilibili(DMAPI):
             async with session.get('https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo',headers=Bilibili.headers, params=encoded_parms) as resp:
                 room_json = await resp.json()
                 token = room_json['data']['token']
+
+                # 打印完整的权限响应
+                # print(f"[*] DanmuInfo 响应码: {room_json.get('code')} (消息: {room_json.get('message')})")
+
+                # 看看 B 站分配了多少个弹幕服务器，如果列表为空，说明你被风控了
+                # hosts = room_json['data'].get('host_list', [])
+                # print(f"[*] B站分配了 {len(hosts)} 个候选服务器，Token 长度: {len(token)}")
+                # print(hosts)
+
+        # 从 cookie 中提取出 buvid3 的值
+        buvid_val = current_cookie.split('buvid3=')[1].split(';')[0]
             
         data = json.dumps({
-            "roomid": room_id, 
-            "uid": 0, 
-            "protover": 3, 
-            "key": token, 
-            "type":2, 
+            "uid": 0,
+            "roomid": room_id,
+            "protover": 3,
+            "buvid": buvid_val,          # 补上这个核心指纹！
             "platform": "web",
+            "type": 2,
+            "key": token,
+            "support_ack": True,         # 补上协议支持申明
+            "scene": "room",             # 补上场景信息
+            "queue_uuid": "qz xrs97p"    # 随便填一个类似格式的字符串即可
         },separators=(",", ":"),).encode("ascii")
+
         data = (
             pack(">i", len(data) + 16)
             + pack(">h", 16)
@@ -66,7 +81,7 @@ class Bilibili(DMAPI):
         reg_datas.append(data)
 
         return "wss://broadcastlv.chat.bilibili.com/sub", reg_datas
-    
+
     def decode_msg(data):
         dm_list = []
         msgs = []
@@ -119,6 +134,7 @@ class Bilibili(DMAPI):
                         msg["msg_type"] = "danmaku"
 
                     if msg["msg_type"] == "danmaku": # 普通弹幕类型
+                        # print(j)
                         msg["name"] = j.get("info", ["", "", ["", ""]])[2][1] or j.get(
                             "data", {}
                         ).get("uname", "")
@@ -137,7 +153,7 @@ class Bilibili(DMAPI):
                                 msg["content"] = json.dumps({'url':emoticon_url,'desc':emoticon_desc},ensure_ascii=False)
                                 msg['text'] = f'[{emoticon_desc}]'
                                 msg['msg_type'] = 'emoticon'
-                        except:
+                        except Exception as e:
                             pass
 
                     elif msg['msg_type'] == 'interactive_danmaku': # 这个分支没用！
@@ -162,13 +178,59 @@ class Bilibili(DMAPI):
                         except:
                             msg['timestamp'] = datetime.now().timestamp()  # 如果没有时间戳，则使用当前时间
                         msg = SuperChatDanmaku(**msg)  # 转换为 SuperChatDanmaku 对象
+
+                    elif msg["msg_type"] == "gift":
+                        data = j.get('data', {})
+
+                        # 1. 提取昵称 (优先取完整名称)
+                        uname = data.get('sender_uinfo', {}).get('base', {}).get('name') or data.get('uname', '未知用户')
+
+                        # 2. 提取礼物基本信息
+                        gift_name = data.get('giftName', '未知礼物')
+                        gift_num = data.get('num', 0)
+
+                        # 3. 计算价值
+                        # raw_price 为金瓜子单价
+                        raw_price = data.get('price', 0)
+                        # B站 1000金瓜子=1元；电池 1电池=0.1元 -> 所以 1电池 = 100金瓜子
+                        gift_price_battery = raw_price / 100
+                        # 总价值（金瓜子）
+                        total_coin = data.get('total_coin') or (raw_price * gift_num) or 0
+                        # 总价值（元）
+                        total_price_cny = total_coin / 1000
+
+                        #总价值 >= 1元
+                        if total_price_cny >= 1:
+                            # 时间戳处理
+                            ts = data.get('timestamp') or data.get('ts') or datetime.now().timestamp()
+
+                            text=f"{uname} 送给主播价值{gift_price_battery:.0f}电池的{gift_name}x{gift_num}",
+                            msg = GiftDanmaku(
+                                timestamp=ts,
+                                uname=uname,
+                                content=text,
+                                text=text,
+                                gift_name=gift_name,
+                                gift_count=gift_num,
+                                gift_price=f"{gift_price_battery:.0f}",
+                                price_unit='电池',
+                                dtype='gift',
+                                color='ffffff'
+                            )
+                            # 此时 msg 已经是一个对象，后续会被 append 到 msgs 列表
+                        else:
+                            # 低于 49 元的礼物直接跳过，不存入 msgs
+                            continue
+
                     else:
                         msg["content"] = j
                 else:
                     msg = {"name": "", "content": dm.get('body'), "msg_type": "other"}
                 msgs.append(msg)
+
             except Exception as e:
                 # traceback.print_exc()
+                # print("出错了")
                 # print(e)
                 pass
 

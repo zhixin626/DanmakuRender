@@ -273,13 +273,13 @@ def get_bvid(n:int,checker=None,account=3546637425182939):
 def parse_yn(prompt: str, default: bool) -> bool:
     s = input(prompt).strip().lower()
     if s == "":
-        logger.info(f"无输入，按默认值 {default} 处理。")
+        print(f"无输入，按默认值 {default} 处理。")
         return default
     if s in ("y", "yes", "1", "true", "t"):
         return True
     if s in ("n", "no", "0", "false", "f"):
         return False
-    logger.info(f"输入无效，按默认值 {default} 处理。")
+    print(f"输入无效，按默认值 {default} 处理。")
     return default
 
 def strip_quotes(s: str) -> str:

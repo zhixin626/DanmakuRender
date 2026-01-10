@@ -60,13 +60,10 @@ def is_now_in_time_ranges(ranges=None, now=None):
 
     return False
 
-def get_start_check_interval(advanced_video_args, now=None) -> int:
+def get_check_interval(default_interval: int, policy: dict, now=None) -> int:
     now = now or datetime.now()
 
-    default_interval = int(advanced_video_args.get("start_check_interval", 60))
-
-    policy = advanced_video_args.get("start_check_policy", {}) or {}
-    if not policy.get("enabled", False):
+    if not policy or not policy.get("enabled", False):
         return default_interval
 
     ranges = policy.get("ranges", [])
@@ -74,7 +71,8 @@ def get_start_check_interval(advanced_video_args, now=None) -> int:
         return default_interval
 
     for r in ranges:
-        if is_now_in_time_ranges([{"start": r["start"], "end": r["end"]}], now=now):
+        time_range = {"start": r["start"], "end": r["end"]}
+        if is_now_in_time_ranges([time_range], now=now):
             return int(r.get("interval", default_interval))
 
     return default_interval
@@ -85,6 +83,6 @@ if __name__ == '__main__':
     with open(file,'r',encoding="UTF-8") as f:
         config=yaml.safe_load(f)
     adv_args=config.get("download_args").get("advanced_video_args")
-    ranges=adv_args.get("start_check_policy").get("ranges")
-    print(get_start_check_interval(adv_args))
+    check_policy=adv_args.get("check_policy")
+    print(get_check_interval(60,check_policy))
 

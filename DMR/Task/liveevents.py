@@ -520,6 +520,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # debug-------------------------------
 
         return ret_msgs
+
     def check_for_merge(self, group_id):
         # is_merge / merge_type / 音量相关配置
         merge_cfg      = self.config['common_event_args'].get("merge_args", {}) or {}
@@ -535,6 +536,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # 所有 seg 的起止时间（你原来的逻辑）
         stime = read_live_time_from_path(self.src_path, is_start=True)
         etime = read_live_time_from_path(self.src_path, is_start=False)
+        totaltime=format_duration(stime,etime)
 
         # vt -> 目标 slot 名（你原来就是这两个）
         target_slot = {
@@ -629,6 +631,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 ctime     = datetime.now(),
                 stime     = stime,
                 etime     = etime,
+                totaltime = totaltime,
                 dm_file_id= "",
                 duration  = meta.get('duration') or 0,
                 segment_id= new_seg_id,
@@ -681,7 +684,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         # 判断当前视频是否需要清理
                         if vtype in clean_file_types.split('+') or clean_file_types == 'all':
                             for arg in clean_arg:
-                                files = [info['file']]
+                                files=[]
+                                if arg.get('w_uploaded', True) == True:
+                                    files.append(info['file'])
 
                                 # 判断是否需要清理源文件
                                 # if vtype == 'dm_video' and arg.get('w_srcfile', False) == True and video_state['src_video']['file'] is not None:
@@ -709,20 +714,21 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                 #                   f"→ method={arg['method']} delay={arg['delay']} files={file_names}")
                                 # debug-----------------
 
-                                clean_msg = PipeMessage(
-                                    source=self.name,
-                                    target='cleaner',
-                                    event='newtask',
-                                    request_id=uuid(),
-                                    data={
-                                        'taskname': self.name,
-                                        'files': files,
-                                        'method': arg['method'],
-                                        'delay': arg['delay'],
-                                        'args': arg,
-                                    }
-                                )
-                                ret_msgs.append(clean_msg)
+                                if files:
+                                    clean_msg = PipeMessage(
+                                        source=self.name,
+                                        target='cleaner',
+                                        event='newtask',
+                                        request_id=uuid(),
+                                        data={
+                                            'taskname': self.name,
+                                            'files': files,
+                                            'method': arg['method'],
+                                            'delay': arg['delay'],
+                                            'args': arg,
+                                        }
+                                    )
+                                    ret_msgs.append(clean_msg)
 
                     # self.state_dict[group_id][idx][vtype]['status'] = 'cleaned'
 

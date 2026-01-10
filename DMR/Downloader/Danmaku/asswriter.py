@@ -192,15 +192,15 @@ class AssWriter():
             # 构建 ASS 格式的弹幕信息
             dm_info = (
                 f'Dialogue: 0,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\pos(0,{y})\\c&HFF6600\\shad0\\p1}}m 0 0 l 250 0 l 250 81 l 0 81\n'
+                f'{{\\fad(500,500)\\move(-250,{y},0,{y},0,500)\\c&HFF6600\\shad0\\p1}}m 0 0 l 250 0 l 250 81 l 0 81\n'
                 f'Dialogue: 0,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\pos(0,{y + 40})\\shad0\\p1\\c&HCC0000}}m 0 0 l 250 0 l 250 80 l 0 80\n'
+                f'{{\\fad(500,500)\\move(-250,{y + 40},0,{y + 40},0,500)\\shad0\\p1\\c&HCC0000}}m 0 0 l 250 0 l 250 80 l 0 80\n'
                 f'Dialogue: 1,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\pos(6,{y + 5})\\c&HFFFFFF\\fs15\\b1\\q2}}{super_chat.uname}\n'
+                f'{{\\fad(500,500)\\move(-244,{y + 5},6,{y + 5},0,500)\\c&HFFFFFF\\fs15\\b1\\q2}}{super_chat.uname}\n'
                 f'Dialogue: 1,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\pos(6,{y + 20})\\c&HFFFFFF\\fs15\\q2}}SuperChat CNY {super_chat.price}\n'
+                f'{{\\fad(500,500)\\move(-244,{y + 20},6,{y + 20},0,500)\\c&HFFFFFF\\fs15\\q2}}SuperChat CNY {super_chat.price}\n'
                 f'Dialogue: 1,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\pos(6,{y + 40})\\c&HFFFFFF\\q2}}{formatted_content}\n'
+                f'{{\\fad(500,500)\\move(-244,{y + 40},6,{y + 40},0,500)\\c&HFFFFFF\\q2}}{formatted_content}\n'
             )
 
             with open(self._filename, 'a', encoding='utf-8') as f:

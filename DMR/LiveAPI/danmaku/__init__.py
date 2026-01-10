@@ -99,12 +99,18 @@ class DanmakuClient:
                 pass
 
     async def fetch_danmaku(self):
+        # raw_count = 0  # 原始包计数
+
         while self.__stop != True:
             msg = await self.__ws.receive()
             if msg.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
                 raise RuntimeError('Websocket Closed')
+
+            # if msg.type == aiohttp.WSMsgType.BINARY:
+            #     print("receive到一条二进制数据")
             
             result = self.__site_api.decode_msg(msg.data)
+
             if isinstance(result, tuple):
                 # b站无ack，抖音有ack
                 ms, ack = result
@@ -117,6 +123,7 @@ class DanmakuClient:
             else:
                 ms = result
 
+            # print(ms)
             for m in ms:
                 await self._dm_queue.put(m)
 

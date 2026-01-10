@@ -12,7 +12,7 @@ from DMR.LiveAPI import *
 from DMR.utils import *
 from pathlib import Path
 from DMR.utils.merge_mp4 import COLORS, format_duration,pad_disp
-from DMR.utils.seconds_until import is_now_in_time_ranges,get_start_check_interval
+from DMR.utils.seconds_until import is_now_in_time_ranges,get_check_interval
 from enum import Enum
 class StreamState(str, Enum):
     OFFLINE = "offline"                  # 稳态：不在播
@@ -394,7 +394,9 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
         stop_waited = 0
         stop_wait_time = int(self.stop_wait_time * 60)
-        stop_check_interval = self.advanced_video_args.get('stop_check_interval', 30)
+        stop_check_interval = self.advanced_video_args.get('stop_check_interval', 60)
+        start_check_interval = self.advanced_video_args.get('start_check_interval', 60)
+        check_policy = self.advanced_video_args.get('check_policy', {})
         # ===============testmode====================
         tm = self.advanced_video_args.get("test_mode", {}) or {}
         self.test_enabled = bool(tm.get("enabled", False))
@@ -454,10 +456,11 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             if state == StreamState.OFFLINE:
                 restart_cnt = 0
                 if live_truely_end:
-                    interval = get_start_check_interval(self.advanced_video_args)
+                    interval = get_check_interval(start_check_interval,check_policy)
                     time.sleep(interval)
                 else:
-                    time.sleep(stop_check_interval)
+                    interval = get_check_interval(stop_check_interval,check_policy)
+                    time.sleep(interval)
                     stop_waited += stop_check_interval
 
                 if stop_waited > stop_wait_time and not live_truely_end:

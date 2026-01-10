@@ -69,7 +69,7 @@ class GiftDanmaku(SimpleDanmaku):
 
         self.dtype = 'gift'
         self.text = text if text is not None else\
-            f'{self.uname} 赠送给主播价值 {self.price} {self.price_unit} 的 {self.gift_count} 个 {self.gift_name}'
+            f'{self.uname}送给主播价值{self.gift_price}{self.price_unit}的{self.gift_name}x{self.gift_count}'
 
 
 class SuperChatDanmaku(SimpleDanmaku):

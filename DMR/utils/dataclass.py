@@ -129,7 +129,7 @@ class VideoInfo(FileInfo):
                 ctime:datetime=None,
                 stime:datetime=None,
                 etime:datetime=None,
-                totaltime:datetime=None,
+                totaltime:str="",
                 duration:int=None,
                 resolution:Tuple[int, int]=None,
                 title:str=None,

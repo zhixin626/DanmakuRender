@@ -7,7 +7,7 @@ def rendercover_with_manimgl(name, time,color,year,output_dir,is_open=False,extr
     使用manimgl渲染封面，保存路径 Rf"D:\\DanmakuRender\\{name}"
     """
     manimgl_exe = r"D:\manim\venv\Scripts\manimgl.exe"
-    script = R"D:\DanmakuRender\DMR\utils\get_cover.py"
+    script = "D:/zhixin_videos/_2025/danmakucover/cover.py"
     scene_name = "cover"
 
     cmd = [

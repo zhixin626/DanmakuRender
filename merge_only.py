@@ -23,7 +23,7 @@ def main():
     is_amplify = parse_yn("合并完成后是否要按照config文件增强音频？(y/n),默认n\n", default=False)
 
     # 询问是否 remover（删除源文件）
-    remover= parse_yn("是否把原始视频移入回收站？(y/N),默认N\n", default=False)
+    remover= parse_yn("是否把原始视频移入回收站？(y/N),默认y\n", default=True)
 
     # 询问输出名称
     print("请输入输出文件名或输出路径(可空行,默认为 *_merged.mp4):")
