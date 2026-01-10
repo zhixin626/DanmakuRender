@@ -56,7 +56,7 @@ class Bilibili(DMAPI):
 
         # 从 cookie 中提取出 buvid3 的值
         buvid_val = current_cookie.split('buvid3=')[1].split(';')[0]
-            
+
         data = json.dumps({
             "uid": 0,
             "roomid": room_id,
@@ -161,7 +161,7 @@ class Bilibili(DMAPI):
                         msg['name'] = j.get('data', {}).get('uname', '')
                         msg['content'] = j.get('data', {}).get('msg', '')
                         msg["color"] = 'ffffff'
-                        
+
                     elif msg["msg_type"] == "broadcast":
                         msg["type"] = j.get("msg_type", 0)
                         msg["roomid"] = j.get("real_roomid", 0)
