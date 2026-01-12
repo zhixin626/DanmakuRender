@@ -204,7 +204,7 @@ class Bilibili(DMAPI):
                             # 时间戳处理
                             ts = data.get('timestamp') or data.get('ts') or datetime.now().timestamp()
 
-                            text=f"{uname} 送给主播价值{gift_price_battery:.0f}电池的{gift_name}x{gift_num}",
+                            text=f"<{uname}>送给主播价值{gift_price_battery:.0f}电池的{gift_name}x{gift_num}"
                             msg = GiftDanmaku(
                                 timestamp=ts,
                                 uname=uname,
@@ -215,7 +215,7 @@ class Bilibili(DMAPI):
                                 gift_price=f"{gift_price_battery:.0f}",
                                 price_unit='电池',
                                 dtype='gift',
-                                color='ffffff'
+                                color='d9a6c4'
                             )
                             # 此时 msg 已经是一个对象，后续会被 append 到 msgs 列表
                         else:

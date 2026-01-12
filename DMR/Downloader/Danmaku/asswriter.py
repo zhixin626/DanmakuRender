@@ -3,7 +3,8 @@ import threading
 from DMR.utils import *
 from itertools import cycle
 __all__ = ['AssWriter']
-
+def hex_opacity(opacity):
+    return hex(255-int(opacity*255))[2:].zfill(2)
 class AssWriter():
     """
     ASS弹幕写入器，定义了ASS弹幕格式和信息，用于流式处理弹幕
@@ -24,11 +25,7 @@ class AssWriter():
                  outlinecolor:str,
                  outlinesize:int,
                  dm_template:dict=None,
-                 giftdm_color="a9b689",
-                 giftdm_opacity=1,
                  **kwargs) -> None:
-        self.giftdm_color=cycle(giftdm_color)
-        self.giftdm_opacity = hex(255-int(giftdm_opacity*255))[2:].zfill(2)
         self.description = description
         self.height = height
         self.width = width
@@ -43,7 +40,7 @@ class AssWriter():
         self.margin_w = margin_w if margin_w > 1 else margin_w * self.width
         self.dst = dst
         self.dmduration = dmduration
-        self.opacity = hex(255-int(opacity*255))[2:].zfill(2)
+        self.opacity = hex_opacity(opacity)
         self.outlinecolor = str(outlinecolor).zfill(6)
         self.outlinesize = outlinesize
         self.ass_text_template = dm_template.get('ass_text') if dm_template else None
@@ -99,20 +96,20 @@ class AssWriter():
 
     def add_simple(self, danmu:SimpleDanmaku, calc_collision=True):
         """
-        添加弹幕到ASS文件 
+        添加弹幕到ASS文件
         danmu: 待添加弹幕
-        calc_collision: 是否计算冲突，冲突的弹幕将会被自动忽略
+        calc_collision: 是否计算冲突,冲突的弹幕将会被自动忽略
         """
         tid, max_dist = 0, -1e5
-        
+
         # 计算给出弹幕到指定弹幕的距离
         def tail_dist(tail_dm:SimpleDanmaku, tic:float):
             if not tail_dm:
                 return 1e5
             dm_length = self._get_length(tail_dm.text)
-            dist = (tic - tail_dm.time) * (dm_length + self.width) / self.dmduration - dm_length 
+            dist = (tic - tail_dm.time) * (dm_length + self.width) / self.dmduration - dm_length
             return dist
-        
+
         for i, tail_dm in enumerate(self._track_tails):
             dist = tail_dist(tail_dm, danmu.time)
             if dist > 0.2 * self.width and dist > self.margin_w:
@@ -122,10 +119,10 @@ class AssWriter():
             if dist > max_dist:
                 max_dist = dist
                 tid = i
-        
+
         if calc_collision and max_dist < self.margin_w:
             return False
-        
+
         dm_length = self._get_length(danmu.text)
         x0 = self.width
         x1 = -dm_length
@@ -136,19 +133,16 @@ class AssWriter():
 
         t0 = '%02d:%02d:%05.2f'%sec2hms(t0)
         t1 = '%02d:%02d:%05.2f'%sec2hms(t1)
-        
-        # set ass Dialogue
-        dm_info = f'Dialogue: 0,{t0},{t1},R2L,,0,0,0,,'
-        dm_info += '{\\move(%d,%d,%d,%d)}'%(x0, y + self.dst, x1, y + self.dst)
-        # dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
-
-        if danmu.dtype == "gift":
-            color = next(self.giftdm_color)
-            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.giftdm_opacity, RGB2BGR(color)) #修改抖音礼物弹幕颜色
-        else:
-            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
 
         content = danmu.text.replace('\n',' ').replace('\r',' ')
+
+        dm_info = f'Dialogue: 0,{t0},{t1},R2L,,0,0,0,,'
+        dm_info += '{\\move(%d,%d,%d,%d)}'%(x0, y + self.dst, x1, y + self.dst)
+        dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
+
+        if danmu.dtype == "gift":
+            dm_info += '{\\bord8\\3a&H%s\\3c&H%s&&}'%(hex_opacity(0.5),RGB2BGR("ff80ff"))  # 边框宽度8，半透明，淡粉色
+
         if not self.ass_text_template:
             dm_info += content
         else:

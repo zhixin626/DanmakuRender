@@ -140,10 +140,6 @@ class Douyin:
                 
                 user_info = data.get('user', {})
                 name = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
-                if 'nickName' not in user_info:
-                    logger.debug(
-                        f"nickName 不存在，已替换为: {name}"
-                    )
 
                 content = data['content']
                 msg_dict = SimpleDanmaku(
@@ -166,10 +162,6 @@ class Douyin:
                 
                 user_info = data.get('user', {})
                 name = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
-                if 'nickName' not in user_info:
-                    logger.debug(
-                        f"nickName 不存在，已替换为: {name}"
-                    )
 
                 # name = data['user']['nickName']
                 msg_dict = EntryDanmaku(
@@ -187,26 +179,27 @@ class Douyin:
                   continue
                 user_info = data.get('user', {})
                 name = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
-                if 'nickName' not in user_info:
-                    logger.debug(
-                        f"nickName 不存在，已替换为: {name}"
+
+                gift_price=int(data['gift']['diamondCount'])
+                gift_count=int(data.get('repeatCount', 1))
+                gift_name=data['gift']['name']
+                total_price=gift_price*gift_count
+                total_price_cny=total_price/10
+
+                if total_price_cny>=0.9:
+                    msg_dict = GiftDanmaku(
+                        timestamp=now,
+                        uname=name,
+                        content=f"<{name}>送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
+                        text=f"<{name}>送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
+                        gift_name=gift_name,
+                        gift_count=gift_count,
+                        gift_price=gift_price,
+                        price_unit='抖币',
+                        price=total_price,
+                        dtype='gift',
+                        color='ffffff'
                     )
-                    
-                gift_price=str(data['gift']['diamondCount'])
-                gift_count=data['repeatCount']
-                msg_dict = GiftDanmaku(
-                    timestamp=now,
-                    uname=name,
-                    content=f"{name}送给主播{data['repeatCount']}个{data['gift']['name']}每个价值抖币{gift_price}",
-                    gift_name=data['gift']['name'],
-                    gift_count=gift_count,
-                    gift_price=gift_price,
-                    price_unit='抖币',
-                    dtype='gift',
-                    color='ffffff'
-                )
-                if msg_dict.price>=49:
-                    msg_dict=msg_dict
                 else:
                     continue
             else:
