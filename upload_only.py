@@ -154,8 +154,7 @@ def replace_args_keywords(
     NAME=roominfo.get("name","")
 
     live_time_path=download_args.get("output_dir")
-    st=read_live_time_from_path(live_time_path)
-    et=read_live_time_from_path(live_time_path,is_start=False)
+    st,et=read_last_complete_session(live_time_path)
     kw_info = {
         "streamer": {
             "name": NAME,
@@ -195,7 +194,8 @@ def _re_render_cover(file_path):
     name=common_event_args.get("cover_args",{}).get("name")
     output_dir=common_event_args.get("cover_args",{}).get("output_dir")
     name_color=common_event_args.get("cover_args",{}).get("name_color")
-    stime=read_live_time_from_path(download_args.get("output_dir"))
+
+    stime,_=read_last_complete_session(download_args.get("output_dir"))
     time=f"{stime.month}月{stime.day}日"
     year=f"{stime.year}"
     from DMR.utils.render_with_manimgl import rendercover_with_manimgl
@@ -219,7 +219,6 @@ def upload_video(
     file_path,
     show_progress_bar=False,
     show_cmd=False,
-    re_change_desc=True,
     re_add_to_list=True,
     re_render_cover=False,
     ):
@@ -234,8 +233,6 @@ def upload_video(
         **upload_args)
     if bvid :
         logger.info(f"bvid is {bvid}")
-        if re_change_desc:
-            _re_change_desc(file_path,bvid)
         if re_add_to_list:
             _re_add_to_list(file_path,bvid)
     else:
@@ -298,8 +295,7 @@ def build_videoinfo(file_path: str) -> VideoInfo:
 
     # 你现有的：读开播/下播时间（依赖 output_dir 的 _livestart_times.txt 等）
     out_dir = download_args.get("output_dir")
-    st = read_live_time_from_path(out_dir)
-    et = read_live_time_from_path(out_dir, is_start=False)
+    st,et=read_last_complete_session(out_dir)
 
     # 你现有的：直播间信息
     api = LiveAPI(download_args.get("url"))
@@ -349,7 +345,6 @@ def upload_bybiliupWebAPI(
     file_path,
     # show_progress_bar=False,
     # show_cmd=False,
-    re_change_desc=True,
     re_add_to_list=True,
     re_render_cover=False,
     ):
@@ -365,8 +360,6 @@ def upload_bybiliupWebAPI(
 
     if bvid :
         logger.info(f"bvid is {bvid}")
-        if re_change_desc:
-            _re_change_desc(file_path,bvid)
         if re_add_to_list:
             _re_add_to_list(file_path,bvid)
     else:
@@ -385,7 +378,6 @@ def main():
         engine = "biliuprs"
 
     re_render_cover = parse_yn("是否需要重新渲染封面[y/n], 回车默认为n：\n", default=False)
-    re_change_desc = parse_yn("是否需要添加下播时间[y/n], 回车默认为y：\n", default=True)
     re_add_to_list = parse_yn("是否需要加入到合集[y/n], 回车默认为y：\n", default=True)
 
     if engine =="biliuprs":
@@ -393,14 +385,12 @@ def main():
             video_path,
             show_progress_bar=True,
             show_cmd=True,
-            re_change_desc=re_change_desc,
             re_add_to_list=re_add_to_list,
             re_render_cover=re_render_cover,
         )
     elif engine =="biliWebAPI":
         upload_bybiliupWebAPI(
             video_path,
-            re_change_desc=re_change_desc,
             re_add_to_list=re_add_to_list,
             re_render_cover=re_render_cover
         )

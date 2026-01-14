@@ -110,8 +110,8 @@ class Uploader():
                     dtype='dict',
                     data={
                         'config': task['config'],
+                        "bvid":desc, # zhixin 增加bvid
                     },
-                    bvid=desc,  # zhixin 增加bvid
                 )
 
     def _upload_subprocess(self, task):

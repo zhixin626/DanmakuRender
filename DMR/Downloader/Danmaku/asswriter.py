@@ -2,7 +2,10 @@ from datetime import datetime
 import threading
 from DMR.utils import *
 from itertools import cycle
+
+
 __all__ = ['AssWriter']
+
 def hex_opacity(opacity):
     return hex(255-int(opacity*255))[2:].zfill(2)
 class AssWriter():
@@ -43,7 +46,6 @@ class AssWriter():
         self.opacity = hex_opacity(opacity)
         self.outlinecolor = str(outlinecolor).zfill(6)
         self.outlinesize = outlinesize
-        self.ass_text_template = dm_template.get('ass_text') if dm_template else None
         self.kwargs = kwargs
 
         self._lock = threading.Lock()
@@ -123,35 +125,33 @@ class AssWriter():
         if calc_collision and max_dist < self.margin_w:
             return False
 
-        dm_length = self._get_length(danmu.text)
+        content = danmu.text.replace('\n',' ').replace('\r',' ')
+        dm_length = self._get_length(content)
         x0 = self.width
         x1 = -dm_length
         y = self.fontsize + (self.fontsize + self.margin_h) * tid
 
-        t0 = danmu.time
-        t1 = t0 + self.dmduration
+        t0 = '%02d:%02d:%05.2f'%sec2hms(danmu.time)
+        t1 = '%02d:%02d:%05.2f'%sec2hms(danmu.time + self.dmduration)
 
-        t0 = '%02d:%02d:%05.2f'%sec2hms(t0)
-        t1 = '%02d:%02d:%05.2f'%sec2hms(t1)
-
-        content = danmu.text.replace('\n',' ').replace('\r',' ')
 
         dm_info = f'Dialogue: 0,{t0},{t1},R2L,,0,0,0,,'
         dm_info += '{\\move(%d,%d,%d,%d)}'%(x0, y + self.dst, x1, y + self.dst)
-        dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
+
 
         if danmu.dtype == "gift":
-            dm_info += '{\\bord8\\3a&H%s\\3c&H%s&&}'%(hex_opacity(0.5),RGB2BGR("ff80ff"))  # 边框宽度8，半透明，淡粉色
+            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, "000000") # 黑字
+            dm_info += '{\\bord10\\3a&H%s\\3c&H%s&&}'%(self.opacity,RGB2BGR("ffffff"))  # 白底
+        else: # danmu.dtype == "danmaku":
+            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
 
-        if not self.ass_text_template:
-            dm_info += content
-        else:
-            dm_info += replace_keywords(self.ass_text_template, danmu)
+        dm_info += content
 
         with self._lock, open(self._filename, 'a', encoding='utf-8') as f:
             f.write(dm_info + '\n')
         
         self._track_tails[tid] = danmu
+
         return True
 
     def add_super_chat(self, super_chat: SuperChatDanmaku):

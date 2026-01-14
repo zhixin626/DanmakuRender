@@ -335,15 +335,20 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         def write_time_to_txt(mode: str):
             out_dir = Path(self.output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-            now = datetime.now()
+            file_path = out_dir / "_live_sessions.txt"
+
+            now_str = datetime.now().isoformat(timespec="seconds")
+
             if mode == "start":
-                file = "_livestart_times.txt"
+                # 开启新的一行记录
+                with open(file_path, "a", encoding="utf-8", newline="\n") as f:
+                    f.write(f"\n开播:{now_str}")
             elif mode == "end":
-                file = "_liveend_times.txt"
+                # 在当前行追加结束时间
+                with open(file_path, "a", encoding="utf-8", newline="\n") as f:
+                    f.write(f";下播:{now_str}")
             else:
                 raise ValueError(f"未知的 mode: {mode}")
-            with open(out_dir / file, "a", encoding="utf-8", newline="\n") as f:
-                f.write(now.isoformat(timespec="seconds") + "\n")
 
         def in_record_window(now=None) -> bool:
             if not enable_record_windows:

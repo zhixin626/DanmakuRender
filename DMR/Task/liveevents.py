@@ -10,9 +10,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         super().__init__(name, config)
         self.state_dict = {}
         self.ended_dict = {}
+        self.live_status= {} # zhixin新增
         self.logger = logging.getLogger(__name__)
-        self.is_sync= False
-        self.bvid=None # 在这里初始化防止先进入了onLiveEnd 需要判断self.bvid
 
     @property
     def event_dict(self):
@@ -39,66 +38,108 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.logger.info(f'{self.name}: {message.msg}')
 
     def onLiveStart(self, message:PipeMessage):
-        self.is_already_add_to_list  = False
-        self.is_already_change_desc = False
-        self.is_live_end     = False
-        self.bvid            = None
+        group_id = message.data
+        self.live_status[group_id] = {
+            'is_already_add_to_list' : False,
+            'is_already_change_desc' : False,
+            "is_already_sync"        : False,
+            "is_already_render_cover": False,
+            'bvid': None,
+            'is_live_end': False,
+        }
+        # self.is_already_add_to_list  = False
+        # self.is_already_change_desc = False
+        # self.is_live_end     = False
+        # self.bvid            = None
         self.src_path        = Path(str(self.config['download_args']['output_dir']))
         self.dmvideo_path    = Path(str(self.config['download_args']['output_dir']) + '（弹幕版）')
         self.transcode_path  = Path(str(self.config['download_args']['output_dir']) + '（转码后）')
-        self.check_sync_list_name()
-        self.check_render_cover()
+        self.check_render_cover(group_id)
 
-    def check_render_cover(self):
+    def check_render_cover(self,group_id):
+        is_already_render_cover=self.live_status[group_id]["is_already_render_cover"]
         cover_args=self.config['common_event_args'].get("cover_args", {})
-        is_render_cover=cover_args.get("is_render_cover")
-        if is_render_cover: # 渲染封面
-            _name=cover_args.get("name","")
-            _now=datetime.now()
-            _year=f"{_now.year}"
-            _time=f"{_now.month}月{_now.day}日"
-            _color=cover_args.get("name_color","#111111")
-            output_dir=cover_args.get("output_dir","./covers")
-            from DMR.utils.render_with_manimgl import rendercover_with_manimgl_bg
-            rendercover_with_manimgl_bg(_name,_time,_color,_year,output_dir=output_dir)
+        is_need_render_cover=cover_args.get("is_render_cover")
 
-    def check_sync_list_name(self):
-        is_sync   = self.config['common_event_args'].get("sync_list_name", {}).get("is_sync")
-        if not is_sync or self.is_sync:
-            # self.is_sync会在onLiveEnd和初始化的时候标记为 false
-            # self.is_sync会在sync后标记为true
-            self.logger.debug("跳过:sync_list_name")
+        if not is_need_render_cover or is_already_render_cover:
             return
+
+        _name=cover_args.get("name","")
+        _now=datetime.now()
+        _year=f"{_now.year}"
+        _time=f"{_now.month}月{_now.day}日"
+        _color=cover_args.get("name_color","#111111")
+        output_dir=cover_args.get("output_dir","./covers")
+        from DMR.utils.render_with_manimgl import rendercover_with_manimgl_bg
+        rendercover_with_manimgl_bg(_name,_time,_color,_year,output_dir=output_dir)
+        self.live_status[group_id]["is_already_render_cover"]=True
+
+    def _log_state(self, which: str = "all", prefix: str = "", level: int = logging.INFO):
+        """
+        打印内部状态快照（可读、结构稳定）：
+          - state: 保持你原来的 state_dict 结构：gid -> [ {vt: {status, wait, file}} ... ]
+          - ended: gid -> ended_timestamp
+          - live : gid -> {is_live_end, bvid, flags...}
+          - all  : 同时输出三者（顶层三个 key：state/ended/live）
+        """
+        def _file_repr(f):
+            if not f:
+                return None
+            return getattr(f, "path", str(f))
+
+        def _state_snap():
+            snap = {}
+            for gid, vss in self.state_dict.items():
+                snap[gid] = []
+                for vs in vss:
+                    row = {}
+                    for vt, info in vs.items():
+                        f = info.get("file")
+                        row[vt] = {
+                            "status": info.get("status"),
+                            "wait": list(info.get("wait") or []),
+                            "file": _file_repr(f),
+                        }
+                    snap[gid].append(row)
+            return snap
+
+        def _ended_snap():
+            # ended_dict: gid -> timestamp(float)
+            return dict(self.ended_dict)
+
+        def _live_snap():
+            # live_status: gid -> dict(flags...)
+            snap = {}
+            for gid, s in self.live_status.items():
+                # 复制一份，避免日志里出现引用导致后续被改动看不懂
+                snap[gid] = dict(s) if isinstance(s, dict) else s
+            return snap
+
+        which = (which or "state").lower()
+        payload = None
+
+        if which in ("state", "statedict", "state_dict"):
+            payload = _state_snap()
+        elif which in ("ended", "endeddict", "ended_dict"):
+            payload = _ended_snap()
+        elif which in ("live", "livestatus", "live_status"):
+            payload = _live_snap()
+        elif which in ("all", "*"):
+            payload = {
+                "state": _state_snap(),
+                "ended": _ended_snap(),
+                "live": _live_snap(),
+            }
         else:
-            account   = self.config['common_event_args'].get("sync_list_name", {}).get("account")
-            sectionId = self.config['common_event_args'].get("sync_list_name", {}).get("sectionId")
-            try:
-                sync_section_episode_titles_bg(account,sectionId)
-                self.is_sync = True
-            except Exception:
-                # 内部会有logger信息
-                pass
+            payload = {"error": f"unknown which={which}", "supported": ["state", "ended", "live", "all"]}
 
-    def _state_snapshot(self):
-        """只提取可读信息：status / file.path / wait"""
-        snap = {}
-        for gid, vss in self.state_dict.items():
-            snap[gid] = []
-            for vs in vss:
-                row = {}
-                for vt, info in vs.items():
-                    f = info.get('file')
-                    row[vt] = {
-                        'status': info.get('status'),
-                        'wait': list(info.get('wait') or []),
-                        'file': getattr(f, 'path', str(f)) if f else None,
-                    }
-                snap[gid].append(row)
-        return snap
+        # prefix 方便你定位是哪个阶段打的点
+        if prefix:
+            self.logger.log(level, f"{prefix}: {payload}")
+        else:
+            self.logger.log(level, payload)
 
-    def _log_state(self, where, extra=None):
-        snap = self._state_snapshot()
-        self.logger.debug(f"[STATE@{where}] {snap} {(' '+str(extra)) if extra else ''}")
+        return payload
 
 
     def onReady(self, *args, **kwargs): # 这里被engine的add_task发送了一个ready信息
@@ -208,8 +249,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     #     account=zuozuo_video_args.get("account",False)
     #     if is_upload:
     #         from DMR.utils.render_with_manimgl import render_zuozuovideo_with_manimgl
-    #         stime     = read_live_time_from_path(self.src_path, is_start=True)
-    #         etime     = read_live_time_from_path(self.src_path, is_start=False)
+    #         stime,etime=read_last_complete_session(self.src_path)
     #         duration  = format_duration(stime, etime)
     #         self.logger.info("开始渲染佐佐视频")
     #         try:
@@ -239,11 +279,11 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     #                     self.logger.error(f"佐佐视频加入合集/同步标题失败: {e}")
 
     def onLiveEnd(self, message:PipeMessage):
-        self.is_live_end=True
-        self.is_sync= False # 给下一次开播 重新同步视频名和列表名做准备
         group_id = message.data
         if group_id is None:
             return
+
+        self.live_status[group_id]['is_live_end'] = True
 
         # 先处理 state_dict
         if group_id in self.state_dict:
@@ -261,31 +301,44 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             upload_msgs = self._check_for_upload(str(group_id))
             ret_msgs += upload_msgs
 
+        self.check_change_desc(group_id)
+
         self._free_state_memory()
 
-        if self.bvid:
-            self.check_change_desc(self.bvid)
 
         return ret_msgs
     
-    def check_change_desc(self,bvid):
+    def check_change_desc(self,group_id):
+        if group_id not in self.live_status:
+            self.logger.info(f"{self.name}:group_id不在live_status里\ngroup_id:{group_id}\nself.live_status:{self.live_status}")
+            return
+        # 直播结束 且 上传结束 才改简介
+        bvid                   = self.live_status[group_id]['bvid']
+        is_live_end            = self.live_status[group_id]['is_live_end']
+        is_already_change_desc = self.live_status[group_id]['is_already_change_desc']
+
+        if bvid is None or not is_live_end or is_already_change_desc:
+            return
+
         after_upload_args = self.config["common_event_args"].get('after_upload_args',{})
         change_desc = after_upload_args.get("change_desc",False)
         insert_desc = after_upload_args.get("insert_desc",None)
         account=after_upload_args.get('account',None)
-        if change_desc and not self.is_already_change_desc:
-            start_time= read_live_time_from_path(self.src_path,is_start=True)
-            end_time  = read_live_time_from_path(self.src_path,is_start=False)
-            duration  = format_duration(start_time,end_time)
+
+        if change_desc:
+            stime,etime=read_last_complete_session(self.src_path)
+            duration  = format_duration(stime,etime)
             result = replace_keywords(
                 insert_desc,
-                {"stime": start_time,
-                 "etime": end_time,
-                 "totaltime":duration}
-                 )
+                {
+                    "stime": stime,
+                    "etime": etime,
+                    "totaltime":duration
+                }
+            )
             try:
                 add_livetime(bvid,result,account)
-                self.is_already_change_desc=True
+                self.live_status[group_id]['is_already_change_desc']=True
             except Exception as e:
                 self.logger.error(e)
 
@@ -482,10 +535,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         return ret_msgs
     
     def onRenderEnd(self, message:PipeMessage):
+        self._log_state(prefix="onRenderEnd_start",level=logging.DEBUG)
         self.logger.info(f'{self.name}: {message.msg}.')
-        # debug-------------------------------
-        # self._log_state("onRenderEnd:before", extra={"request_id": message.request_id})
-        # debug-------------------------------
 
         request_id = message.request_id
         video:VideoInfo = message.data.get('output')
@@ -499,27 +550,66 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         self.state_dict[video.group_id][idx][vtype]['status'] = 'ready'
                         self.state_dict[video.group_id][idx][vtype]['file'] = video
         
-        # debug-------------------------------
-        # self._log_state("onRenderEnd:middle1", extra={"request_id": message.request_id})
-        # debug-------------------------------
-
-        # 检查是否合并
         self.check_for_merge(video.group_id)
-        
-        # debug-------------------------------
-        # self._log_state("onRenderEnd:middle2", extra={"request_id": message.request_id})
-        # debug-------------------------------
 
         ret_msgs = []
         if self.config['common_event_args'].get('auto_upload'):
             upload_msgs = self._check_for_upload(video.group_id)
             ret_msgs += upload_msgs
 
-        # debug-------------------------------
-        # self._log_state("onRenderEnd:after")
-        # debug-------------------------------
+        return ret_msgs
+
+    def onUploadEnd(self, message:PipeMessage):
+        self.logger.info(f'{self.name}: {message.msg}.')
+
+        target_group_id = None
+        request_id = message.request_id
+        # 将状态信息中request_id对应的等待移除
+        for group_id, video_states in self.state_dict.items():
+            for idx, video_state in enumerate(video_states):
+                for vtype, info in video_state.items():
+                    if request_id in info['wait']:
+                        target_group_id = group_id
+                        self.state_dict[group_id][idx][vtype]['wait'].remove(request_id)
+                        if len(self.state_dict[group_id][idx][vtype]['wait']) == 0:
+                            self.state_dict[group_id][idx][vtype]['status'] = 'uploaded'
+
+        ret_msgs = []
+        if self.config['common_event_args'].get('auto_clean') and target_group_id:
+            clean_msgs = self._check_for_clean(target_group_id)
+            ret_msgs += clean_msgs
+
+        # 判断是否加入合集
+        if target_group_id:
+            bvid=message.data.get("bvid",None)
+            self.live_status[target_group_id]['bvid'] = bvid
+
+        self.check_add_to_list(target_group_id)
+        self.check_change_desc(target_group_id)
+
+        self._free_state_memory()
 
         return ret_msgs
+
+    def check_add_to_list(self,target_group_id):
+        if target_group_id not in self.live_status:
+            self.logger.info(f"{self.name}:target_group_id不在live_status里\ntarget_group_id:{target_group_id}\nself.live_status:{self.live_status}")
+            return
+
+        bvid                   = self.live_status[target_group_id]['bvid']
+        is_already_add_to_list = self.live_status[target_group_id]['is_already_add_to_list']
+
+        after_upload_args = self.config["common_event_args"].get('after_upload_args',{})
+        need_add_to_list=after_upload_args.get("add_to_list",False)
+        account=after_upload_args.get('account',None)
+        sectionId = after_upload_args.get('sectionId',None)
+
+        if need_add_to_list and not is_already_add_to_list:
+            try:
+                add_to_list(bvid,sectionId,account)
+                self.live_status[target_group_id]['is_already_add_to_list']=True
+            except Exception as e:
+                self.logger.error(e)
 
     def check_for_merge(self, group_id):
         # is_merge / merge_type / 音量相关配置
@@ -534,8 +624,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             return
 
         # 所有 seg 的起止时间（你原来的逻辑）
-        stime = read_live_time_from_path(self.src_path, is_start=True)
-        etime = read_live_time_from_path(self.src_path, is_start=False)
+        stime,etime=read_last_complete_session(self.src_path)
         totaltime=format_duration(stime,etime)
 
         # vt -> 目标 slot 名（你原来就是这两个）
@@ -660,61 +749,26 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
         # 至少有一个 vt 合并成功：追加新的 state
         self.state_dict[group_id].append(new_state)
-    
+
     def _check_for_clean(self, group_id=None):
+        # 修改后的清理逻辑：
+        # 只在上传完成后检查是否清理
+        # 根据文件类型进行清理dm_video，src_video，src_video_pre or all
+        self._log_state(prefix="checkforcleanbefore:",level=logging.DEBUG)
         ret_msgs = []
         clean_args = self.config['clean_args']
-        # debug-----------------
-        # self._log_state("check_for_clean:enter")
-        # self.logger.debug(f"[CLEAN] clean_args={clean_args}")
-        # debug-----------------
         for group_id, video_states in self.state_dict.items():
             for idx, video_state in enumerate(video_states):
                 for vtype, info in video_state.items():
-                    if info.get('status') != 'uploaded':
-                        # debug-------------------------------------------
-                        # self.logger.debug(f"[CLEAN] skip gid={group_id} idx={idx} vtype={vtype} status={info['status']} (need 'uploaded')")
-                        continue
+                    # if info['status'] != 'uploaded':
+                    #     continue
                     for clean_file_types, clean_arg in clean_args.items():
-                        # debug-------------------------------------------
-                        # self.logger.debug(f"[CLEAN] rule={clean_file_types} vtype={vtype} "
-                        #                   f"match={vtype in clean_file_types.split('+') or clean_file_types == 'all'} "
-                        #                   f"type(clean_arg)={type(clean_arg)}")
-                        # debug-------------------------------------------
                         # 判断当前视频是否需要清理
                         if vtype in clean_file_types.split('+') or clean_file_types == 'all':
                             for arg in clean_arg:
-                                files=[]
-                                if arg.get('w_uploaded', True) == True:
-                                    files.append(info['file'])
-
-                                # 判断是否需要清理源文件
-                                # if vtype == 'dm_video' and arg.get('w_srcfile', False) == True and video_state['src_video']['file'] is not None:
-                                #     files.append(video_state['src_video']['file'])
-                                #     self.state_dict[group_id][idx]['src_video']['status'] = 'cleaned'
-
-                                # w_srcfile为转码文件
-                                if arg.get('w_srcfile', False) == True and video_state['src_video']['file'] is not None:
-                                    files.append(video_state['src_video']['file'])
-                                    # self.state_dict[group_id][idx]['src_video']['status'] = 'cleaned'
-
-                                # 判断是否需要清理源文件（转码前）
-                                # if vtype == 'src_video' and arg.get('w_srcpre', True) == True and video_state['src_video_pre']['file'] is not None:
-                                #     files.append(video_state['src_video_pre']['file'])
-                                #     self.state_dict[group_id][idx]['src_video_pre']['status'] = 'cleaned'
-
-                                # w_srcpre为flv源文件
-                                if arg.get('w_srcpre', True) == True and video_state['src_video_pre']['file'] is not None:
-                                    files.append(video_state['src_video_pre']['file'])
-                                    # self.state_dict[group_id][idx]['src_video_pre']['status'] = 'cleaned'
-                                
-                                # debug-----------------
-                                # file_names = [str(getattr(f, 'path', f)) for f in files if f]
-                                # self.logger.debug(f"[CLEAN] group={group_id} idx={idx} vtype={vtype} "
-                                #                   f"→ method={arg['method']} delay={arg['delay']} files={file_names}")
-                                # debug-----------------
-
-                                if files:
+                                if file := info['file']:
+                                    self.state_dict[group_id][idx][vtype]['status'] = 'cleaned'
+                                    self.logger.debug(f"file:{file}")
                                     clean_msg = PipeMessage(
                                         source=self.name,
                                         target='cleaner',
@@ -722,7 +776,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                         request_id=uuid(),
                                         data={
                                             'taskname': self.name,
-                                            'files': files,
+                                            'files': [file],
                                             'method': arg['method'],
                                             'delay': arg['delay'],
                                             'args': arg,
@@ -730,82 +784,53 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                     )
                                     ret_msgs.append(clean_msg)
 
-                    # self.state_dict[group_id][idx][vtype]['status'] = 'cleaned'
-
-        # debug-----------------
-        # self.logger.debug(f"[CLEAN] done, total tasks={len(ret_msgs)}")
-        # self._log_state("check_for_clean:after")
-        # debug-----------------
         return ret_msgs
     
     def _free_state_memory(self):
-        final_status = 'ready'
+        self._log_state(prefix="_free_state_memory_start:",level=logging.DEBUG)
+
+        final_status =  ['ready']
         if self.config['common_event_args'].get('auto_upload'):
-            final_status = 'uploaded'
+            final_status.append('uploaded')
         if self.config['common_event_args'].get('auto_clean'):
-            final_status = 'cleaned'
-        
+            final_status.append('cleaned')
+
         for group_id in list(self.ended_dict.keys()):
+            video_states = self.state_dict.get(group_id)
+            if not video_states:
+                # state_dict 已经没了，就把 ended/live_status 一并清掉
+                self.ended_dict.pop(group_id, None)
+                self.live_status.pop(group_id, None)
+                continue
+
             need_free = True
-            for idx, video_state in enumerate(self.state_dict[group_id]):
-                for vtype, info in video_state.items():
-                    if info['status'] is not None and info['status'] != final_status:
+            for video_state in video_states:
+                for info in video_state.values():
+                    st = info.get('status')
+                    if st is None:
+                        continue
+                    # merging 这种中间态绝对不能释放
+                    if st not in final_status:
                         need_free = False
                         break
-                if not need_free: break
+                if not need_free:
+                    break
+
             if need_free:
-                self.logger.debug(f'视频组{group_id}处理完成，视频信息已被释放.')
-                self.ended_dict.pop(group_id)
-                self.state_dict.pop(group_id)
+                self.logger.info(f'视频组{group_id}处理完成，视频信息已被释放.')
+                self.ended_dict.pop(group_id, None)
+                self.state_dict.pop(group_id, None)
+                self.live_status.pop(group_id, None)
 
+        # 超时释放：也要用 pop(..., None) 防 KeyError
         for group_id in list(self.ended_dict.keys()):
-            if time.time() - self.ended_dict[group_id] > 72*3600:
-                self.logger.debug(f'视频组{group_id}处理超时，视频信息将被释放.')
-                self.ended_dict.pop(group_id)
-                self.state_dict.pop(group_id)
+            if time.time() - self.ended_dict[group_id] > 72 * 3600:
+                self.logger.info(f'视频组{group_id}处理超时，视频信息将被释放.')
+                self.ended_dict.pop(group_id, None)
+                self.state_dict.pop(group_id, None)
+                self.live_status.pop(group_id, None)
 
-    def onUploadEnd(self, message:PipeMessage):
-        self.logger.info(f'{self.name}: {message.msg}.')
-        #debug------------------
-        # self._log_state("onUploadEnd:before", extra={"request_id": message.request_id})
-        #debug------------------
-
-        request_id = message.request_id
-        # 将状态信息中request_id对应的等待移除
-        for group_id, video_states in self.state_dict.items():
-            for idx, video_state in enumerate(video_states):
-                for vtype, info in video_state.items():
-                    if request_id in info['wait']:
-                        self.state_dict[group_id][idx][vtype]['wait'].remove(request_id)
-                        if len(self.state_dict[group_id][idx][vtype]['wait']) == 0:
-                            self.state_dict[group_id][idx][vtype]['status'] = 'uploaded'
-        #debug------------------
-        # self._log_state("onUploadEnd:middle", extra={"request_id": message.request_id})
-        #debug------------------
-
-        ret_msgs = []
-        if self.config['common_event_args'].get('auto_clean'):
-            clean_msgs = self._check_for_clean()
-            ret_msgs += clean_msgs
-
-        # 判断是否加入合集
-        self.bvid=message.bvid
-        after_upload_args = self.config["common_event_args"].get('after_upload_args',{})
-        need_add_to_list=after_upload_args.get("add_to_list",False)
-        account=after_upload_args.get('account',None)
-        sectionId = after_upload_args.get('sectionId',None)
-        if need_add_to_list and not self.is_already_add_to_list:
-            try:
-                add_to_list(self.bvid,sectionId,account)
-                self.is_already_add_to_list=True
-            except Exception as e:
-                self.logger.error(e)
-
-        # 判断是否写入下播时间到简介里
-        if self.is_live_end:
-            self.check_change_desc(self.bvid)
-
-        return ret_msgs
+        self._log_state(prefix="_free_state_memory_end:",level=logging.DEBUG)
 
     def onExit(self, *args, **kwargs) -> None:
         self.logger.info(f'{self.name}: 任务结束.')

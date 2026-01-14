@@ -9,7 +9,7 @@ msg_queue = queue.Queue()
 # 2. 准备初始化参数
 # 这里的参数是根据 "DMR-不可一世杀手.yml" 的覆盖值和 "global.yml" 的默认值合并得出的
 task_args = {
-    "url": 'https://live.douyin.com/294762946834',
+    "url": 'https://www.douyu.com/3125893',
     "taskname": 'test',
     "output_dir": './test',
     "output_name": '手{CTIME.MONTH}月{CTIME.DAY}日{CTIME.HOUR:02d}点{CTIME.MINUTE:02d}分',
@@ -76,6 +76,7 @@ task_args = {
 
     # 弹幕模板 (针对礼物消息进行了自定义)
     "dm_template": {
+        # "ass_text": "{uname}:{content}",
         "danmaku": None,
         "superchat": None,
         "gift": '{uname} 送给主播价值{gift_price}{price_unit}的{gift_name}×{gift_count}',
@@ -86,6 +87,9 @@ task_args = {
 
 # 3. 实例化任务
 downloader_task = StreamDownloadTask(send_queue=msg_queue, **task_args)
+
+
+
 
 if __name__ == "__main__":
     print(f"任务 [{task_args['taskname']}] 启动中...")

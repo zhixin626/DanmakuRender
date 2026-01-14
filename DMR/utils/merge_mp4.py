@@ -83,40 +83,44 @@ def probe_media(
         "size": os.path.getsize(path) if os.path.exists(path) else None,
     }
 
-def read_live_time_from_path(path, is_start=True):
-    path = Path(path)
-    # logger.debug(f'放置开下播时间txt文件的文件夹是{path}')
-    txt_path = path / ("_livestart_times.txt" if is_start else "_liveend_times.txt")
-    try:
-        if txt_path.exists():
-            with open(txt_path, "r", encoding="utf-8") as f:
-                last_line = None
-                for line in f:
-                    if line.strip():
-                        last_line = line.strip()
-            if last_line:
-                try:
-                    time = datetime.fromisoformat(last_line)
-                except Exception:
-                    time = datetime.now()
-                    if logger:
-                        logger.warning(f"文件 {txt_path} 最后一行 '{last_line}' 解析失败，使用当前时间。")
-                else:
-                    return time
-            else:
-                time = datetime.now()
-                if logger:
-                    logger.warning(f"文件 {txt_path} 内容为空，使用当前时间。")
-        else:
-            time = datetime.now()
-            if logger:
-                logger.warning(f"文件 {txt_path} 不存在，使用当前时间。")
-    except Exception as e:
-        time = datetime.now()
-        if logger:
-            logger.warning(f"读取 {txt_path} 出错：{e}，使用当前时间。")
+def read_last_complete_session(path):
+    """
+    读取最近一次完整的直播时间（包含 start 和 end）
+    返回: (start_time, end_time) 的 datetime 元组
+    """
+    txt_path = Path(path) / "_live_sessions.txt"
+    default_now = datetime.now()
 
-    return time
+    try:
+        if not txt_path.exists():
+            return default_now, default_now
+
+        with open(txt_path, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        # 从最后一行开始向上查找完整的记录 (Reverse search)
+        for line in reversed(lines):
+            if "开播:" in line and "下播:" in line:
+                try:
+                    # 字符串切割解析 (String Splitting)
+                    # 格式: start:2023-10-01T10:00:00;end:2023-10-01T12:00:00
+                    parts = line.split(";")
+                    start_part = parts[0].replace("开播:", "").strip()
+                    end_part = parts[1].replace("下播:", "").strip()
+
+                    start_dt = datetime.fromisoformat(start_part)
+                    end_dt = datetime.fromisoformat(end_part)
+                    return start_dt, end_dt
+                except Exception as e:
+                    continue # 解析失败则尝试上一行
+
+        # 如果循环结束没找到完整记录
+        return default_now, default_now
+
+    except Exception as e:
+        if 'logger' in globals():
+            logger.warning(f"读取时间出错: {e}")
+        return default_now, default_now
 
 def format_duration(start: datetime, end: datetime) -> str:
     delta = end - start
