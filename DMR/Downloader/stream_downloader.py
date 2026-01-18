@@ -190,7 +190,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             if self.plat == 'bilibili':
                 if re.search(r'live_\d+_[a-zA-Z_]{0,10}\d+_[a-zA-Z]{1,10}', stream_url)\
                     and '.m3u8' in stream_url:
-                    this_engine = 'pyrequests'
+                    this_engine = 'ffmpeg'          # pyrequests强制原画可用率不高，改回ffmpeg
                 elif '.m3u8' in stream_url:
                     this_engine = 'ffmpeg'
                 else:
@@ -292,6 +292,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 elapsed = (datetime.now() - self.segment_start_time).total_seconds()
                 if elapsed >= self.test_max_seconds:
                     self.logger.info(f"{self.taskname_disp}: 达到 {self.test_max_seconds}s 测试上限，后续禁录")
+
                     return
                 remaining = self.test_max_seconds - elapsed
                 timeout = max(1, min(60, remaining))
