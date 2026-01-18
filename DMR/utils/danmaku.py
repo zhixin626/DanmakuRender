@@ -9,6 +9,7 @@ class SimpleDanmaku():
                  color:str='ffffff',
                  content:str=None,
                  text:str=None,
+                 uid:str=None,
                  **kwargs,
                  ) -> None:
         # time 表示相对时间，单位为秒
@@ -25,6 +26,7 @@ class SimpleDanmaku():
         self.uname = uname      # 发送者名称
         self.color = color      # 弹幕颜色，6位16进制颜色码
         self.content = content  # 弹幕内容，可能是纯文本或其他格式
+        self.uid=uid
 
         for key, value in kwargs.items(): # dm.uname 将 kwargs 中的任意键值对动态添加为对象属性
             self.__dict__[key] = value
@@ -69,7 +71,7 @@ class GiftDanmaku(SimpleDanmaku):
 
         self.dtype = 'gift'
         self.text = text if text is not None else\
-            f'{self.uname}送给主播价值{self.gift_price}{self.price_unit}的{self.gift_name}x{self.gift_count}'
+            f'{self.uname} 送给主播价值{self.gift_price}{self.price_unit}的{self.gift_name}x{self.gift_count}'
 
 
 class SuperChatDanmaku(SimpleDanmaku):

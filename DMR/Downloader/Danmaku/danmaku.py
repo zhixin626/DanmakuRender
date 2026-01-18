@@ -21,6 +21,7 @@ class DanmakuDownloader():
                  dm_format:str,
                  dm_filter:dict=None,
                  dm_template:dict=None,
+                 uid_template:dict={},
                  dm_stream_option:dict={},
                  advanced_dm_args:dict={},
                  **kwargs) -> None:
@@ -40,6 +41,9 @@ class DanmakuDownloader():
         self.dm_file_min_time = self.advanced_dm_args.get('dm_file_min_time', 10)
 
         self.dm_filter = dm_filter.copy() if dm_filter else {}
+
+        self.uid_template=uid_template # zhxin 新加
+
         try:
             keywords_filter = dm_filter['keywords']
             if not keywords_filter:
@@ -145,6 +149,20 @@ class DanmakuDownloader():
 
         return True
 
+    def format_uid_template(self,uid_template,dm:SimpleDanmaku):
+        dm_type=dm.dtype
+        # dm里有uid
+        uid_val = getattr(dm, "uid", None)
+        if uid_val is not None:
+            uid = str(uid_val)
+            # uidtemplate里有uid
+            if template:=uid_template.get(uid,None):
+                # template里有dm类型
+                if text_template:=template.get(dm_type):
+                    return replace_keywords(text_template,dm)
+
+        return dm.text
+
     def start_dmc(self):
         async def danmu_monitor(url:str=None): # 监督员
             if not url:
@@ -184,6 +202,8 @@ class DanmakuDownloader():
                     # 载入弹幕模板
                     if dm_templ := self.dm_template.get(dm.dtype):
                         dm.text = replace_keywords(dm_templ, dm)
+                    if self.uid_template:
+                        dm.text = self.format_uid_template(self.uid_template,dm)
                     if self.dm_available(dm):
                         retry = 0
                         if self.dmwriter.add(dm):

@@ -125,8 +125,8 @@ class AssWriter():
         if calc_collision and max_dist < self.margin_w:
             return False
 
-        content = danmu.text.replace('\n',' ').replace('\r',' ')
-        dm_length = self._get_length(content)
+        text = danmu.text.replace('\n',' ').replace('\r',' ')
+        dm_length = self._get_length(text)
         x0 = self.width
         x1 = -dm_length
         y = self.fontsize + (self.fontsize + self.margin_h) * tid
@@ -145,7 +145,7 @@ class AssWriter():
         else: # danmu.dtype == "danmaku":
             dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
 
-        dm_info += content
+        dm_info += text
 
         with self._lock, open(self._filename, 'a', encoding='utf-8') as f:
             f.write(dm_info + '\n')

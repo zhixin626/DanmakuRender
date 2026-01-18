@@ -8,12 +8,12 @@ from .DMAPI import DMAPI
 
 # RGB Color
 color_tab = {
-    "2": "00ccff", # '1e87f0' to '00ccff' light blue (lv.6)
-    "3": "66ff00", # '7ac84b' to '66ff00' light green(teal) (lv.9)
-    "4": "ff6600", # 'ff7f00' to 'ff6600' orange (lv.15)
-    "6": "f6447f", # 'ff69b4' to 'f6447f' pink (lv.12)
-    "5": "cc00ff", # '9b39f4' to 'cc00ff' purple (lv.18)
-    "1": "ff2e2e", # 'ff0000' to 'ff2e2e' red (lv.21)
+    "2": "80e5ff", # '1e87f0' to '00ccff' light blue (lv.6)
+    "3": "b3ff80", # '7ac84b' to '66ff00' light green(teal) (lv.9)
+    "4": "ffc299", # 'ff7f00' to 'ff6600' orange (lv.15)
+    "6": "f985ac", # 'ff69b4' to 'f6447f' pink (lv.12)
+    "5": "e580ff", # '9b39f4' to 'cc00ff' purple (lv.18)
+    "1": "ff8080", # 'ff0000' to 'ff2e2e' red (lv.21)
 }
 
 
@@ -65,15 +65,16 @@ class Douyu(DMAPI):
                 msg = msg.replace(b"@=", b'":"').replace(b"/", b'","')
                 msg = msg.replace(b"@A", b"@").replace(b"@S", b"/")
                 msg = json.loads((b'{"' + msg[:-2] + b"}").decode("utf8", "ignore"))
-                msg["name"] = msg.get("nn", "")
-                msg["content"] = msg.get("txt", "")
-                msg["msg_type"] = {"dgb": "gift", "chatmsg": "danmaku", "uenter": "enter"}.get(
-                    msg["type"], "other"
-                )
-                if msg["msg_type"] == "gift":
+
+                uname    = msg.get("nn", "")
+                content  = msg.get("txt", "")
+                msg_type = {"dgb": "gift", "chatmsg": "danmaku", "uenter": "enter"}.get(msg["type"], "other")
+                uid      = msg["uid"]
+                color    = color_tab.get(msg.get("col", "-1"), "ffffff")
+
+                if msg_type == "gift":
                     gift_name = msg.get("gfn", "未知礼物")
                     gift_num = int(msg.get("gfcnt", 1))
-                    uname = msg["name"]
 
                     # 使用 None 来区分“未录入”和“价值为0”
                     yuchi_value = DOUYU_GIFT_VALUE.get(gift_name)
@@ -102,14 +103,20 @@ class Douyu(DMAPI):
                         gift_price=gift_price,
                         price_unit='鱼翅',
                         dtype='gift',
-                        color='ffffff'
+                        color='ffffff',
                     )
                     msgs.append(gift_msg_obj)
                     continue
 
-                elif msg["msg_type"] == "danmaku":
-                    msg["content"] = msg.get("txt", "")
-                    msg["color"] = color_tab.get(msg.get("col", "-1"), "ffffff")
+                elif msg_type == "danmaku":
+                    msg = SimpleDanmaku(
+                            dtype="danmaku",
+                            uname=uname,
+                            content=content,
+                            timestamp=datetime.now().timestamp(),
+                            color=color,
+                            uid=uid,
+                        )
                     msgs.append(msg)
 
             except Exception as e:

@@ -90,33 +90,42 @@ def read_last_complete_session(path):
     """
     txt_path = Path(path) / "_live_sessions.txt"
     default_now = datetime.now()
-
     try:
         if not txt_path.exists():
             return default_now, default_now
-
         with open(txt_path, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
 
-        # 从最后一行开始向上查找完整的记录 (Reverse search)
+        # 从最后一行开始向上查找完整的记录
         for line in reversed(lines):
             if "开播:" in line and "下播:" in line:
                 try:
-                    # 字符串切割解析 (String Splitting)
-                    # 格式: start:2023-10-01T10:00:00;end:2023-10-01T12:00:00
+                    # 分割所有部分
                     parts = line.split(";")
-                    start_part = parts[0].replace("开播:", "").strip()
-                    end_part = parts[1].replace("下播:", "").strip()
 
-                    start_dt = datetime.fromisoformat(start_part)
-                    end_dt = datetime.fromisoformat(end_part)
-                    return start_dt, end_dt
+                    # 找到开播时间
+                    start_dt = None
+                    end_dt = None
+
+                    for part in parts:
+                        part = part.strip()
+                        if part.startswith("开播:"):
+                            start_part = part.replace("开播:", "").strip()
+                            start_dt = datetime.fromisoformat(start_part)
+                        elif part.startswith("下播:"):
+                            # 持续更新，最后一个下播时间会被保留
+                            end_part = part.replace("下播:", "").strip()
+                            end_dt = datetime.fromisoformat(end_part)
+
+                    # 确保两个时间都找到了
+                    if start_dt and end_dt:
+                        return start_dt, end_dt
+
                 except Exception as e:
-                    continue # 解析失败则尝试上一行
+                    continue  # 解析失败则尝试上一行
 
         # 如果循环结束没找到完整记录
         return default_now, default_now
-
     except Exception as e:
         if 'logger' in globals():
             logger.warning(f"读取时间出错: {e}")
@@ -213,7 +222,7 @@ def detect(file:str):
 
 def amplify_mp4(file,target_db=-1,remover=True,extra_gain_db=0) -> Path:
     file=Path(file)
-    peak       = detect(str(file)) # 检测最高音量max_volume
+    peak=detect(str(file)) # 检测最高音量max_volume
 
     gain_db = target_db - peak + extra_gain_db
     if gain_db < 0:

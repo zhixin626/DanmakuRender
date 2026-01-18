@@ -136,10 +136,12 @@ class Douyin:
             if msg.method == 'WebcastChatMessage':
                 chatMessage = ChatMessage()
                 chatMessage.ParseFromString(msg.payload)
-                data = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
+                data        = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
                 
                 user_info = data.get('user', {})
-                name = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
+                # print(user_info)
+                name      = user_info.get('nickName',"未知用户")
+                shortId   = user_info.get('shortId',None)
 
                 content = data['content']
                 msg_dict = SimpleDanmaku(
@@ -147,7 +149,8 @@ class Douyin:
                     uname=name,
                     content=replace_shortcodes_to_emoji(content),
                     dtype='danmaku',
-                    color='ffffff'
+                    color='ffffff',
+                    uid=shortId,
                 )
                 
                 # logger.info("WebcastChatMessage\n%s", json.dumps(data, ensure_ascii=False, indent=2))
@@ -165,11 +168,11 @@ class Douyin:
 
                 # name = data['user']['nickName']
                 msg_dict = EntryDanmaku(
-                    timestamp=now,
-                    uname=name,
-                    content=f"{name}来了",
-                    dtype='entry',
-                    color='ffffff'
+                    timestamp = now,
+                    uname     = name,
+                    content   = f"{name}来了",
+                    dtype     = 'entry',
+                    color     = 'ffffff'
                 )
             elif msg.method == 'WebcastGiftMessage':
                 giftMessage = GiftMessage()
@@ -188,17 +191,17 @@ class Douyin:
 
                 if total_price_cny>=0.9:
                     msg_dict = GiftDanmaku(
-                        timestamp=now,
-                        uname=name,
-                        content=f"<{name}>送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
-                        text=f"<{name}>送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
-                        gift_name=gift_name,
-                        gift_count=gift_count,
-                        gift_price=gift_price,
-                        price_unit='抖币',
-                        price=total_price,
-                        dtype='gift',
-                        color='ffffff'
+                        timestamp  = now,
+                        uname      = name,
+                        content    = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
+                        text       = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
+                        gift_name  = gift_name,
+                        gift_count = gift_count,
+                        gift_price = gift_price,
+                        price_unit = '抖币',
+                        price      = total_price,
+                        dtype      = 'gift',
+                        color      = 'ffffff'
                     )
                 else:
                     continue

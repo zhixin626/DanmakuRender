@@ -2,18 +2,48 @@ from pathlib import Path
 from DMR.utils.utils import safe_filename
 from DMR.utils.merge_mp4 import merge_mp4,amplify_mp4
 from upload_only import file_to_args, replace_args_keywords,parse_yn,strip_quotes
-
+import os
 def main():
-    print("请输入需要按顺序合并的视频路径,每行一个,输入空行结束：")
+    print("请输入需要按顺序合并的视频【文件或文件夹】路径,每行一个,输入空行结束：")
     videos = []
     while True:
         inp = strip_quotes(input("> ").strip())
         if not inp:
             break
-        if not Path(inp).exists():
-            print("❌ 文件不存在，请重新输入。")
+
+        p = Path(inp)
+        if not p.exists():
+            print("❌ 路径不存在，请重新输入。")
             continue
-        videos.append(inp)
+
+        # 输入的是文件：沿用原逻辑（但顺手限定一下 mp4，更安全）
+        if p.is_file():
+            if p.suffix.lower() != ".mp4":
+                print("❌ 不是 mp4 文件，请重新输入。")
+                continue
+            videos.append(str(p))
+            continue
+
+        if p.is_dir():
+            mp4s = [x for x in p.iterdir() if x.is_file() and x.suffix.lower() == ".mp4"]
+            if not mp4s:
+                print("❌ 文件夹下没有 mp4。")
+                continue
+
+            mp4s.sort(key=lambda x: os.path.getctime(x))
+
+            print("📂 检测到文件夹，按创建时间排序后的 mp4 如下：")
+            for i, f in enumerate(mp4s, 1):
+                print(f"  {i:02d}. {f.name}")
+
+            ok = parse_yn("以上顺序是否正确？(y/n)，默认 y\n", default=True)
+            if not ok:
+                print("🔁 顺序未确认，请重新输入路径。")
+                continue
+
+            videos.extend(str(x) for x in mp4s)
+            print(f"✅ 已确认并加入 {len(mp4s)} 个 mp4：{p}")
+            break
 
     if not videos:
         print("❌ 未输入任何视频文件，程序退出。")
