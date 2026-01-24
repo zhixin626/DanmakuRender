@@ -6,7 +6,7 @@ import os
 import glob
 
 from easydict import EasyDict as edict
-from os.path import exists, abspath, splitext, join
+from os.path import exists, abspath, splitext, join, basename
 from uuid import uuid1
 from typing import Union
 from pathlib import Path
@@ -31,7 +31,34 @@ __all__ = [
     'merge_dict',
     'multi_unescape',
     'match1',
+    'filename_to_taskname',
+    'DateTimeEncoder',
+    'DateTimeDecoder',
 ]
+
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, datetime):
+            return o.isoformat()
+        return super().default(o)
+
+
+class DateTimeDecoder(json.JSONDecoder):
+    def __init__(self, *args, **kwargs):
+        super().__init__(object_hook=self.object_hook, *args, **kwargs)
+    
+    def object_hook(self, obj):
+        if isinstance(obj, str):
+            try:
+                return datetime.fromisoformat(obj)
+            except ValueError:
+                pass
+        return obj
+
+
+def filename_to_taskname(filename:str) -> str:
+    return splitext(basename(filename))[0].split('-', 1)[-1]
 
 def match1(text, *patterns):
     if len(patterns) == 1:

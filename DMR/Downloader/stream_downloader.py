@@ -3,6 +3,7 @@ import os
 import queue
 import threading
 import time
+import re
 
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from os.path import join,exists,splitext
@@ -66,6 +67,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.advanced_video_args = advanced_video_args if advanced_video_args else {}
         self.advanced_dm_args = advanced_dm_args if advanced_dm_args else {}
         self.gift_dm_args=gift_dm_args
+        self.stoped = True
 
         # if self.engine not in ['ffmpeg', 'streamlink', 'streamgears', 'pyrequests', 'auto']:
         #     raise NotImplementedError(f'No Downloader Named {self.engine}.')
