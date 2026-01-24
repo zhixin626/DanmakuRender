@@ -18,3 +18,9 @@ DMR-**.yml
 **.ass
 **.xml
 \-*
+
+/configs/
+/configs_test/
+/python文件/
+/Tasks文件/
+*.bat
