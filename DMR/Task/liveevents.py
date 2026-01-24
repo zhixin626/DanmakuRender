@@ -46,6 +46,11 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             "is_already_render_cover": False,
             'bvid': None,
             'is_live_end': False,
+            'gift_stat':{
+                    "total_revenue" : "未知",
+                    "total_gifters" : "未知",
+                    "top_ranking"   : "未知",
+                    }
         }
         # self.is_already_add_to_list  = False
         # self.is_already_change_desc = False
@@ -285,23 +290,40 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
         self.live_status[group_id]['is_live_end'] = True
 
-        # 先处理 state_dict
+        # --- 第一步：标记结束 ---
         if group_id in self.state_dict:
             self.ended_dict[group_id] = time.time()
         else:
             self.logger.debug(f'No such group:{group_id}.')
 
-        # 检查是否合并
-        self.check_for_merge(group_id)
 
+        # --- 第二步：解析并保存礼物统计（必须在合并前！） ---
+        if hasattr(message, "gift_stat") and message["gift_stat"]:
+            raw_stat = message["gift_stat"]
+
+            # 1. 提取名字和金额，并格式化为 "名字(金额)" (Format: Name(Value))
+            # item["total_value"] 是 generate_gift_statistics 生成的数字
+            names_list = [f"{item['name']}({item['total_value']})" for item in raw_stat.get("top_ranking", [])]
+
+            # 2. 使用逗号连接 (Join with comma)
+            names_str = ",".join(names_list)
+
+            # 3. 存储到 live_status
+            self.live_status[group_id]["gift_stat"] = {
+                "total_revenue": raw_stat.get("total_revenue", 0),
+                "total_gifters": raw_stat.get("total_gifters", 0),
+                "top_ranking": names_str  # 结果示例: "悲伤小猫馄饨(20.7)，似冬(10.8)，放飞气球树(5.7)"
+            }
+
+        # --- 第三步：触发合并、上传和简介修改 ---
+        self.check_for_merge(group_id)
+        self.check_change_desc(group_id)
         # self.check_zuozuo_video()
 
         ret_msgs = []
         if self.config['common_event_args'].get('auto_upload'):
             upload_msgs = self._check_for_upload(str(group_id))
             ret_msgs += upload_msgs
-
-        self.check_change_desc(group_id)
 
         self._free_state_memory()
 
@@ -321,9 +343,11 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             return
 
         after_upload_args = self.config["common_event_args"].get('after_upload_args',{})
-        change_desc = after_upload_args.get("change_desc",False)
-        insert_desc = after_upload_args.get("insert_desc",None)
-        account=after_upload_args.get('account',None)
+        account           = after_upload_args.get('account',None)
+        change_desc       = after_upload_args.get("change_desc",False)
+        insert_desc       = after_upload_args.get("insert_desc",None)
+        insert_at         = after_upload_args.get("insert_at",-1)
+        gift_stat         = self.live_status[group_id]["gift_stat"]
 
         if change_desc:
             stime,etime=read_last_complete_session(self.src_path)
@@ -333,11 +357,14 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 {
                     "stime": stime,
                     "etime": etime,
-                    "totaltime":duration
+                    "totaltime":duration,
+                    "total_revenue" : gift_stat.get("total_revenue",""),
+                    "total_gifters" : gift_stat.get("total_gifters",""),
+                    "top_ranking"   : gift_stat.get("top_ranking",""),
                 }
             )
             try:
-                add_livetime(bvid,result,account)
+                add_text_to_desc(result,bvid,account,n=insert_at)
                 self.live_status[group_id]['is_already_change_desc']=True
             except Exception as e:
                 self.logger.error(e)
@@ -712,6 +739,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
             # 6. 写新占位：只填这个 vt 对应的 slot
             dst = target_slot.get(vt, vt)  # 默认映射自己
+            gift_stat  = self.live_status[group_id]["gift_stat"]
             newvideo = VideoInfo(
                 path      = str(output_path),
                 dtype     = dst,
@@ -729,6 +757,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 streamer  = tail.streamer,
                 title     = tail.title,
                 resolution= meta.get('resolution') or (0,0),
+                total_revenue = gift_stat.get("total_revenue",""),
+                total_gifters = gift_stat.get("total_gifters",""),
+                top_ranking   = gift_stat.get("top_ranking",""),
             )
             new_state[dst] = {'status': 'ready', 'file': newvideo, 'wait': []}
 

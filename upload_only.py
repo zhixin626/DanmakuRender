@@ -143,6 +143,29 @@ def file_to_args(file_path):
 
     return common_event_args, download_args, upload_args
 
+def get_last_gift_stats(folder_path):
+    """
+    读取文件夹下的 gifts_statistics.jsonl，返回最后一行统计数据的字典。
+    """
+    file_path = os.path.join(folder_path, "gifts_statistics.jsonl")
+
+    if not os.path.exists(file_path):
+        print(f"文件未找到: {file_path}")
+        return {}
+
+    last_entry = None
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # 逐行读取以节省内存，保留最后一行
+            for line in f:
+                line = line.strip()
+                if line:
+                    last_entry = json.loads(line)
+    except Exception as e:
+        print(f"读取文件出错: {e}")
+        return {}
+
+    return last_entry if last_entry else {}
 def replace_args_keywords(
     common_event_args,
     download_args,
@@ -153,8 +176,11 @@ def replace_args_keywords(
     TITLE=roominfo.get("title","")
     NAME=roominfo.get("name","")
 
-    live_time_path=download_args.get("output_dir")
-    st,et=read_last_complete_session(live_time_path)
+    gift_stat_folder=live_time_path=download_args.get("output_dir")
+    raw_stat = get_last_gift_stats(gift_stat_folder)
+    names_list = [f"{item['name']}({item['total_value']})" for item in raw_stat.get("top_ranking", [])]
+    names_str = ",".join(names_list)
+    st,et=read_last_complete_session(live_time_path,only_start=True)
     kw_info = {
         "streamer": {
             "name": NAME,
@@ -176,6 +202,9 @@ def replace_args_keywords(
         },
         "title": TITLE,
         "totaltime": format_duration(st, et),
+        "total_revenue": raw_stat.get("total_revenue", 0),
+        "total_gifters": raw_stat.get("total_gifters", 0),
+        "top_ranking":names_str,
     }
     title=replace_keywords(upload_args.get("title"),kw_info)
     desc=replace_keywords(upload_args.get("desc"),kw_info)
@@ -295,7 +324,7 @@ def build_videoinfo(file_path: str) -> VideoInfo:
 
     # 你现有的：读开播/下播时间（依赖 output_dir 的 _livestart_times.txt 等）
     out_dir = download_args.get("output_dir")
-    st,et=read_last_complete_session(out_dir)
+    st,et=read_last_complete_session(out_dir,only_start=True)
 
     # 你现有的：直播间信息
     api = LiveAPI(download_args.get("url"))
@@ -397,6 +426,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

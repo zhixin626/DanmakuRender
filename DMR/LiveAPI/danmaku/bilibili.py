@@ -122,6 +122,7 @@ class Bilibili(DMAPI):
                 msg = {}
                 if dm.get('type') == 5:
                     j = json.loads(dm.get('body'))
+                    # print(j) #debug
                     msg['msg_type'] = {
                         'SEND_GIFT': 'gift',
                         'DANMU_MSG': 'danmaku',
@@ -155,6 +156,17 @@ class Bilibili(DMAPI):
                                 msg['msg_type'] = 'emoticon'
                         except Exception as e:
                             pass
+
+                        dm = SimpleDanmaku(
+                            dtype=msg.get('msg_type', 'other'),
+                            uname=msg.get('name', ''),
+                            content=msg.get('content', ''),
+                            timestamp=msg.get('timestamp', datetime.now().timestamp()),
+                            color=msg.get('color', 'ffffff'),
+                            uid=j.get("info")[2][0],
+                        )
+                        msgs.append(dm)
+                        continue
 
                     elif msg['msg_type'] == 'interactive_danmaku': # 这个分支没用！
                         msg["msg_type"] = "danmaku"
@@ -199,33 +211,32 @@ class Bilibili(DMAPI):
                         # 总价值（元）
                         total_price_cny = total_coin / 1000
 
-                        #总价值 >= 1元
-                        if total_price_cny >= 1:
-                            # 时间戳处理
-                            ts = data.get('timestamp') or data.get('ts') or datetime.now().timestamp()
 
-                            text=f"<{uname}>送给主播价值{gift_price_battery:.0f}电池的{gift_name}x{gift_num}"
-                            msg = GiftDanmaku(
-                                timestamp=ts,
-                                uname=uname,
-                                content=text,
-                                text=text,
-                                gift_name=gift_name,
-                                gift_count=gift_num,
-                                gift_price=f"{gift_price_battery:.0f}",
-                                price_unit='电池',
-                                dtype='gift',
-                                color='d9a6c4'
-                            )
-                            # 此时 msg 已经是一个对象，后续会被 append 到 msgs 列表
-                        else:
-                            # 低于 49 元的礼物直接跳过，不存入 msgs
-                            continue
+                        # 时间戳处理
+                        ts = data.get('timestamp') or data.get('ts') or datetime.now().timestamp()
+
+                        text=f"<{uname}>送给主播价值{gift_price_battery:.0f}电池的{gift_name}x{gift_num}"
+
+                        msg = GiftDanmaku(
+                            timestamp=ts,
+                            uname=uname,
+                            content=text,
+                            text=text,
+                            gift_name=gift_name,
+                            gift_count=gift_num,
+                            gift_price=f"{gift_price_battery:.0f}",
+                            price_unit='电池',
+                            dtype='gift',
+                            color='d9a6c4',
+                            total_price_cny=total_price_cny,
+                        )
+
 
                     else:
                         msg["content"] = j
                 else:
                     msg = {"name": "", "content": dm.get('body'), "msg_type": "other"}
+
                 msgs.append(msg)
 
             except Exception as e:

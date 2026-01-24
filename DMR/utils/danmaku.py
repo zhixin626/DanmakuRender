@@ -1,5 +1,5 @@
 from datetime import datetime
-
+from typing import Union
 class SimpleDanmaku():
     def __init__(self,
                  time:float=None,
@@ -10,6 +10,7 @@ class SimpleDanmaku():
                  content:str=None,
                  text:str=None,
                  uid:str=None,
+                 is_vip:bool=False,
                  **kwargs,
                  ) -> None:
         # time 表示相对时间，单位为秒
@@ -22,11 +23,12 @@ class SimpleDanmaku():
         else:
             self.timestamp = float(timestamp)
 
-        self.dtype = dtype      # 弹幕类型，未知类型需要设置为 'other'
-        self.uname = uname      # 发送者名称
-        self.color = color      # 弹幕颜色，6位16进制颜色码
+        self.dtype   = dtype      # 弹幕类型，未知类型需要设置为 'other'
+        self.uname   = uname      # 发送者名称
+        self.color   = color      # 弹幕颜色，6位16进制颜色码
         self.content = content  # 弹幕内容，可能是纯文本或其他格式
-        self.uid=uid
+        self.uid     = uid
+        self.is_vip  = is_vip
 
         for key, value in kwargs.items(): # dm.uname 将 kwargs 中的任意键值对动态添加为对象属性
             self.__dict__[key] = value
@@ -51,14 +53,16 @@ class GiftDanmaku(SimpleDanmaku):
         gift_count: int = 1,
         gift_price: float = 0.0,
         price_unit: str = '',
+        total_price_cny: Union[float,None] = None,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.gift_name = gift_name
-        self.gift_count = int(gift_count)
+        self.gift_name       = gift_name
+        self.gift_count      = int(gift_count)
+        self.gift_price      = float(gift_price) if gift_price is not None else 0.0
+        self.total_price_cny = total_price_cny
 
-        self.gift_price = float(gift_price)
         # 新增：如果 gift_price 小数部分为 0，转成 int
         if self.gift_price.is_integer():
             self.gift_price = int(self.gift_price)

@@ -177,36 +177,36 @@ class Douyin:
             elif msg.method == 'WebcastGiftMessage':
                 giftMessage = GiftMessage()
                 giftMessage.ParseFromString(msg.payload)
-                data = json_format.MessageToDict(giftMessage, preserving_proto_field_name=True)
+                data        = json_format.MessageToDict(giftMessage, preserving_proto_field_name=True)
                 if 'combo' in data['gift'] and not 'repeatEnd' in data:
                   continue
-                user_info = data.get('user', {})
-                name = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
+                user_info   = data.get('user', {})
+                name        = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
 
-                gift_price=int(data['gift']['diamondCount'])
-                gift_count=int(data.get('repeatCount', 1))
-                gift_name=data['gift']['name']
-                total_price=gift_price*gift_count
-                total_price_cny=total_price/10
+                gift_price      = int(data['gift']['diamondCount'])
+                gift_count      = int(data.get('repeatCount', 1))
+                gift_name       = data['gift']['name']
+                total_price     = gift_price*gift_count
+                total_price_cny = total_price/10
 
-                if total_price_cny>=0.9:
-                    msg_dict = GiftDanmaku(
-                        timestamp  = now,
-                        uname      = name,
-                        content    = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
-                        text       = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
-                        gift_name  = gift_name,
-                        gift_count = gift_count,
-                        gift_price = gift_price,
-                        price_unit = '抖币',
-                        price      = total_price,
-                        dtype      = 'gift',
-                        color      = 'ffffff'
-                    )
-                else:
-                    continue
+                msg_dict = GiftDanmaku(
+                    timestamp       = now,
+                    uname           = name,
+                    content         = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
+                    text            = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
+                    gift_name       = gift_name,
+                    gift_count      = gift_count,
+                    gift_price      = gift_price,
+                    price_unit      = '抖币',
+                    price           = total_price,
+                    dtype           = 'gift',
+                    color           = 'ffffff',
+                    total_price_cny = total_price_cny,
+                )
+
             else:
                 msg_dict = {"timestamp": now, "name": "", "content": "", "msg_type": "other", "raw_data": msg}
 
             msgs.append(msg_dict)
+
         return msgs, ack

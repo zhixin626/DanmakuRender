@@ -82,53 +82,59 @@ def probe_media(
         "path": str(path),
         "size": os.path.getsize(path) if os.path.exists(path) else None,
     }
-
-def read_last_complete_session(path):
+def read_last_complete_session(path, only_start=False):
     """
-    读取最近一次完整的直播时间（包含 start 和 end）
-    返回: (start_time, end_time) 的 datetime 元组
+    读取直播时间记录。
+    :param path: _live_sessions.txt 所在的目录路径
+    :param only_start: 如果为 True，只寻找最近的一次“开播”时间，下播时间返回当前时间。
+                       如果为 False，寻找最近的一条包含“开播”和“下播”的完整记录。
+    :return: (start_time, end_time) 的 datetime 元组
     """
     txt_path = Path(path) / "_live_sessions.txt"
     default_now = datetime.now()
+
     try:
         if not txt_path.exists():
             return default_now, default_now
+
         with open(txt_path, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
 
-        # 从最后一行开始向上查找完整的记录
+        # 从最后一行开始向上查找 (Search from bottom to top)
         for line in reversed(lines):
-            if "开播:" in line and "下播:" in line:
-                try:
-                    # 分割所有部分
-                    parts = line.split(";")
+            parts = line.split(";")
+            start_dt = None
+            end_dt = None
 
-                    # 找到开播时间
-                    start_dt = None
-                    end_dt = None
+            # 解析当前行中的所有部分
+            for part in parts:
+                part = part.strip()
+                if part.startswith("开播:"):
+                    start_part = part.replace("开播:", "").strip()
+                    start_dt = datetime.fromisoformat(start_part)
+                elif part.startswith("下播:"):
+                    end_part = part.replace("下播:", "").strip()
+                    end_dt = datetime.fromisoformat(end_part)
 
-                    for part in parts:
-                        part = part.strip()
-                        if part.startswith("开播:"):
-                            start_part = part.replace("开播:", "").strip()
-                            start_dt = datetime.fromisoformat(start_part)
-                        elif part.startswith("下播:"):
-                            # 持续更新，最后一个下播时间会被保留
-                            end_part = part.replace("下播:", "").strip()
-                            end_dt = datetime.fromisoformat(end_part)
+            # --- 核心新增逻辑 (Core Logic) ---
+            if only_start:
+                # 模式 A：只要找到了开播时间，就立即返回，结束时间设为当前
+                if start_dt:
+                    return start_dt, default_now
+            else:
+                # 模式 B：原始逻辑，必须同时具备开播和下播
+                if start_dt and end_dt:
+                    return start_dt, end_dt
 
-                    # 确保两个时间都找到了
-                    if start_dt and end_dt:
-                        return start_dt, end_dt
-
-                except Exception as e:
-                    continue  # 解析失败则尝试上一行
-
-        # 如果循环结束没找到完整记录
+        # 如果遍历完所有行都没找到符合条件的
         return default_now, default_now
+
     except Exception as e:
-        if 'logger' in globals():
+        # 兼容性处理：如果 logger 未定义则直接 print
+        try:
             logger.warning(f"读取时间出错: {e}")
+        except NameError:
+            print(f"读取时间出错: {e}")
         return default_now, default_now
 
 def format_duration(start: datetime, end: datetime) -> str:
@@ -388,36 +394,51 @@ def build_edit_payload(bvid,account)-> dict:
     }
     return payload
 
-def add_livetime(bvid: str, text: str,account) :
-    def insert_after(desc: str, text: str) -> str:
-        pattern = r"(开播时间：.*(?:\n|$))"
-        def repl(m):
-            sep = "" if m.group(1).endswith("\n") else "\n"
-            return m.group(1) + sep + text.rstrip("\r\n") + "\n"
-        new_desc, count = re.subn(pattern, repl, desc)
-        if count == 0:
-            new_desc = desc.rstrip() + "\n" + text.rstrip("\r\n") + "\n"
-        return new_desc
+def add_text_to_desc(text: str,bvid: str, account, n: int = -1):
+    def insert_at_line(desc: str, text: str, n: int) -> str:
+        # 1. 将简介按行拆分为列表 (Split into lines)
+        lines = desc.splitlines()
 
-    cookies=get_cookies(account)
+        # 清理待插入文字的换行符
+        text_to_insert = text.strip("\r\n")
+
+        # 2. 根据 n 的值决定插入位置 (Insert logic)
+        if n == -1 or n >= len(lines):
+            # 如果是 -1 或超出范围，追加到最后 (Append to end)
+            lines.append(text_to_insert)
+        elif n <= 0:
+            # 如果是 0 或负数（除-1外），插入到开头 (Insert at start)
+            lines.insert(0, text_to_insert)
+        else:
+            # 插入到指定的第 n 行（n=1 为第二行）
+            lines.insert(n, text_to_insert)
+
+        # 3. 重新合并为字符串 (Join back)
+        return "\n".join(lines)
+
+    cookies = get_cookies(account)
     headers = build_headers()
     params = {"csrf": cookies["bili_jct"]}
-    url_edit='https://member.bilibili.com/x/vu/web/edit'
-    payload = build_edit_payload(bvid,account)
-    payload["desc"] = insert_after(payload["desc"], text)
-    # print(payload["desc"])
+    url_edit = 'https://member.bilibili.com/x/vu/web/edit'
+
+    payload = build_edit_payload(bvid, account)
+    # 调用新的插入逻辑 (Call new logic)
+    payload["desc"] = insert_at_line(payload["desc"], text, n)
+
     time.sleep(3)
-    r=requests.post(
+    r = requests.post(
         url_edit,
         headers=headers,
         cookies=cookies,
         params=params,
-        data=json.dumps(payload).encode("utf-8"))
+        data=json.dumps(payload).encode("utf-8")
+    )
+
     j = r.json()
     if j.get("code") == 0:
-        logger.info("成功添加直播时间到简介")
+        logger.info(f"成功修改:第{n}行")
     else:
-        logger.info(f"添加直播时间失败:{j}")
+        logger.info(f"修改简介失败:\n{j}")
 
 def reorder_section_once(section_id: int, account: int, mode: str = "first_to_last"):
     """

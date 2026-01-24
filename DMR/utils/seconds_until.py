@@ -60,6 +60,24 @@ def is_now_in_time_ranges(ranges=None, now=None):
 
     return False
 
+def is_passed_time_point(target_time: str, now=None) -> bool:
+    """
+    判断当前时间是否已经过了目标时间点
+    :param target_time: 目标时间字符串，格式为 "HH:MM"
+    :param now: datetime对象，默认为当前时间
+    :return: bool, 如果当前时间 >= 目标时间返回 True
+    """
+    if not target_time:
+        return False
+
+    now = now or datetime.now()
+    # 使用你已有的逻辑转换当前时间的分钟数
+    now_min = now.hour * 60 + now.minute
+    # 转换目标时间的分钟数
+    target_min = time_to_minutes(target_time)
+
+    return now_min >= target_min
+
 def get_check_interval(default_interval: int, policy: dict, now=None) -> int:
     now = now or datetime.now()
 

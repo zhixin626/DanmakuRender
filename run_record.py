@@ -6,7 +6,6 @@ from DMR.Config import Config
 
 msg_queue = queue.Queue()
 
-# taskname = "少年不太冷"
 taskname = "抖音测试"
 
 # 1) 复用项目现有 Config：读取 global + 单任务配置

@@ -1,11 +1,12 @@
-import json, re, select, random
+import json, re,requests
 from struct import pack, unpack
 from datetime import datetime
 from DMR.utils import  SimpleDanmaku,GiftDanmaku
 import aiohttp
 from DMR.utils import split_url
 from .DMAPI import DMAPI
-
+import logging
+logger = logging.getLogger(__name__)
 # RGB Color
 color_tab = {
     "2": "80e5ff", # '1e87f0' to '00ccff' light blue (lv.6)
@@ -16,25 +17,58 @@ color_tab = {
     "1": "ff8080", # 'ff0000' to 'ff2e2e' red (lv.21)
 }
 
+def get_douyu_prop_info(pid: int):
+    """
+    根据道具ID (pid) 获取信息
+    逻辑：如果是贵重道具(is_valuable=1)则返回鱼翅价格，否则返回0
+    """
+    url = "https://gift.douyucdn.cn/api/prop/v5/web/single"
+    params = {"pid": pid}
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.douyu.com/"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        item = data.get("data", {})
+        is_valuable = item.get("isValuable", 0)
+        raw_price = item.get("price", 0)
+        if is_valuable == 1:
+            price_in_yuchi = raw_price / 100
+        else:
+            price_in_yuchi = 0
+        return {
+            "name": item.get("name"),
+            "price": price_in_yuchi,      # 最终输出的价格
+            "is_valuable": is_valuable,
+            "pid": item.get("id")
+        }
+    except Exception as e:
+        return None
 
-DOUYU_GIFT_VALUE = {
-    # 基础礼物 (Image 1 & 2)
-    "赞": 0.1, "弱鸡": 0.2, "仙女棒": 1, "办卡": 6, "青鸾化仙": 2000, "飞机": 100,
-    "火箭": 500, "探险超火": 2000, "探险飞机": 100, "超级火箭": 2000, "宇宙飞船": 5000,
-    "钻粉卡": 6, "摇滚小熊": 20, "音效飞机": 100, "带宽券": 0.1, "弱鸡拳击": 100, "鲨鲨喷漆": 100,
-    "粉丝卡": 6, "高能弹幕": 10, "惊喜盒子": 0.5, "破空飞机": 100, "星际卡": 6, "梦": 666,
+def get_douyu_gift_info(gid: int):
+    """根据礼物ID (gid) 获取信息"""
+    url = "https://gift.douyucdn.cn/api/gift/v5/web/single"
+    params = {"gid": gid, "skinId": 0}
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.douyu.com/"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        gift = data["data"]["giftList"][0]
+        return {
+            "name": gift.get("name"),
+            "price": gift.get("priceInfo", {}).get("price")/100,
+            "gid": gift.get("id")
+        }
+    except Exception as e:
+        return None
 
-    # 至尊/浪漫系列 (Image 3 & 4)
-    "星空丘比特": 1314, "至尊飞机": 100, "至尊火箭": 500, "至尊超火": 2000, "心愿纸鹤": 1, "小星星": 9.9,
-    "守卫权杖": 10, "至尊飞船": 5000, "爱神丘比特": 66, "幸福卡": 6, "爱意信封": 18.8, "浪漫纸鹤": 30,
-    "告白气球": 520, "浪漫烟花": 9.9, "流星雨": 66, "天宫玉阙": 2000, "陪伴飞机": 100, "浪漫约会": 1314,
-    "星梦飞机": 100, "城堡气球": 2000, "挚爱之心": 3000, "粉丝灯牌": 6, "潘多拉魔盒": 1, "告白卡": 6,
+RED = "\033[31m"
+YELLOW = "\033[33m"
+GREEN = "\033[32m"
+BLUE = "\033[34m"
+RESET = "\033[0m"
 
-    # 趣味/特殊 (Image 5 & 6)
-    "超神": 0.1, "下饭": 0.1, "星际飞车": 50, "KPL加油": 1, "为爱发电": 5, "钻石": 1, "水晶塔": 0.2,
-    "老司机": 6, "牛啤": 6, "小心心": 0.1, "GG": 0.1, "炒CP": 50, "挚爱之吻": 1000,
-    "斗鱼666号": 1000, "全力守护": 0.1, "爱的CD": 1, "怦然心动": 6, "浪漫旅行车": 66, "童话马车": 166,
-}
 class Douyu(DMAPI):
     heartbeat = b"\x14\x00\x00\x00\x14\x00\x00\x00\xb1\x02\x00\x00\x74\x79\x70\x65\x40\x3d\x6d\x72\x6b\x6c\x2f\x00"
 
@@ -73,37 +107,93 @@ class Douyu(DMAPI):
                 color    = color_tab.get(msg.get("col", "-1"), "ffffff")
 
                 if msg_type == "gift":
-                    gift_name = msg.get("gfn", "未知礼物")
-                    gift_num = int(msg.get("gfcnt", 1))
+                    # ===== 0. 基础字段 =====
+                    gift_name  = msg.get("gfn", "未知礼物")
+                    gift_count = int(msg.get("gfcnt") or 1)
+                    gfid       = int(msg.get("gfid") or 0)   # 礼物 id
+                    pid        = msg.get("pid")              # 道具 id
+                    gpf        = msg.get("gpf")              # 白嫖标志
+                    price_unit = "鱼翅"
+                    streamer   = msg.get("receive_nn", "主播")
 
-                    # 使用 None 来区分“未录入”和“价值为0”
-                    yuchi_value = DOUYU_GIFT_VALUE.get(gift_name)
+                    gift_price = None
+                    price_src  = None   # gift / prop
+                    res        = None
 
-                    if yuchi_value is not None:
-                        # 已知礼物：计算总价值并应用 0.1 元门槛
-                        total_yuchi = yuchi_value * gift_num
-                        if total_yuchi >= 0.1:
-                            text = f"<{uname}>送给主播价值{yuchi_value:.1f}鱼翅的{gift_name}x{gift_num}"
-                            gift_price = f"{yuchi_value:.1f}"
-                        else:
-                            continue # 明确知道价值但太低的礼物，跳过
+                    # ===== 1. 查价格 =====
+                    if gfid:
+                        res = get_douyu_gift_info(gfid)
+                        price_src = "gift"
+
+                    if not res and pid:
+                        res = get_douyu_prop_info(pid)
+                        price_src = "prop"
+
+                    if res:
+                        gift_price = res.get("price")
+
+                    # ===== 2. 判类型 =====
+                    if gift_price is None:
+                        douyu_type = "unknown"
+                        total_price_cny = None
+                        extra = ""
+                    elif gift_price == 0:
+                        douyu_type = "free"
+                        total_price_cny = 0
+                        extra = ""
                     else:
-                        # 未知礼物：由于不确定价值，为了保险起见，全部显示
-                        text = f"<{uname}>送给主播{gift_name}x{gift_num}"
-                        gift_price = "0"
+                        douyu_type = "paid"
+                        total_price_cny = gift_price * gift_count
+                        extra = f"价值{gift_price}{price_unit}的"
 
-                    # 统一构造对象
+                    # ===== 3. 文本 =====
+                    text = f"{uname} 送给{streamer}{extra}{gift_name}×{gift_count}"
+
+                    # ================== DEBUG ==================
+                    if douyu_type == "paid":
+                        pass
+                        # print(f"{YELLOW}【PAID】{RESET}{text}")
+                        # print(
+                        #     f"src={price_src} gfid={gfid} pid={pid} "
+                        #     f"gift_price={gift_price} count={gift_count} "
+                        #     f"total_price_cny={total_price_cny} gpf={gpf} ct={msg.get('ct')}"
+                        # )
+
+                    elif douyu_type == "free":
+                        pass
+                        # print(f"【FREE】{text}")
+                        # print(
+                        #     f"src={price_src} gfid={gfid} pid={pid} "
+                        #     f"gift_price={gift_price} count={gift_count} "
+                        #     f"total_price_cny={total_price_cny} gpf={gpf} ct={msg.get('ct')}"
+                        # )
+
+                    else:  # unknown
+                        print(f"{RED}【UNKNOWN】{RESET}{text}")
+                        print(
+                            f"src={price_src} gfid={gfid} pid={pid} "
+                            f"gift_price={gift_price} count={gift_count} "
+                            f"total_price_cny={total_price_cny} gpf={gpf} ct={msg.get('ct')}"
+                        )
+                        print(msg)
+                    # ================== DEBUG ==================
+
                     gift_msg_obj = GiftDanmaku(
                         timestamp=datetime.now().timestamp(),
                         uname=uname,
                         content=text,
                         text=text,
                         gift_name=gift_name,
-                        gift_count=gift_num,
+                        gift_count=gift_count,
                         gift_price=gift_price,
-                        price_unit='鱼翅',
+                        price_unit=price_unit,
                         dtype='gift',
                         color='ffffff',
+                        total_price_cny=total_price_cny,
+                        gfid=gfid,
+                        pid=pid,
+                        raw_data=msg,
+                        extra=extra,
                     )
                     msgs.append(gift_msg_obj)
                     continue
@@ -120,5 +210,6 @@ class Douyu(DMAPI):
                     msgs.append(msg)
 
             except Exception as e:
+                logger.debug(f"错误信息:{e}")
                 pass
         return msgs

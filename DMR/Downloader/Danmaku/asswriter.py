@@ -27,8 +27,9 @@ class AssWriter():
                  auto_fontsize:bool,
                  outlinecolor:str,
                  outlinesize:int,
-                 dm_template:dict=None,
+                 gift_dm_args:dict={},
                  **kwargs) -> None:
+        self.gift_dm_args=gift_dm_args
         self.description = description
         self.height = height
         self.width = width
@@ -80,6 +81,7 @@ class AssWriter():
                 length += 0.5*self.fontsize
             else:
                 length += self.fontsize
+
         return int(length)
 
     def open(self, filename):
@@ -102,7 +104,7 @@ class AssWriter():
         danmu: 待添加弹幕
         calc_collision: 是否计算冲突,冲突的弹幕将会被自动忽略
         """
-        tid, max_dist = 0, -1e5
+        tid, max_dist = 0, -1e5 # -100000.0
 
         # 计算给出弹幕到指定弹幕的距离
         def tail_dist(tail_dm:SimpleDanmaku, tic:float):
@@ -125,11 +127,11 @@ class AssWriter():
         if calc_collision and max_dist < self.margin_w:
             return False
 
-        text = danmu.text.replace('\n',' ').replace('\r',' ')
-        dm_length = self._get_length(text)
+        # danmu.text 被上一层danmaku.py决定，vip弹幕已经被上一层改为 f"{dm.uname}:{dm.content}"
+        dm_length = self._get_length(danmu.text)
         x0 = self.width
         x1 = -dm_length
-        y = self.fontsize + (self.fontsize + self.margin_h) * tid
+        y  = self.fontsize + (self.fontsize + self.margin_h) * tid
 
         t0 = '%02d:%02d:%05.2f'%sec2hms(danmu.time)
         t1 = '%02d:%02d:%05.2f'%sec2hms(danmu.time + self.dmduration)
@@ -140,12 +142,25 @@ class AssWriter():
 
 
         if danmu.dtype == "gift":
-            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, "000000") # 黑字
-            dm_info += '{\\bord10\\3a&H%s\\3c&H%s&&}'%(self.opacity,RGB2BGR("ffffff"))  # 白底
-        else: # danmu.dtype == "danmaku":
-            dm_info += '{\\alpha&H%s\\1c%s&}'%(self.opacity, RGB2BGR(danmu.color))
+            # 礼物弹幕
+            outline_color   = RGB2BGR("ffffff") # white
+            text_color      = RGB2BGR("000000") # black
+            gift_dm_opacity = hex_opacity(self.gift_dm_args.get("gift_dm_opacity",1))
+            outline_width   = 10
+            dm_info += fR"{{\alpha&H{gift_dm_opacity}&\1c&H{text_color}&\bord{outline_width}\3c&H{outline_color}&}}"
+            dm_info += danmu.text
+        else:
+            # VIP弹幕
+            if danmu.is_vip:
+                dm_info += fR'{{\alpha&H{self.opacity}&\1c&H{RGB2BGR(danmu.color)}&\i1}}' # 斜体
+                dm_info += f"{danmu.uname}:"
+                dm_info += fR"{{\i0}}" # 还原斜体
+                dm_info += danmu.content
 
-        dm_info += text
+            else:
+                # 普通弹幕，正常上色
+                dm_info += fR'{{\alpha&H{self.opacity}&\1c&H{RGB2BGR(danmu.color)}&}}'
+                dm_info += danmu.text
 
         with self._lock, open(self._filename, 'a', encoding='utf-8') as f:
             f.write(dm_info + '\n')

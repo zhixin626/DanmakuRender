@@ -5,12 +5,14 @@ import re
 import time
 import threading
 import platform
+
 from datetime import datetime
 from os.path import *
-
 from DMR.LiveAPI.danmaku import DanmakuClient
 from DMR.utils import SimpleDanmaku, replace_keywords
-
+from DMR.utils.danmaku import GiftDanmaku
+from DMR.utils.gifts_utils import save_gift_to_jsonl
+from typing import Union
 __all__ = ['DanmakuDownloader']
 
 class DanmakuDownloader():
@@ -21,10 +23,19 @@ class DanmakuDownloader():
                  dm_format:str,
                  dm_filter:dict=None,
                  dm_template:dict=None,
-                 uid_template:dict={},
                  dm_stream_option:dict={},
                  advanced_dm_args:dict={},
+                 gifts_file_path:Union[str,None]=None,
+                 gift_dm_args:dict={},
+                 enable_gift_recorder=False,
+                 gift_minimum_cny=None,
+                 uid_lists:list=[],
                  **kwargs) -> None:
+
+        self.gift_minimum_cny=gift_minimum_cny
+        self.enable_gift_recorder=enable_gift_recorder
+        self.gift_dm_args = gift_dm_args
+        self.gifts_file_path=gifts_file_path if gifts_file_path else os.path.join(os.path.dirname(output), "gifts.jsonl")
         self.stoped = False
 
         self.logger = logging.getLogger(__name__)
@@ -41,8 +52,8 @@ class DanmakuDownloader():
         self.dm_file_min_time = self.advanced_dm_args.get('dm_file_min_time', 10)
 
         self.dm_filter = dm_filter.copy() if dm_filter else {}
+        self.uid_lists=uid_lists
 
-        self.uid_template=uid_template # zhxin 新加
 
         try:
             keywords_filter = dm_filter['keywords']
@@ -84,9 +95,10 @@ class DanmakuDownloader():
         
         if dm_format == 'ass':
             from .asswriter import AssWriter
-            self.dmwriter = AssWriter(dm_template=self.dm_template, **self.kwargs)
+            self.dmwriter = AssWriter(gift_dm_args=self.gift_dm_args,**self.kwargs)
         else:
             raise NotImplementedError(f"unsupported danmaku format {dm_format}")
+
     def time_fix(self, time_error):
         self.part_start_time -= time_error
 
@@ -123,6 +135,7 @@ class DanmakuDownloader():
                 self.logger.error(f'弹幕 {old_dm_file} 分段失败: {e}.')
 
     def dm_available(self, dm:SimpleDanmaku) -> bool:
+
         if dm.time < 0 \
                 or not dm.text \
                 or not dm.uname \
@@ -131,6 +144,7 @@ class DanmakuDownloader():
             return False
 
         dm_type = self.dm_filter.get('dm_type') or 'danmaku'
+
         if dm_type != 'all':
             if dm.dtype not in dm_type:
                 return False
@@ -149,19 +163,23 @@ class DanmakuDownloader():
 
         return True
 
-    def format_uid_template(self,uid_template,dm:SimpleDanmaku):
-        dm_type=dm.dtype
-        # dm里有uid
-        uid_val = getattr(dm, "uid", None)
-        if uid_val is not None:
-            uid = str(uid_val)
-            # uidtemplate里有uid
-            if template:=uid_template.get(uid,None):
-                # template里有dm类型
-                if text_template:=template.get(dm_type):
-                    return replace_keywords(text_template,dm)
+    def gift_dm_available(self,dm:GiftDanmaku):
+        gift_min = self.gift_minimum_cny
+        #说明用户没有配置这个参数，表示不进行价格过滤
+        if gift_min is None:
+            return True
+        # 如果礼物没有 total_price_cny
+        # 无法过滤，直接True
+        if getattr(dm, "total_price_cny", None) is None:
+            # print("total_price_cny is None")
+            return True
 
-        return dm.text
+        if float(dm.total_price_cny) < float(gift_min):
+            # print("dm.total_price_cny < float(gift_min)")
+            return False
+        else:
+            # print("dm.total_price_cny > float(gift_min)")
+            return True
 
     def start_dmc(self):
         async def danmu_monitor(url:str=None): # 监督员
@@ -196,21 +214,38 @@ class DanmakuDownloader():
                             timestamp=dm.get('timestamp', datetime.now().timestamp()),
                             color=dm.get('color', 'ffffff'),
                         )
-
                     # 将绝对时间转换为相对时间
                     dm.time = dm.timestamp - self.part_start_time - self.dm_delay_fixed
+                    if self.enable_gift_recorder and dm.dtype == "gift":
+                        save_gift_to_jsonl(dm,self.gifts_file_path)
+
                     # 载入弹幕模板
                     if dm_templ := self.dm_template.get(dm.dtype):
                         dm.text = replace_keywords(dm_templ, dm)
-                    if self.uid_template:
-                        dm.text = self.format_uid_template(self.uid_template,dm)
-                    if self.dm_available(dm):
-                        retry = 0
-                        if self.dmwriter.add(dm):
-                            # self.logger.info("弹幕内容: %s", dm.text)
-                            # self.logger.info("弹幕类型: %s", dm.dtype)
-                            last_dm_time = datetime.now().timestamp()
+
+                    # vip弹幕
+                    if self.uid_lists and (uid := str(getattr(dm, "uid", ""))) in self.uid_lists:
+                        # 这里是为了给asswriter的get_length能获取到正确的长度
+                        # vip弹幕最终的格式由asswriter决定，默认是下面这样
+                        dm.text=f"{dm.uname}:{dm.content}"
+                        dm.is_vip=True
+
+                    if not self.dm_available(dm):
+                        continue
+                    # print(dm.text)
+                    if isinstance(dm, GiftDanmaku):
+                        if not self.gift_dm_available(dm):
+                            # print(f"过滤掉：{dm.text}")
+                            continue
+
+                    retry = 0
+                    if self.dmwriter.add(dm):
+                        last_dm_time = datetime.now().timestamp()
+                    else:
+                        # print(f"未写入{dm.text}")
+                        pass
                     continue
+
                 except asyncio.QueueEmpty:
                     pass
                 
