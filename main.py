@@ -15,7 +15,7 @@ from IPython import embed
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append('./tools')
 
-VERSION = '2026.01.10'
+VERSION = '2026.05.01'
 
 from DMR import DanmakuRender
 from DMR.Config import Config

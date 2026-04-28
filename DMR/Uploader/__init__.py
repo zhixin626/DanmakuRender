@@ -158,7 +158,7 @@ class Uploader():
                 # ignore stream uploads
                 if task.get('stream_queue'):
                     task['stream_queue'] = None
-                    task['config']['stream_queue'] = None
+                    # task['config']['stream_queue'] = None
                 else:
                     self.failed_tasks[task['uuid']] = task
                     self.save_failed_tasks()
