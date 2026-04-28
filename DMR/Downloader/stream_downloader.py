@@ -175,7 +175,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.segment_start_time = datetime.now()
         self.segment_id += 1
 
-    def start_once(self, mode: str = "normal_mode"):
+    def start_once(self):
         self.stoped = False
         
         # init segment info
@@ -286,102 +286,66 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             futures.append(self.executor.submit(danmaku_thread))
         if self.video:
             futures.append(self.executor.submit(video_thread))
-        
-        if mode == "normal_mode":
-            while not self.stoped:
-                if exists(self.offline_time_path):
-                    try:
-                        with open(self.offline_time_path, 'r', encoding='utf-8') as f:
-                            content = f.read().strip()
-                        # 情况 A: 内容为空，或写了 "" 表示取消
-                        if content == "" or content == '""' or content == "''":
-                            self.force_offline_time = ""
-                            self.logger.info(f"{self.taskname_disp}🚫收到指令：已取消强制下播时间限制")
-                        # 情况 B: 写了具体的时间点
-                        elif re.match(r"^\d{1,2}:\d{2}$", content):
-                            self.force_offline_time = content
-                            self.logger.info(f"{self.taskname_disp}🔔收到指令：修改强制下播时间为 {self.force_offline_time}")
-                        else:
-                            self.logger.error(f"时间格式错误: '{content}'，请使用 HH:MM 格式或保持为空以取消")
-                        # 无论处理成功与否，删除指令文件防止重复触发
-                        os.remove(self.offline_time_path)
-                    except Exception as e:
-                        self.logger.error(f"处理 {self.offline_time_path} 失败: {e}")
 
-                if self.force_offline_time and is_passed_time_point(self.force_offline_time):
-                    self.logger.info(f"到达强制下播时间:{self.force_offline_time}")
-                    self.force_stop_trigger = True # 欺骗程序为下播
-                    return
+        def os_remove_info(path):
+            try:
+                os.remove(path)
+                self.logger.info(f"已删除{path}")
+            except:
+                self.logger.info(f"删除{path}失败，请手动删除！")
 
-                if exists(self.offline_path):
-                    self.logger.info(f"{self.taskname_disp}🔔收到指令：强制结束录制")
-                    try:
-                        os.remove(self.offline_path)
-                        self.logger.info(f"已删除{self.offline_path}")
-                    except:
-                        self.logger.info(f"删除{self.offline_path}失败，请手动删除！")
-                    self.force_stop_trigger = True # 欺骗程序为下播
-                    return
+        while not self.stoped:
+            if exists(self.segment_path):
+                self.logger.info(f"{self.taskname_disp}🔔收到指令：立即手动分段")
+                os_remove_info(self.segment_path)
+                return "segment"
 
+            if exists(self.offline_path):
+                self.logger.info(f"{self.taskname_disp}🔔收到指令：强制结束录制")
+                os_remove_info(self.offline_path)
+                self.force_stop_trigger = True # 欺骗程序为下播
+                return
+
+            if exists(self.offline_time_path):
                 try:
-                    # 正常情况下as_completed拿不到结果，过了60秒后进入timeouterror
-                    for future in as_completed(futures, timeout=60):
-                        return future.result()
-                except TimeoutError:
-                    # 正常情况下主播还在播就会进入while not self.stoped循环
-                    if self.liveapi.Onair() == False:
-                        self.logger.debug('LIVE END.')
-                        return
+                    with open(self.offline_time_path, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                    # 情况 A: 内容为空，或写了 "" 表示取消
+                    if content == "" or content == '""' or content == "''":
+                        self.force_offline_time = ""
+                        self.logger.info(f"{self.taskname_disp}🚫收到指令：已取消强制下播时间限制")
+                    # 情况 B: 写了具体的时间点
+                    elif re.match(r"^\d{1,2}:\d{2}$", content):
+                        self.force_offline_time = content
+                        self.logger.info(f"{self.taskname_disp}🔔收到指令：修改强制下播时间为 {self.force_offline_time}")
+                    else:
+                        self.logger.error(f"时间格式错误: '{content}'，请使用 HH:MM 格式或保持为空以取消")
+                    os_remove_info(self.offline_time_path)
+                except Exception as e:
+                    self.logger.error(f"处理 {self.offline_time_path} 失败: {e}")
 
-        elif mode == "test_mode":
-            self.logger.info(f"正在进行test_mode录制,时长{self.test_max_seconds}秒...")
+            if self.force_offline_time and is_passed_time_point(self.force_offline_time):
+                self.logger.info(f"到达强制下播时间:{self.force_offline_time}")
+                self.force_stop_trigger = True # 欺骗程序为下播
+                return
 
-            while not self.stoped:
-                elapsed = (datetime.now() - self.segment_start_time).total_seconds()
-                if elapsed >= self.test_max_seconds:
-                    self.logger.info(f"{self.taskname_disp}: 达到 {self.test_max_seconds}s 测试上限，后续禁录")
+
+            try:
+                # 正常情况下as_completed拿不到结果，过了60秒后进入timeouterror
+                for future in as_completed(futures, timeout=60):
+                    return future.result()
+            except TimeoutError:
+                # 正常情况下主播还在播就会进入while not self.stoped循环
+                if self.liveapi.Onair() == False:
+                    self.logger.debug('LIVE END.')
                     return
 
-                remaining = self.test_max_seconds - elapsed
-                timeout = max(1, min(60, remaining))
-
-                try:
-                    for future in as_completed(futures, timeout=timeout):
-                        return future.result()
-                except TimeoutError:
-                    if self.liveapi.Onair() == False:
-                        self.logger.debug('LIVE END.')
-                        return
-
-        elif mode == "firstsegment_mode":
-            self.logger.info(f"{self.taskname_disp}:正在进行firstsegment_mode录制,时长{self.firstsegment_seconds}秒...")
-
-            while not self.stoped:
-                elapsed = (datetime.now() - self.segment_start_time).total_seconds()
-                if elapsed >= self.firstsegment_seconds:
-                    self.logger.info(f"{self.taskname_disp}:达到{self.firstsegment_seconds}秒，执行一次受控切段")
-                    self.stop_once()                   # ⭐关键：触发 downloader.stop() -> segment_callback 链路
-                    return
-                remaining = self.firstsegment_seconds - elapsed
-                timeout = max(1, min(60, remaining))
-
-                try:
-                    for future in as_completed(futures, timeout=timeout):
-                        return future.result()
-                except TimeoutError:
-                    if self.liveapi.Onair() == False:
-                        self.logger.debug('LIVE END.')
-                        return
 
     def get_effective_onair(self):
         if getattr(self, "force_stop_trigger", False):
             # 如果 force_stop_trigger 为 True 默认主播下播
             # 但是！ 这个参数在真的下播的时候会被设置为false
             # 需要配合record_windows 来用
-            return False
-        if getattr(self, "test_mode_end", False):
-            # 如果 test_mode_end 为 True 默认主播下播
-            # 但是！ 这个参数将永远保持为True，意味着主播永远不开播(test_mode)
             return False
         else:
             return self.liveapi.Onair()
@@ -458,16 +422,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         stop_check_interval = self.advanced_video_args.get('stop_check_interval', 60)
         start_check_interval = self.advanced_video_args.get('start_check_interval', 60)
         check_policy = self.advanced_video_args.get('check_policy', {})
-        # ===============testmode====================
-        tm = self.advanced_video_args.get("test_mode", {}) or {}
-        self.test_enabled = bool(tm.get("enabled", False))
-        self.test_max_seconds = int(tm.get("max_record_seconds", 180))
-        self.test_mode_end = False
-        # ===============first_segment_mode====================
-        fs = self.advanced_video_args.get("firstsegment", {}) or {}
-        self.firstsegment_enabled = bool(fs.get("enabled", False))
-        self.firstsegment_seconds = int(fs.get("seconds", 180))
-        self.firstsegment_mode_end = False
         # ==============gift_dm_args=============
         self.enable_gift_recorder=self.gift_dm_args.get("gift_recorder",False)
         self.gift_minimum_cny= self.gift_dm_args.get("gift_minimum_cny",None)
@@ -477,6 +431,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.offline_path= os.path.join(self.output_dir, f"offline.txt")
         self.offline_time_path= os.path.join(self.output_dir, f"offline_time.txt")
         self.force_offline_time=self.advanced_video_args.get("force_offline_time",None)
+        self.segment_path=os.path.join(self.output_dir, f"segment.txt")
         # =============================================
 
         restart_cnt = 0
@@ -516,8 +471,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             # --------- LIVE_END / REPLAY_END ----------
             if state == StreamState.LIVE_END:
                 self.logger.info(f"{self.taskname_disp}⌛下播,本轮录制结束")
-                now = datetime.now()
-                self.live_end_time = now
+                self.live_end_time = datetime.now()
                 write_time_to_txt("end")
                 stop_waited = 0
                 live_truely_end = False
@@ -556,10 +510,9 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             # ---------- LIVE_START ----------
             if state == StreamState.LIVE_START:
                 if live_truely_end:
-                    self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id)
+                    self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id,url=self.url)
                     self.logger.info(f"{self.taskname_disp}🔔直播开始")
-                    now = datetime.now()
-                    self.live_start_time = now
+                    self.live_start_time = datetime.now()
                     write_time_to_txt("start")
                 else:
                     self.logger.info(f"{self.taskname_disp}🔄再次开播,重启录制")
@@ -571,15 +524,12 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 stop_waited = 0
                 live_truely_end = False
 
-                if self.test_enabled:
-                    self.start_once(mode="test_mode")
-                    self.test_mode_end = True # 给get_effective_onair()用,让后续开播都不视为未开播|模拟正常下播
-                elif self.firstsegment_enabled and not self.firstsegment_mode_end:
-                    self.start_once(mode="firstsegment_mode")
-                    self.firstsegment_mode_end=True
+                res = self.start_once()
+
+                if res == "segment":
+                    self.stop_once()
+                    self.logger.info(f"{self.taskname_disp}🔄手动分段结束,重启录制")
                     continue
-                else:
-                    self.start_once(mode="normal_mode")
 
                 if update_state(state) == StreamState.LIVE:
                     raise RuntimeError(f'{self.taskname} 录制异常退出.')

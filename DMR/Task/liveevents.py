@@ -1,5 +1,7 @@
 import logging
 import os
+
+from DMR.LiveAPI import LiveAPI
 from .baseevents import BaseEvents
 from ..utils import *
 from ..utils.merge_mp4 import *
@@ -40,11 +42,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def onLiveStart(self, message:PipeMessage):
         group_id = message.data
         self.live_status[group_id] = {
-            'is_already_add_to_list' : False,
-            'is_already_change_desc' : False,
-            "is_already_sync"        : False,
             "is_already_render_cover": False,
-            'bvid': None,
             'is_live_end': False,
             'gift_stat':{
                     "total_revenue" : "未知",
@@ -52,16 +50,12 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                     "top_ranking"   : "未知",
                     }
         }
-        # self.is_already_add_to_list  = False
-        # self.is_already_change_desc = False
-        # self.is_live_end     = False
-        # self.bvid            = None
         self.src_path        = Path(str(self.config['download_args']['output_dir']))
         self.dmvideo_path    = Path(str(self.config['download_args']['output_dir']) + '（弹幕版）')
         self.transcode_path  = Path(str(self.config['download_args']['output_dir']) + '（转码后）')
-        self.check_render_cover(group_id)
+        self.check_render_cover(group_id,url=getattr(message,"url",""))
 
-    def check_render_cover(self,group_id):
+    def check_render_cover(self,group_id,url=""):
         is_already_render_cover=self.live_status[group_id]["is_already_render_cover"]
         cover_args=self.config['common_event_args'].get("cover_args", {})
         is_need_render_cover=cover_args.get("is_render_cover")
@@ -69,12 +63,23 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         if not is_need_render_cover or is_already_render_cover:
             return
 
-        _name=cover_args.get("name","")
-        _now=datetime.now()
-        _year=f"{_now.year}"
-        _time=f"{_now.month}月{_now.day}日"
-        _color=cover_args.get("name_color","#111111")
-        output_dir=cover_args.get("output_dir","./covers")
+        _name = cover_args.get("name")
+        if not _name and url:
+            try:
+                liveapi = LiveAPI(url)
+                streamer_info = retry_safe(liveapi.GetStreamerInfo,max_retries=3)
+                _name = streamer_info.name
+            except Exception as e:
+                print(f"获取主播名字失败将使用 未知主播 作为封面: {e}")
+
+        if not _name:
+            _name = "未知主播"
+
+        _now       = datetime.now()
+        _year      = f"{_now.year}"
+        _time      = f"{_now.month}月{_now.day}日"
+        _color     = cover_args.get("name_color","#111111")
+        output_dir = cover_args.get("output_dir","./covers")
         from DMR.utils.render_with_manimgl import rendercover_with_manimgl_bg
         rendercover_with_manimgl_bg(_name,_time,_color,_year,output_dir=output_dir)
         self.live_status[group_id]["is_already_render_cover"]=True
@@ -247,41 +252,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         #                                         "auto_render": self.config['common_event_args'].get('auto_render')})
 
         return ret_msgs
-    # def check_zuozuo_video(self):
-    #     # ---------------- 佐佐视频：渲染 + 上传 + 加合集 ----------------
-    #     zuozuo_video_args=self.config['common_event_args'].get('zuozuo_video_args',{})
-    #     is_upload=zuozuo_video_args.get("is_upload",False)
-    #     account=zuozuo_video_args.get("account",False)
-    #     if is_upload:
-    #         from DMR.utils.render_with_manimgl import render_zuozuovideo_with_manimgl
-    #         stime,etime=read_last_complete_session(self.src_path)
-    #         duration  = format_duration(stime, etime)
-    #         self.logger.info("开始渲染佐佐视频")
-    #         try:
-    #             zuozuo_video_path = render_zuozuovideo_with_manimgl(self.src_path)
-    #         except Exception as e:
-    #             self.logger.error(f"佐佐视频渲染失败: {e}")
-    #             zuozuo_video_path = None
-
-    #         if zuozuo_video_path:
-    #             from DMR.utils.upload_video import upload_zuozuo_video
-    #             # self.logger.info("开始上传佐佐视频")
-    #             success, bvid, log_text = upload_zuozuo_video(
-    #                 str(zuozuo_video_path),
-    #                 stime,
-    #                 etime,
-    #                 duration,
-    #                 is_only_self=zuozuo_video_args.get("is_only_self",True),
-    #                 cover_path=self.config['common_event_args'].get('cover_args',{}).get("output_dir")+"/cover.png"
-    #             )
-
-    #             if not success or not bvid:
-    #                 self.logger.error(f"佐佐视频上传失败，不加入合集。上传日志：\n{log_text}")
-    #             else:
-    #                 try:
-    #                     add_to_list(bvid,sectionId,account)
-    #                 except Exception as e:
-    #                     self.logger.error(f"佐佐视频加入合集/同步标题失败: {e}")
 
     def onLiveEnd(self, message:PipeMessage):
         group_id = message.data
@@ -315,10 +285,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 "top_ranking": names_str  # 结果示例: "悲伤小猫馄饨(20.7)，似冬(10.8)，放飞气球树(5.7)"
             }
 
-        # --- 第三步：触发合并、上传和简介修改 ---
+        # --- 第三步：触发合并、上传 ---
         self.check_for_merge(group_id)
-        self.check_change_desc(group_id)
-        # self.check_zuozuo_video()
 
         ret_msgs = []
         if self.config['common_event_args'].get('auto_upload'):
@@ -329,46 +297,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
 
         return ret_msgs
-    
-    def check_change_desc(self,group_id):
-        if group_id not in self.live_status:
-            self.logger.info(f"{self.name}:group_id不在live_status里\ngroup_id:{group_id}\nself.live_status:{self.live_status}")
-            return
-        # 直播结束 且 上传结束 才改简介
-        bvid                   = self.live_status[group_id]['bvid']
-        is_live_end            = self.live_status[group_id]['is_live_end']
-        is_already_change_desc = self.live_status[group_id]['is_already_change_desc']
-
-        if bvid is None or not is_live_end or is_already_change_desc:
-            return
-
-        after_upload_args = self.config["common_event_args"].get('after_upload_args',{})
-        account           = after_upload_args.get('account',None)
-        change_desc       = after_upload_args.get("change_desc",False)
-        insert_desc       = after_upload_args.get("insert_desc",None)
-        insert_at         = after_upload_args.get("insert_at",-1)
-        gift_stat         = self.live_status[group_id]["gift_stat"]
-
-        if change_desc:
-            stime,etime=read_last_complete_session(self.src_path)
-            duration  = format_duration(stime,etime)
-            result = replace_keywords(
-                insert_desc,
-                {
-                    "stime": stime,
-                    "etime": etime,
-                    "totaltime":duration,
-                    "total_revenue" : gift_stat.get("total_revenue",""),
-                    "total_gifters" : gift_stat.get("total_gifters",""),
-                    "top_ranking"   : gift_stat.get("top_ranking",""),
-                }
-            )
-            try:
-                add_text_to_desc(result,bvid,account,n=insert_at)
-                self.live_status[group_id]['is_already_change_desc']=True
-            except Exception as e:
-                self.logger.error(e)
-
 
     def _check_for_upload(self, group_id:str, _idx:int=None):
         # self._log_state("Before _check_for_upload")
@@ -562,7 +490,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         return ret_msgs
     
     def onRenderEnd(self, message:PipeMessage):
-        self._log_state(prefix="onRenderEnd_start",level=logging.DEBUG)
+        # self._log_state(prefix="onRenderEnd_start",level=logging.DEBUG)
         self.logger.info(f'{self.name}: {message.msg}.')
 
         request_id = message.request_id
@@ -588,6 +516,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
     def onUploadEnd(self, message:PipeMessage):
         self.logger.info(f'{self.name}: {message.msg}.')
+        self.logger.debug(f"BeforeonUploadEnd:{self.name}: {message}.")
 
         target_group_id = None
         request_id = message.request_id
@@ -609,32 +538,25 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # 判断是否加入合集
         if target_group_id:
             bvid=message.data.get("bvid",None)
-            self.live_status[target_group_id]['bvid'] = bvid
-
-        self.check_add_to_list(target_group_id)
-        self.check_change_desc(target_group_id)
+            upload_config=message.data.get("config",{}).get('args')
+            self.check_add_to_list(target_group_id,bvid,upload_config)
 
         self._free_state_memory()
 
         return ret_msgs
 
-    def check_add_to_list(self,target_group_id):
+    def check_add_to_list(self,target_group_id,bvid,config):
         if target_group_id not in self.live_status:
             self.logger.info(f"{self.name}:target_group_id不在live_status里\ntarget_group_id:{target_group_id}\nself.live_status:{self.live_status}")
             return
 
-        bvid                   = self.live_status[target_group_id]['bvid']
-        is_already_add_to_list = self.live_status[target_group_id]['is_already_add_to_list']
+        need_add_to_list = config.get("add_to_list",False)
+        account          = config.get('account',None)
+        sectionId        = config.get('sectionId',None)
 
-        after_upload_args = self.config["common_event_args"].get('after_upload_args',{})
-        need_add_to_list=after_upload_args.get("add_to_list",False)
-        account=after_upload_args.get('account',None)
-        sectionId = after_upload_args.get('sectionId',None)
-
-        if need_add_to_list and not is_already_add_to_list:
+        if need_add_to_list:
             try:
                 add_to_list(bvid,sectionId,account)
-                self.live_status[target_group_id]['is_already_add_to_list']=True
             except Exception as e:
                 self.logger.error(e)
 

@@ -1,8 +1,19 @@
 from pathlib import Path
 from DMR.utils.utils import safe_filename
 from DMR.utils.merge_mp4 import merge_mp4,amplify_mp4
-from upload_only import file_to_args, replace_args_keywords,parse_yn,strip_quotes
+from upload_only import file_to_args, replace_args_keywords,strip_quotes
 import os
+def parse_yn(prompt: str, default: bool) -> bool:
+    s = input(prompt).strip().lower()
+    if s == "":
+        print(f"无输入，按默认值 {default} 处理。")
+        return default
+    if s in ("y", "yes", "1", "true", "t"):
+        return True
+    if s in ("n", "no", "0", "false", "f"):
+        return False
+    print(f"输入无效，按默认值 {default} 处理。")
+    return default
 def main():
     print("请输入需要按顺序合并的视频【文件或文件夹】路径,每行一个,输入空行结束：")
     videos = []
@@ -72,31 +83,28 @@ def main():
         fp = fp.with_suffix(".mp4")
     target_path = str(fp)
 
-    print("正在合并......将原始文件移入垃圾桶" if remover else "正在合并......不会移动原始文件")
+    print("正在合并(将原始文件移入垃圾桶)" if remover else "正在合并(不会移动原始文件)")
 
     # 合并动作：merge_mp4 永远输出到 merged.mp4
     tmp_output = merge_mp4(videos, remover=remover)  # 返回的是 Path / str
     tmp_output = Path(tmp_output)
-
-    # 根据用户想要的最终名称进行 safe_filename
-    final_path_merged = safe_filename(target_path)
-
-    if final_path_merged != target_path:
-        print(f"⚠ 警告：目标文件名 \n{target_path}\n 已存在，将自动改为：\n{final_path_merged}")
-    else:
-        print(f"☑ 将命名为：{final_path_merged}")
-
-    # 重命名
-    Path(tmp_output).rename(final_path_merged)
-    print(f"🎉 合并完成：{final_path_merged}")
-
     if is_amplify:
         common_event_args, _, _ = replace_args_keywords(*file_to_args(videos[0]))
         merge_args=common_event_args.get("merge_args",{})
         extra_gain_db=merge_args.get("extra_gain_db",0)
-        final_path_amplified=amplify_mp4(final_path_merged,extra_gain_db=extra_gain_db, remover=remover)
-        print(f"🎉 增强完成：{final_path_amplified}")
+        tmp_output=amplify_mp4(tmp_output,extra_gain_db=extra_gain_db, remover=remover)
 
+    final_path=rename_if_needed(tmp_output,Path(target_path))
+    print(f"🎉 合并完成：{final_path}")
+
+
+def rename_if_needed(src: Path, target: Path):
+    if src == target:
+        return src
+    safe_target = safe_filename(target)
+    print(f"⚠ 警告：目标文件名 \n{target}\n 已存在，将自动改为：\n{safe_target}")
+    src.rename(safe_target)
+    return safe_target
 
 if __name__ == "__main__":
     main()

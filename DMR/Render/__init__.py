@@ -120,7 +120,7 @@ class Render():
                 'args': config.get('args', {}),
                 'video': config.get('video'),
                 'output': config.get('output'),
-                # 'config': config,
+                'config': config,
                 'status': 'waiting',
             }
             self.render_tasks[task['uuid']] = task

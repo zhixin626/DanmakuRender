@@ -21,6 +21,7 @@ class WebApi:
             force_login=True,
             username='admin',
             password='admin',
+            config_dir='./configs',
             **kwargs,
         ) -> None:
         self.send_queue, self.recv_queue = pipe
@@ -42,6 +43,7 @@ class WebApi:
 
         self.webapp = None
         self.webapp_thread = None
+        self.config_dir=config_dir
 
     def login_required(self, f):
         @wraps(f)
@@ -119,11 +121,10 @@ class WebApi:
             configs = []
             # List all configs in configs/ folder (except global.yml maybe, or include it)
             # User said "Edit existing config files (excluding Global.yml)"
-            config_dir = 'configs'
-            if not os.path.exists(config_dir):
-                os.makedirs(config_dir)
+            if not os.path.exists(self.config_dir):
+                os.makedirs(self.config_dir)
             
-            files = glob.glob(os.path.join(config_dir, '*.yml'))
+            files = glob.glob(os.path.join(self.config_dir, '*.yml'))
             for f in files:
                 filename = os.path.basename(f)
                 if filename.lower() == 'global.yml':
@@ -151,12 +152,11 @@ class WebApi:
         @app.route('/config/edit/<filename>', methods=['GET', 'POST'])
         @self.login_required
         def config_edit(filename):
-            config_dir = 'configs'
             content = ""
             check_result = None
             
             if filename:
-                filepath = os.path.join(config_dir, filename)
+                filepath = os.path.join(self.config_dir, filename)
                 if not os.path.exists(filepath):
                     flash(f'File {filename} not found.', 'error')
                     return redirect(url_for('config_list'))
@@ -190,7 +190,7 @@ class WebApi:
                         if not new_filename.endswith('.yml'):
                              new_filename += '.yml'
                         
-                        save_path = os.path.join(config_dir, new_filename)
+                        save_path = os.path.join(self.config_dir, new_filename)
                         try:
                             with open(save_path, 'w', encoding='utf-8') as f:
                                 f.write(content)
@@ -206,13 +206,12 @@ class WebApi:
         @app.route('/config/delete/<filename>', methods=['POST'])
         @self.login_required
         def config_delete(filename):
-            config_dir = 'configs'
             if filename:
                 if filename.startswith('example-'):
                     flash('示例文件不支持删除。', 'error')
                     return redirect(url_for('config_list'))
                 
-                filepath = os.path.join(config_dir, filename)
+                filepath = os.path.join(self.config_dir, filename)
                 if os.path.exists(filepath):
                     try:
                         os.remove(filepath)

@@ -16,6 +16,7 @@ dmr_engine_args:
   # 配置文件路径
   # 可设置为文件/文件夹列表
   config_path: ./configs
+  dynamic_config: True
 
 # 默认下载参数
 download_args:
@@ -558,9 +559,9 @@ webservice_kernel_args:
   # 服务端口
   port: 5000
   # 绑定地址
-  host: '0.0.0.0'
+  host: '127.0.0.1'
   # 是否强制登录
-  force_login: True
+  force_login: false
   # 管理员用户名
   username: 'admin'
   # 管理员密码

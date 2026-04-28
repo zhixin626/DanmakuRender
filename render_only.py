@@ -28,7 +28,7 @@ def main():
     if args.transcode:
         args.mode = 'transcode'
 
-    config = Config(args.global_config, args.config)
+    config = Config(args.global_config)
     
     logging.getLogger().setLevel(logging.DEBUG)
     console_handler = logging.StreamHandler(sys.stdout)

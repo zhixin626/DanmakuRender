@@ -50,8 +50,12 @@ class Config():
 
         dmr_engine_args = self.global_config.get('dmr_engine_args', {})
         self.replay_config_path_raw = dmr_engine_args.get('config_path', ['./configs'])
+
         if isinstance(self.replay_config_path_raw, str):
             self.replay_config_path_raw = [self.replay_config_path_raw]
+
+        # zhixin 新增
+        self.global_config['webservice_kernel_args']['config_dir'] = self.replay_config_path_raw[0]
 
     def add_task_config(self, config_path):
         try:

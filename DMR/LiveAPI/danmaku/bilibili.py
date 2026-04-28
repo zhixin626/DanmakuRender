@@ -5,6 +5,65 @@ from struct import pack, unpack
 from DMR.utils import random_user_agent, SuperChatDanmaku, SimpleDanmaku,GiftDanmaku
 from DMR.LiveAPI.bilivideo_utils import encode_wbi, getWbiKeys
 from .DMAPI import DMAPI
+import base64
+def parse_enter_msg(j):
+    pb_data = j.get("data", {}).get("pb")
+    if not pb_data:
+        return "", ""
+
+    try:
+        # 1. Base64 解码 (Base64 Decoding)
+        decoded = base64.b64decode(pb_data)
+
+        # 2. 提取所有潜在的文本块 (Extract potential text chunks)
+        # 范围包括：ASCII 可见字符、B站常用的控制字符、多字节 UTF-8 字符
+        chunks = re.findall(rb'[\x20-\x7e\x80-\xff]{2,}', decoded)
+
+        readable_list = []
+        for c in chunks:
+            try:
+                # 使用 ignore 模式防止个别字节导致整体解码失败
+                s = c.decode('utf-8', errors='ignore').strip()
+                # 清洗掉两端的引号、空格以及常见的 Protobuf 干扰符
+                s = s.strip('"\\' + "\x00\x01\x02\x12\x0c")
+                if len(s) > 1:
+                    readable_list.append(s)
+            except:
+                continue
+
+        face_url = "未知头像"
+        uname = "未知用户"
+
+        # 3. 定位逻辑 (Positioning Logic)
+        for i, s in enumerate(readable_list):
+            # 只要包含域名且包含 http 协议即可判定为头像 URL
+            if "hdslb.com" in s and "http" in s:
+                # 如果 URL 前面有残留字符，截取真正的 URL 开始位置
+                start_idx = s.find("http")
+                face_url = s[start_idx:]
+
+                # 关键：名字通常就在头像 URL 所在块的前面 1 或 2 个位置
+                if i > 0:
+                    # 优先取上一个，如果上一个看起来像 UID (纯数字)，再往前看一个
+                    candidate = readable_list[i-1]
+                    if candidate.isdigit() and i > 1:
+                        uname = readable_list[i-2]
+                    else:
+                        uname = candidate
+                break
+
+        # 4. 保底逻辑 (Fallback)
+        # 如果还是“未知用户”，取列表中第一个长得像名字的非 URL 字符串
+        if uname == "未知用户" and readable_list:
+            for s in readable_list:
+                if "http" not in s and not s.isdigit() and len(s) > 1:
+                    uname = s
+                    break
+
+        return uname, face_url
+
+    except Exception as e:
+        return f"解析失败: {str(e)}", ""
 
 class Bilibili(DMAPI):
     heartbeat = b"\x00\x00\x00\x1f\x00\x10\x00\x01\x00\x00\x00\x02\x00\x00\x00\x01\x5b\x6f\x62\x6a\x65\x63\x74\x20\x4f\x62\x6a\x65\x63\x74\x5d"
@@ -14,9 +73,11 @@ class Bilibili(DMAPI):
         'accept-language': 'zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3',
         'user-agent': random_user_agent(),
         'origin': 'https://live.bilibili.com',
-        'referer': 'https://live.bilibili.com'
+        'referer': 'https://live.bilibili.com',
     }
     interval = 30
+
+
 
     async def get_ws_info(url, **kwargs):
         url = "https://api.live.bilibili.com/room/v1/Room/room_init?id=" + url.split("/")[-1]
@@ -35,8 +96,27 @@ class Bilibili(DMAPI):
             wbi_img=getWbiKeys(),
         )
         async with aiohttp.ClientSession(headers=Bilibili.headers) as session:
-            # 2025-06-28 B站新风控需要cookies中存在buvid3
+            uid=0 # 游客身份
+            cookie_path = kwargs.get('bilibili_dm_cookie_path')
+            if cookie_path:
+                try:
+                    with open(cookie_path, 'r') as f:
+                        cookies_list = json.load(f).get('cookie_info', {}).get('cookies', [])
+                    target_keys = {'SESSDATA', 'bili_jct', 'DedeUserID'}
+                    cookie_dict = {c['name']: c['value'] for c in cookies_list if c.get('name') in target_keys}
+                    Bilibili.headers['cookie'] = ";".join([f"{k}={v}" for k, v in cookie_dict.items()]) + ";"
+                    uid = int(cookie_dict['DedeUserID'])  # 登录身份
+                    print(f"[*] 正在使用 {cookie_path} 的cookies获取b站弹幕")
+                except FileNotFoundError:
+                    print(f"[*] 警告：找不到 Cookie 文件 {cookie_path}，将使用游客身份获取弹幕")
+                except Exception as e:
+                    print(f"[*] 解析 Cookie 出错: {e}，将使用游客身份")
+            else:
+                # 如果没传参数，直接打印
+                print("[*] 未配置 bilibili_dm_cookie_path，将使用游客身份获取弹幕")
+
             current_cookie = Bilibili.headers.get('cookie', '')
+            # 2025-06-28 B站新风控需要cookies中存在buvid3
             if 'buvid3' not in current_cookie or 'buvid4' not in current_cookie:
                 async with session.get("https://api.bilibili.com/x/frontend/finger/spi",timeout=5) as resp:
                     buvid_json = await resp.json()
@@ -46,28 +126,18 @@ class Bilibili(DMAPI):
                 room_json = await resp.json()
                 token = room_json['data']['token']
 
-                # 打印完整的权限响应
-                # print(f"[*] DanmuInfo 响应码: {room_json.get('code')} (消息: {room_json.get('message')})")
-
-                # 看看 B 站分配了多少个弹幕服务器，如果列表为空，说明你被风控了
-                # hosts = room_json['data'].get('host_list', [])
-                # print(f"[*] B站分配了 {len(hosts)} 个候选服务器，Token 长度: {len(token)}")
-                # print(hosts)
 
         # 从 cookie 中提取出 buvid3 的值
         buvid_val = current_cookie.split('buvid3=')[1].split(';')[0]
 
         data = json.dumps({
-            "uid": 0,
+            "uid": uid,
             "roomid": room_id,
             "protover": 3,
-            "buvid": buvid_val,          # 补上这个核心指纹！
+            "buvid": buvid_val,
             "platform": "web",
             "type": 2,
             "key": token,
-            "support_ack": True,         # 补上协议支持申明
-            "scene": "room",             # 补上场景信息
-            "queue_uuid": "qz xrs97p"    # 随便填一个类似格式的字符串即可
         },separators=(",", ":"),).encode("ascii")
 
         data = (
@@ -122,11 +192,13 @@ class Bilibili(DMAPI):
                 msg = {}
                 if dm.get('type') == 5:
                     j = json.loads(dm.get('body'))
-                    # print(j) #debug
+
+                    # print(j.get('cmd')) #debug
+
                     msg['msg_type'] = {
                         'SEND_GIFT': 'gift',
                         'DANMU_MSG': 'danmaku',
-                        'WELCOME': 'enter',
+                        'INTERACT_WORD_V2': 'enter',
                         'NOTICE_MSG': 'broadcast',
                         'SUPER_CHAT_MESSAGE': 'super_chat',  # 新增此行
                     }.get(j.get('cmd'), 'other')  # 类型判断
@@ -167,6 +239,15 @@ class Bilibili(DMAPI):
                         )
                         msgs.append(dm)
                         continue
+
+                    elif msg['msg_type'] == 'enter':
+                        # pass
+                        # print(msg)
+                        name, face = parse_enter_msg(j)
+                        if "巧丽哇" in name:
+                            print(f"👋 {name} 进入直播间！")
+                            print(f"🖼️ 头像: {face}")
+                            print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
                     elif msg['msg_type'] == 'interactive_danmaku': # 这个分支没用！
                         msg["msg_type"] = "danmaku"

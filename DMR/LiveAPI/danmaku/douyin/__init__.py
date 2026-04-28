@@ -133,24 +133,30 @@ class Douyin:
         msgs = []
         for msg in payload_package.messagesList:
             now = datetime.now().timestamp()
+            # print(msg)
+            # if msg.method == 'WebcastSocialMessage':
+            #     chatMessage = ChatMessage()
+            #     chatMessage.ParseFromString(msg.payload)
+            #     data        = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
+            #     print(data)
             if msg.method == 'WebcastChatMessage':
                 chatMessage = ChatMessage()
                 chatMessage.ParseFromString(msg.payload)
                 data        = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
+                # print(data)
                 
                 user_info = data.get('user', {})
                 # print(user_info)
-                name      = user_info.get('nickName',"未知用户")
-                shortId   = user_info.get('shortId',None)
-
-                content = data['content']
+                name     = user_info.get('nickName') or "未知用户"
+                uid      = user_info.get('shortId',None)
+                content  = data['content']
                 msg_dict = SimpleDanmaku(
                     timestamp=now,
                     uname=name,
                     content=replace_shortcodes_to_emoji(content),
                     dtype='danmaku',
                     color='ffffff',
-                    uid=shortId,
+                    uid=uid,
                 )
                 
                 # logger.info("WebcastChatMessage\n%s", json.dumps(data, ensure_ascii=False, indent=2))
@@ -164,15 +170,24 @@ class Douyin:
                 data = json_format.MessageToDict(memberMessage, preserving_proto_field_name=True)
                 
                 user_info = data.get('user', {})
-                name = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
+                name      = user_info.get('nickName') or "未知用户"
+                uid       = user_info.get('id',None)
+                # 抖音号叫做 unique_id 是用户可以改的
+                # short_id 才是真的不能改的
+                # id 是长id也是不能改的
+                if "学会自己爬" in name:
+                    print(f"👋 {name} 进入直播间！ uid is {uid}")
+                    print(user_info)
+                    print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    print(f"目标id is 55557889854")
 
-                # name = data['user']['nickName']
                 msg_dict = EntryDanmaku(
                     timestamp = now,
                     uname     = name,
                     content   = f"{name}来了",
                     dtype     = 'entry',
-                    color     = 'ffffff'
+                    color     = 'ffffff',
+                    uid       = uid,
                 )
             elif msg.method == 'WebcastGiftMessage':
                 giftMessage = GiftMessage()
@@ -206,6 +221,29 @@ class Douyin:
 
             else:
                 msg_dict = {"timestamp": now, "name": "", "content": "", "msg_type": "other", "raw_data": msg}
+
+                # if msg.method in ['WebcastRoomStatsMessage', 'WebcastLikeMessage', 'WebcastRoomUserSeqMessage']:
+                #     continue
+
+                # # 搜索“财富”关键词的二进制指纹
+                # payload_str = msg.payload.decode('utf-8', errors='ignore')
+
+                # # 嗅探关键词：gift (礼物), diamond (钻石/抖币), score (得分)
+                # if any(k in payload_str.lower() for k in ["gift", "diamond", "score", "送出", "加了"]):
+                #     print(f"\n[🔥 关键载体发现] Method: {msg.method}")
+                #     # 打印出这个包里所有的可见字符，排除掉乱码
+                #     visible_text = "".join(filter(lambda x: x.isprintable(), payload_str))
+                #     print(f"有效信息预览: {visible_text}")
+
+                #     # 针对 WebcastRoomMessage 的特殊处理
+                #     if msg.method == 'WebcastRoomMessage' and "加了" in visible_text:
+                #         print(f">>> 捕获到礼物等效加分，建议计入 revenue")
+
+                # # 如果是 Banner 消息，且不是你刚才发的那种任务 JSON，才打印
+                # elif msg.method == 'WebcastInRoomBannerMessage':
+                #     if "甄选展馆" not in payload_str:
+                #         print(f"[横幅变动]: {payload_str[:200]}")
+
 
             msgs.append(msg_dict)
 

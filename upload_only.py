@@ -118,30 +118,39 @@ def file_to_args(file_path):
         suffix = "none"
         taskname = taskname
 
-    if Path(f"./configs/DMR-{taskname}.yml").exists():
-        yml_path=f"./configs/DMR-{taskname}.yml"
-    elif Path(f"./configs/test-{taskname}.yml").exists():
-        yml_path=f"./configs/test-{taskname}.yml"
-    else:
+    # 获取 yml 路径
+    yml_path = None
+    for prefix in ["./configs/DMR-", "./configs/test-"]:
+        if Path(f"{prefix}{taskname}.yml").exists():
+            yml_path = f"{prefix}{taskname}.yml"
+            break
+
+    if not yml_path:
         raise RuntimeError("找不到config文件")
 
     logger.info(f"将按照 {yml_path} 的配置信息")
     with open(yml_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
-    common_event_args=data.get("common_event_args")
-    download_args=data.get("download_args")
-    if suffix == "danmaku":
+    common_event_args = data.get("common_event_args")
+    download_args = data.get("download_args")
+
+    if "（弹幕版）" in file_path:
         vtype = "dm_video"
-    elif suffix == "transcode":
+    elif "（转码后）" in file_path:
         vtype = "src_video"
     else:
-        raise RuntimeError(f"未知视频类型，无法决定 upload_args：{taskname}")
+        raise RuntimeError(f"未知视频类型：{file_path}")
 
     upload_args_dict = data.get("upload_args", {})
-    upload_args = _pick_upload_arg(upload_args_dict, vtype)
+    # 这里获取到的可能是 list [账号1, 账号2]
+    raw_upload_args = _pick_upload_arg(upload_args_dict, vtype)
 
-    return common_event_args, download_args, upload_args
+    # 统一转为 list 方便后续处理
+    if isinstance(raw_upload_args, dict):
+        raw_upload_args = [raw_upload_args]
+
+    return common_event_args, download_args, raw_upload_args
 
 def get_last_gift_stats(folder_path):
     """
@@ -166,6 +175,7 @@ def get_last_gift_stats(folder_path):
         return {}
 
     return last_entry if last_entry else {}
+
 def replace_args_keywords(
     common_event_args,
     download_args,
@@ -180,7 +190,7 @@ def replace_args_keywords(
     raw_stat = get_last_gift_stats(gift_stat_folder)
     names_list = [f"{item['name']}({item['total_value']})" for item in raw_stat.get("top_ranking", [])]
     names_str = ",".join(names_list)
-    st,et=read_last_complete_session(live_time_path,only_start=True)
+    st,et=read_last_complete_session(live_time_path,only_start=False)
     kw_info = {
         "streamer": {
             "name": NAME,
@@ -210,11 +220,11 @@ def replace_args_keywords(
     desc=replace_keywords(upload_args.get("desc"),kw_info)
     dynamic=replace_keywords(upload_args.get("dynamic"),kw_info)
     after_upload_args=common_event_args.get("after_upload_args",{})
-    insert_desc=replace_keywords(after_upload_args.get("insert_desc"),kw_info)
+    # insert_desc=replace_keywords(after_upload_args.get("insert_desc"),kw_info)
     upload_args["title"]   = title
     upload_args["desc"]    = desc
     upload_args["dynamic"] = dynamic
-    common_event_args["after_upload_args"]["insert_desc"]=insert_desc
+    # common_event_args["after_upload_args"]["insert_desc"]=insert_desc
 
     return common_event_args,download_args,upload_args
 
@@ -230,42 +240,43 @@ def _re_render_cover(file_path):
     from DMR.utils.render_with_manimgl import rendercover_with_manimgl
     rendercover_with_manimgl(name, time,name_color,year,output_dir)
 
-def _re_change_desc(file_path,bvid:str):
-    common_event_args,_,_=replace_args_keywords(*file_to_args(file_path))
-    after_upload_args  = common_event_args.get("after_upload_args")
-    account            = after_upload_args.get("account")
-    insert_desc= after_upload_args.get("insert_desc")
-    add_livetime(bvid,insert_desc,account)
+def _re_add_to_list(file_path, bvid, account_config):
+    """
+    修改后的合集逻辑：直接从传入的账号配置字典中读取
+    """
+    need_add_to_list = account_config.get("add_to_list", False)
+    account = account_config.get("account")
+    sectionId = account_config.get("sectionId")
 
-def _re_add_to_list(file_path,bvid:str):
-    common_event_args,_,_=replace_args_keywords(*file_to_args(file_path))
-    after_upload_args  = common_event_args.get("after_upload_args")
-    account            = after_upload_args.get("account")
-    sectionId          = after_upload_args.get("sectionId")
-    add_to_list(bvid,sectionId,account)
-
-def upload_video(
-    file_path,
-    show_progress_bar=False,
-    show_cmd=False,
-    re_add_to_list=True,
-    re_render_cover=False,
-    ):
-    _,_,upload_args=replace_args_keywords(*file_to_args(file_path))
-    if re_render_cover:
-        _re_render_cover(file_path)
-    bvid=run_biliuprs(
-        file_path,
-        is_upload=True,
-        show_progress_bar=show_progress_bar,
-        show_cmd=show_cmd,
-        **upload_args)
-    if bvid :
-        logger.info(f"bvid is {bvid}")
-        if re_add_to_list:
-            _re_add_to_list(file_path,bvid)
+    if need_add_to_list and sectionId:
+        logger.info(f"正在将 {bvid} 加入账号 {account} 的合集 {sectionId}")
+        add_to_list(bvid, sectionId, account)
     else:
-        logger.info("获取bvid失败")
+        logger.info(f"账号 {account} 未配置合集或 add_to_list 为 False，跳过。")
+
+def upload_process(file_path, account_config, engine_type, show_progress_bar, show_cmd):
+    """
+    封装单账号上传流程
+    """
+    if engine_type == "biliuprs":
+        bvid = run_biliuprs(
+            file_path,
+            is_upload=True,
+            show_progress_bar=show_progress_bar,
+            show_cmd=show_cmd,
+            **account_config
+        )
+    else: # biliWebAPI
+        account = account_config.get("account")
+        cookies = f"D:/DanmakuRender/.login_info/{account}.json"
+        api = BiliWebApi(cookies=cookies, account=account)
+        _, bvid = api.upload([build_videoinfo(file_path)], **account_config)
+
+    if bvid:
+        logger.info(f"账号 {account_config.get('account')} 上传成功, bvid: {bvid}")
+        _re_add_to_list(file_path, bvid, account_config)
+    else:
+        logger.error(f"账号 {account_config.get('account')} 获取 bvid 失败")
 
 def get_bvid(n:int,checker=None,account=3546637425182939):
     url="https://member.bilibili.com/x/web/archives"
@@ -296,18 +307,6 @@ def get_bvid(n:int,checker=None,account=3546637425182939):
                 return None
         return bvid
 
-def parse_yn(prompt: str, default: bool) -> bool:
-    s = input(prompt).strip().lower()
-    if s == "":
-        print(f"无输入，按默认值 {default} 处理。")
-        return default
-    if s in ("y", "yes", "1", "true", "t"):
-        return True
-    if s in ("n", "no", "0", "false", "f"):
-        return False
-    print(f"输入无效，按默认值 {default} 处理。")
-    return default
-
 def strip_quotes(s: str) -> str:
     s = s.strip()
     if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
@@ -324,7 +323,7 @@ def build_videoinfo(file_path: str) -> VideoInfo:
 
     # 你现有的：读开播/下播时间（依赖 output_dir 的 _livestart_times.txt 等）
     out_dir = download_args.get("output_dir")
-    st,et=read_last_complete_session(out_dir,only_start=True)
+    st,et=read_last_complete_session(out_dir,only_start=False)
 
     # 你现有的：直播间信息
     api = LiveAPI(download_args.get("url"))
@@ -370,58 +369,59 @@ def build_videoinfo(file_path: str) -> VideoInfo:
         taskname=taskname_clean,
     )
 
-def upload_bybiliupWebAPI(
-    file_path,
-    # show_progress_bar=False,
-    # show_cmd=False,
-    re_add_to_list=True,
-    re_render_cover=False,
-    ):
-    _,_,upload_args=replace_args_keywords(*file_to_args(file_path))
 
-    account=upload_args.get("account")
-    cookies=f"D:/DanmakuRender/.login_info/{account}.json"
-    api=BiliWebApi(cookies=cookies,account=account)
-
-    if re_render_cover:
-        _re_render_cover(file_path)
-    _, bvid=api.upload([build_videoinfo(file_path)],**upload_args)
-
-    if bvid :
-        logger.info(f"bvid is {bvid}")
-        if re_add_to_list:
-            _re_add_to_list(file_path,bvid)
-    else:
-        logger.info("获取bvid失败")
 
 def main():
     video_path = strip_quotes(input("请输入需要上传的视频路径：\n").strip())
 
-    engine = input("请选择上传引擎 [1=biliuprs, 2=biliWebAPI] (默认 1)：").strip()
-    if engine in ("", "1", "biliuprs"):
-        engine = "biliuprs"
-    elif engine in ("2", "biliwebapi"):
-        engine = "biliWebAPI"
+    # 1. 解析配置
+    common_args, dl_args, all_upload_configs = file_to_args(video_path)
+    # 预处理关键字替换
+    # 注意：这里需要对 list 里的每个 config 执行替换
+    for i in range(len(all_upload_configs)):
+        _, _, replaced_cfg = replace_args_keywords(common_args, dl_args, all_upload_configs[i])
+        all_upload_configs[i] = replaced_cfg
+
+    # 2. 选择账号
+    print("\n检测到以下上传账号配置：")
+    for i, cfg in enumerate(all_upload_configs):
+        print(f"[{i}] 账号: {cfg.get('account')} (标题: {cfg.get('title')[:20]}...)")
+
+    choice = input("\n请选择上传账号 [输入索引数字, 或输入 'all' 全部上传] (默认 all): ").strip().lower()
+
+    selected_configs = []
+    if choice == "all" or choice == "":
+        selected_configs = all_upload_configs
     else:
-        print("❌ 无效输入，使用默认 biliuprs")
-        engine = "biliuprs"
+        try:
+            selected_configs = [all_upload_configs[int(choice)]]
+        except:
+            print("❌ 输入错误，取消上传")
+            return
 
-    re_render_cover = parse_yn("是否需要重新渲染封面[y/n], 回车默认为n：\n", default=False)
-    re_add_to_list = parse_yn("是否需要加入到合集[y/n], 回车默认为y：\n", default=True)
+    # 3. 选择引擎及其他
+    engine = input("请选择上传引擎 [1=biliuprs, 2=biliWebAPI] (默认 1)：").strip()
+    engine_type = "biliWebAPI" if engine in ("2", "biliwebapi") else "biliuprs"
 
-    if engine =="biliuprs":
-        upload_video(
+    render_choice = input("是否重新渲染封面 [1=是, 2=否] (默认 2): ").strip()
+    re_render_cover = True if render_choice == "1" else False
+
+    # 4. 执行封面渲染（针对视频文件执行一次即可）
+    if re_render_cover:
+        logger.info("正在重新渲染封面...")
+        _re_render_cover(video_path)
+
+    # 5. 执行上传
+    # 注意：这里不再询问合集，直接将 re_add_to_list 设为 True，
+    # 具体的 account_config 内部会根据自身的 add_to_list (True/False) 来决定动作
+    for cfg in selected_configs:
+        logger.info(f"▶️ 开始处理账号: {cfg.get('account')}")
+        upload_process(
             video_path,
+            cfg,
+            engine_type,
             show_progress_bar=True,
             show_cmd=True,
-            re_add_to_list=re_add_to_list,
-            re_render_cover=re_render_cover,
-        )
-    elif engine =="biliWebAPI":
-        upload_bybiliupWebAPI(
-            video_path,
-            re_add_to_list=re_add_to_list,
-            re_render_cover=re_render_cover
         )
 
 if __name__ == "__main__":

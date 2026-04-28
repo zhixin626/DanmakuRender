@@ -1,7 +1,7 @@
 import json, re,requests
 from struct import pack, unpack
 from datetime import datetime
-from DMR.utils import  SimpleDanmaku,GiftDanmaku
+from DMR.utils import  SimpleDanmaku,GiftDanmaku,MemberDanmaku
 import aiohttp
 from DMR.utils import split_url
 from .DMAPI import DMAPI
@@ -99,14 +99,41 @@ class Douyu(DMAPI):
                 msg = msg.replace(b"@=", b'":"').replace(b"/", b'","')
                 msg = msg.replace(b"@A", b"@").replace(b"@S", b"/")
                 msg = json.loads((b'{"' + msg[:-2] + b"}").decode("utf8", "ignore"))
+                # print(msg)
 
-                uname    = msg.get("nn", "")
-                content  = msg.get("txt", "")
-                msg_type = {"dgb": "gift", "chatmsg": "danmaku", "uenter": "enter"}.get(msg["type"], "other")
-                uid      = msg["uid"]
-                color    = color_tab.get(msg.get("col", "-1"), "ffffff")
+                msg_type = {"dgb": "gift", "chatmsg": "danmaku", "uenter": "enter","dfobc":"member"}.get(msg["type"], "other")
 
-                if msg_type == "gift":
+                if msg_type == "enter":
+                    uname       = msg.get("nn", "")
+                    uid         = msg.get("uid", 0)
+                    if "巧丽哇" in uname:
+                        print(f"👋 {uname} 进入直播间！")
+                        print(msg)
+                        print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+                if msg_type == "member":
+                    uname       = msg.get("nick", "")
+                    member_time = int(msg.get("mn", 1))
+                    uid         = msg.get("uid", 0)
+                    price       = int(msg.get("price", 0))/100
+                    member_danmaku = MemberDanmaku(
+                        uname=uname,
+                        price=price,
+                        price_unit="鱼翅",
+                        member_name="钻石粉丝",
+                        member_time=member_time,
+                        member_time_unit="月",
+                        uid=uid,
+                        )
+                    print(member_danmaku.text) # debug
+                    msgs.append(member_danmaku)
+                    continue
+
+                elif msg_type == "gift":
+                    uname    = msg.get("nn", "")
+                    content  = msg.get("txt", "")
+                    uid      = msg.get("uid", 0)
+                    color    = color_tab.get(msg.get("col", "-1"), "ffffff")
                     # ===== 0. 基础字段 =====
                     gift_name  = msg.get("gfn", "未知礼物")
                     gift_count = int(msg.get("gfcnt") or 1)
@@ -186,6 +213,7 @@ class Douyu(DMAPI):
                         gift_name=gift_name,
                         gift_count=gift_count,
                         gift_price=gift_price,
+                        gift_type=price_src,
                         price_unit=price_unit,
                         dtype='gift',
                         color='ffffff',
@@ -199,6 +227,10 @@ class Douyu(DMAPI):
                     continue
 
                 elif msg_type == "danmaku":
+                    uname    = msg.get("nn", "")
+                    content  = msg.get("txt", "")
+                    uid      = msg.get("uid", 0)
+                    color    = color_tab.get(msg.get("col", "-1"), "ffffff")
                     msg = SimpleDanmaku(
                             dtype="danmaku",
                             uname=uname,

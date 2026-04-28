@@ -17,8 +17,9 @@ def save_gift_to_jsonl(dm, file_path: str):
     gift_data = {
         "uname": getattr(dm, 'uname', '未知用户'),
         "gift_name": getattr(dm, 'gift_name', '未知礼物'),
+        "gift_type": getattr(dm, 'gift_type', 'gift'),
         "count": getattr(dm, 'gift_count', 1),
-        "total_price_cny": getattr(dm, 'total_price_cny', 0.0)
+        "total_price_cny": getattr(dm, 'total_price_cny', 0.0),
     }
 
     # 3. 写入文件 (Append mode)

@@ -43,6 +43,29 @@ class SimpleDanmaku():
         for key, value in self.__dict__.items():
             yield key, value
 
+class MemberDanmaku(SimpleDanmaku):
+    def __init__(
+        self,
+        uname:str,
+        price:float,
+        member_name:str,      #"会员"
+        price_unit:str,       #"元"
+        member_time:int,      # 1
+        member_time_unit:str, #"月"
+        text=None,
+        dtype="member",
+        **kwargs,
+    ):
+        super().__init__(uname=uname,dtype=dtype,**kwargs)
+        self.member_name=member_name
+        self.member_time=member_time
+        self.member_time_unit=member_time_unit
+        self.price=price
+        if text:
+            self.text=text
+        else:
+            self.text=f"{uname} 开通了{member_time}个{member_time_unit}的{member_name}价值{price}{price_unit}"
+
 
 class GiftDanmaku(SimpleDanmaku):
     def __init__(

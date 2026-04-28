@@ -76,7 +76,8 @@ class DanmakuRender(): # 被 main.py直接 DanmakuRender(config, logger=logger, 
         REFRESH_INTERVAL = 60
         time.sleep(REFRESH_INTERVAL)
         while not self.stoped:
-            self.check_config_update()
+            if self.config.get_config('dmr_engine_args')['dynamic_config']:
+                self.check_config_update()
             # clean temp file
             files = os.listdir('.temp')
             for file in files:

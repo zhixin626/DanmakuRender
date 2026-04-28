@@ -44,40 +44,6 @@ def rendercover_with_manimgl_bg(name: str, time: str,color,year,output_dir:str):
     t = threading.Thread(target=worker, daemon=True)
     t.start()
 
-def render_zuozuovideo_with_manimgl(output_dir):
-    manimgl_exe = r"D:\manim\venv\Scripts\manimgl.exe"
-    script = r"D:\DanmakuRender\DMR\utils\get_zuozuo_video.py"
-    scene_name = "zuozuo_video"
-    cmd = [
-        manimgl_exe,
-        script,
-        scene_name,
-        "-w",
-        "-c","#000000",
-        "--video_dir",output_dir,
-        "--fps","30",
-        "-q",
-        "--hd",
-    ]
-    subprocess.run(cmd, check=True)
-    return Path(output_dir)/(scene_name+".mp4")
-
-def render_zuozuovideo_with_manimgl_bg(output_dir,debug=False):
-    def worker():
-        try:
-            render_zuozuovideo_with_manimgl(output_dir)
-        except Exception as e:
-            logger.exception(f"佐佐视频生成失败：error={e}")
-            if debug:
-                print(f"佐佐视频生成失败：error={e}")
-            return
-        logger.info(f"佐佐视频生成成功")
-        if debug:
-            print(f"佐佐视频生成成功")
-    # 后台线程
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
 
 if __name__ == '__main__':
-    # render_zuozuovideo_with_manimgl()
     pass

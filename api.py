@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from fastapi.responses import PlainTextResponse
 from fastapi import HTTPException
 from typing import Union
+import os
 # uvicorn api:app --reload --host 0.0.0.0 --port 8000
 # uvicorn api:app --host 0.0.0.0 --port 8000
 
@@ -80,3 +81,27 @@ def syn_title(req: SyncReq):
 
     text = "\n".join(lines).rstrip()
     return PlainTextResponse(text)
+
+TARGET_DIR = r"D:\DanmakuRender\Tasks文件\少年不太冷"
+FILE_PATH = os.path.join(TARGET_DIR, "offline.txt")
+
+@app.get("/create_offline", response_class=PlainTextResponse)
+def create_offline_file():
+    """
+    自动创建 offline.txt，只返回纯文本结果 (Plain Text Response)
+    """
+    try:
+        # 检查并创建文件夹 (Check and create directory)
+        if not os.path.exists(TARGET_DIR):
+            os.makedirs(TARGET_DIR)
+
+        # 创建或覆盖文件 (Create or overwrite file)
+        with open(FILE_PATH, "w", encoding="utf-8") as f:
+            f.write("")
+
+        return PlainTextResponse("创建成功")
+
+    except Exception as e:
+        # 打印具体的错误到后台日志，方便你调试
+        print(f"创建文件失败，原因: {e}")
+        return PlainTextResponse("创建错误")

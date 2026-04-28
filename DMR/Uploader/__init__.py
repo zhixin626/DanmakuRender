@@ -86,20 +86,6 @@ class Uploader():
                 return True
             return False
 
-    def _pipeSend(self, event, msg, target='engine', request_id=None, dtype=None, data=None, **kwargs):
-        if self.send_queue:
-            msg = PipeMessage(
-                source='uploader',
-                target=target,
-                event=event,
-                request_id=request_id,
-                msg=msg,
-                dtype=dtype,
-                data=data,
-                **kwargs,
-            )
-            self.send_queue.put(msg)
-
     def _pipeRecvMonitor(self):
         while self.stoped == False and self.recv_queue is not None:
             message:PipeMessage = self.recv_queue.get()
@@ -141,7 +127,7 @@ class Uploader():
                 'args': config.get('args', {}),
                 'files': config.get('files'),
                 'stream_queue': stream_queue,
-                # 'config': config,
+                'config': config,
                 'status': 'waiting',
             }
             self.upload_tasks[task['uuid']] = task
@@ -149,6 +135,20 @@ class Uploader():
                 threading.Thread(target=self._upload_subprocess, args=(task,), daemon=True).start()
             else:
                 self.upload_executors.submit(self._upload_subprocess, task)
+
+    def _pipeSend(self, event, msg, target='engine', request_id=None, dtype=None, data=None, **kwargs):
+        if self.send_queue:
+            msg = PipeMessage(
+                source='uploader',
+                target=target,
+                event=event,
+                request_id=request_id,
+                msg=msg,
+                dtype=dtype,
+                data=data,
+                **kwargs,
+            )
+            self.send_queue.put(msg)
 
     def _gather(self, task, status, desc=''):
         with self._lock:
