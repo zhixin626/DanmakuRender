@@ -113,6 +113,8 @@ class Uploader():
 
     def add_task(self, msg:PipeMessage):
         with self._lock:
+            # 这里的msg是liveevents里checkforupload里构造的upload_msg
+            # 这里的config是 upload_msg 里的 data
             config = msg.data
             file = config.get('files')[0]
             stream_queue = None
@@ -127,7 +129,7 @@ class Uploader():
                 'args': config.get('args', {}),
                 'files': config.get('files'),
                 'stream_queue': stream_queue,
-                'config': config,
+                'config': config, # task里的config是 upload_msg 里的 data
                 'status': 'waiting',
             }
             self.upload_tasks[task['uuid']] = task
@@ -179,15 +181,15 @@ class Uploader():
                     request_id=task['request_id'],
                     dtype='dict',
                     data={
-                        'config': task['config'],
+                        'config': task['config'], # task里的config是 upload_msg 里的 data
                         "bvid":desc, # zhixin 增加bvid
                     },
                 )
 
-    def _upload_subprocess(self, task):
+    def _upload_subprocess(self, task): # 这里的task是add_task里构造的那个字典
         task['status'] = 'uploading'
         try:
-            upload_args = task['args']
+            upload_args = task['args']  # 重要参数传入biliwebapi和biliuprs（初始化+upload函数）
             upload_group:str = task['upload_group']
 
             with self._lock:

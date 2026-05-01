@@ -26,6 +26,8 @@ import aiohttp
 
 from .douyin_shortcodes import replace_shortcodes_to_emoji
 
+from DMR.utils.bark_notifier  import bark_notify
+
 logger = logging.getLogger(__name__)
 
 
@@ -180,6 +182,7 @@ class Douyin:
                     print(user_info)
                     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                     print(f"目标id is 55557889854")
+                    bark_notify("通知", f"{name} 进入直播间！")
 
                 msg_dict = EntryDanmaku(
                     timestamp = now,

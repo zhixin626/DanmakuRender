@@ -6,6 +6,76 @@ from .baseevents import BaseEvents
 from ..utils import *
 from ..utils.merge_mp4 import *
 from pathlib import Path
+from DMR.utils.bark_notifier  import bark_notify_url
+
+logger = logging.getLogger(__name__)
+
+def get_bvid_history_file(src_path):
+    """获取统一的 BVID 历史文件路径"""
+    return Path(src_path) / "bvid_history.json"
+
+def read_monthly_bvids(src_path, stime, account=None):
+    """
+    根据 stime 读取该月份唯一的 BVID。
+    返回: str (BVID) 或 None
+    """
+    if isinstance(stime, datetime):
+        dt = stime
+    elif isinstance(stime, (int, float)):
+        dt = datetime.fromtimestamp(stime)
+    else:
+        dt = datetime.now()
+
+    month_key = f"{dt.year}-{dt.month:02d}"
+    if account:
+        month_key = f"{month_key}_{account}"
+    file_path = get_bvid_history_file(src_path)
+
+    if file_path.exists():
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                full_history = json.load(f)
+                # 直接返回该月份对应的 BVID 字符串
+                return full_history.get(month_key)
+        except Exception as e:
+            print(f"读取 BVID 历史文件失败: {e}")
+    return None
+
+def write_monthly_bvid(src_path, stime, bvid, account=None):
+    """
+    更新 BVID 到统一的 JSON 文件。
+    格式: {"2026-03": "bvid1", "2026-04": "bvid2"}
+    """
+    if isinstance(stime, datetime):
+        dt = stime
+    elif isinstance(stime, (int, float)):
+        dt = datetime.fromtimestamp(stime)
+    else:
+        dt = datetime.now()
+
+    month_key = f"{dt.year}-{dt.month:02d}"
+    if account:
+        month_key = f"{month_key}_{account}"
+    file_path = get_bvid_history_file(src_path)
+
+    full_history = {}
+    if file_path.exists():
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                full_history = json.load(f)
+        except Exception:
+            full_history = {}
+
+    # 每次上传结束都会更新该月份的 BVID（如果是追加模式，bvid 本身就不变）
+    full_history[month_key] = bvid
+
+    try:
+        if not file_path.parent.exists():
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(full_history, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"写入 BVID 历史文件失败: {e}")
 
 class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def __init__(self, name, config):
@@ -53,12 +123,15 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.src_path        = Path(str(self.config['download_args']['output_dir']))
         self.dmvideo_path    = Path(str(self.config['download_args']['output_dir']) + '（弹幕版）')
         self.transcode_path  = Path(str(self.config['download_args']['output_dir']) + '（转码后）')
-        self.check_render_cover(group_id,url=getattr(message,"url",""))
+        self.check_render_cover(group_id,url=message.url)
+        if self.config['common_event_args'].get("bark_notify",False):
+            bark_notify_url(message.url)
 
     def check_render_cover(self,group_id,url=""):
         is_already_render_cover=self.live_status[group_id]["is_already_render_cover"]
         cover_args=self.config['common_event_args'].get("cover_args", {})
-        is_need_render_cover=cover_args.get("is_render_cover")
+        is_need_render_cover = cover_args.get("is_render_cover")
+        monthly_cover        = cover_args.get("monthly_cover")
 
         if not is_need_render_cover or is_already_render_cover:
             return
@@ -77,11 +150,10 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
         _now       = datetime.now()
         _year      = f"{_now.year}"
-        _time      = f"{_now.month}月{_now.day}日"
+        _time      = f"{_now.month}月" if monthly_cover else f"{_now.month}月{_now.day}日"
         _color     = cover_args.get("name_color","#111111")
-        output_dir = cover_args.get("output_dir","./covers")
         from DMR.utils.render_with_manimgl import rendercover_with_manimgl_bg
-        rendercover_with_manimgl_bg(_name,_time,_color,_year,output_dir=output_dir)
+        rendercover_with_manimgl_bg(_name,_time,_color,_year,output_dir=str(self.src_path))
         self.live_status[group_id]["is_already_render_cover"]=True
 
     def _log_state(self, which: str = "all", prefix: str = "", level: int = logging.INFO):
@@ -303,10 +375,31 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         ret_msgs = []
         if not self.state_dict.get(group_id):
             return ret_msgs
+
+        try:
+            # 假设 read_last_complete_session 已从外部导入
+            stime, etime = read_last_complete_session(self.src_path)
+        except:
+            stime = time.time() # 兜底逻辑
+
+        def patch_arg_with_monthly_bvid(upload_arg_dict):
+            """内部辅助：如果配置了自动追加，则注入 base_bvid (Inject Base BVID)"""
+            if upload_arg_dict.get('auto_append_monthly'):
+                account = upload_arg_dict.get('account')
+                target_bvid = read_monthly_bvids(self.src_path, stime, account=account)
+                if target_bvid:
+                    upload_arg_dict['base_bvid'] = target_bvid
+                    self.logger.info(f"[账号{account}] 追加模式：检测到当月已有稿件 {target_bvid}，将追加至该稿件")
+                else:
+                    # 如果没找到，留空让后续逻辑创建新稿件
+                    upload_arg_dict['base_bvid'] = ""
+                    self.logger.info(f"[账号{account}] 追加模式：当月暂无稿件，将创建新稿件")
+            return upload_arg_dict
         
         upload_args = self.config['upload_args']
         upload_together =self.config["common_event_args"].get("upload_together",False) #zhixin
 
+        # --- 路径一：实时上传 (Realtime) ---
         for idx, video_state in enumerate(self.state_dict[group_id]):
             if _idx is not None and idx != _idx:
                 continue
@@ -318,11 +411,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                     if vtype in upload_file_types.split('+'):
                         for upid, arg in enumerate(upload_arg):
                             # 实时上传
-                            if not arg.get('realtime'):
-                                continue
-                            if info['file'].duration < arg.get('min_length', 0):
-                                self.logger.info(f'视频{info["file"].path}时长为{info["file"].duration}s，设置{arg.get("min_length", 0)}s，跳过上传.')
-                                continue
+                            if not arg.get('realtime'): continue
+                            if info['file'].duration < arg.get('min_length', 0): continue
+
                             upload_group_id = info['file'].upload_group_id if hasattr(info['file'], 'upload_group_id') else group_id
                             upload_msg = PipeMessage(
                                 source=self.name,
@@ -335,7 +426,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                     'engine': arg['engine'],
                                     'stateless': False,
                                     'upload_group': upload_group_id+'_'+upload_file_types+'_'+str(upid),
-                                    'args': arg,
+                                    'args': patch_arg_with_monthly_bvid(arg), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
                                 }
                             )
                             # self.logger.debug(
@@ -357,8 +448,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         
         # 如果当前视频组已经被标记结束，检查是否有视频组完全准备好上传（用于非实时上传）
         if group_id in self.ended_dict:
-            # 遍历所有视频类型
-            video_types = list(self.state_dict[group_id][-1].keys())
+            video_types = list(self.state_dict[group_id][-1].keys())# 遍历所有视频类型
+
+            # --- 路径二：非实时上传 (Standard Non-Realtime) ---
             if not upload_together: # zhixin: 原始逻辑
                 for vtype in video_types:
                     # 检查是否全部准备上传
@@ -380,8 +472,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         if vtype in upload_file_types.split('+'):
                             for upid, arg in enumerate(upload_arg):
                                 # 此处只做非实时上传
-                                if arg.get('realtime'):
-                                    continue
+                                if arg.get('realtime'): continue
+
                                 up_videos = [video for video in videos if video.duration >= arg.get('min_length', 0)]
                                 upload_group_id = up_videos[0].upload_group_id if hasattr(up_videos[0], 'upload_group_id') else group_id
                                 upload_msg = PipeMessage(
@@ -395,7 +487,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                         'engine': arg['engine'],
                                         'stateless': True,
                                         'upload_group': upload_group_id+'_'+upload_file_types+'_'+str(upid),
-                                        'args': arg,
+                                        'args': patch_arg_with_monthly_bvid(arg), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
                                     }
                                 )
                                 # self.logger.debug(
@@ -416,14 +508,14 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                     self.state_dict[group_id][idx][vtype]['wait'].append(upload_msg.request_id)
                                 ret_msgs.append(upload_msg)
 
+            # --- 路径三：非实时聚合上传 (Upload Together) ---
             else: # zhixin新逻辑：按 upload_file_types 聚合，把多个 vtype 的 files 合并成一次 task ======
                 for upload_file_types, upload_arg in upload_args.items():
                     vtypes = upload_file_types.split('+')
 
                     # 只处理非 realtime
                     for upid, arg in enumerate(upload_arg):
-                        if arg.get('realtime'):
-                            continue
+                        if arg.get('realtime'): continue
 
                         all_files = []
                         involved_vtypes = []
@@ -474,7 +566,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                 'engine': arg['engine'],
                                 'stateless': True,
                                 'upload_group': upload_group_id + '_' + upload_file_types + '_' + str(upid),
-                                'args': arg,
+                                'args': patch_arg_with_monthly_bvid(arg), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
                             }
                         )
 
@@ -516,7 +608,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
     def onUploadEnd(self, message:PipeMessage):
         self.logger.info(f'{self.name}: {message.msg}.')
-        self.logger.debug(f"BeforeonUploadEnd:{self.name}: {message}.")
+        # self.logger.debug(f"BeforeonUploadEnd:{self.name}: {message}.")
 
         target_group_id = None
         request_id = message.request_id
@@ -530,18 +622,31 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         if len(self.state_dict[group_id][idx][vtype]['wait']) == 0:
                             self.state_dict[group_id][idx][vtype]['status'] = 'uploaded'
 
+        # --- 新增：记录 BVID 到当月历史文件 ---
+        if target_group_id:
+            bvid = message.data.get("bvid")
+            upload_config = message.data.get("config", {}).get('args', {})
+            base_bvid = upload_config.get('base_bvid')
+            account = upload_config.get('account')
+            if bvid and upload_config.get('auto_append_monthly'):
+                stime, _ = read_last_complete_session(self.src_path)
+                try:
+                    write_monthly_bvid(self.src_path, stime, bvid, account=account)
+                    self.logger.info(f"已登记{stime.month}月 账号{account} bvid:{bvid}")
+                except Exception as e:
+                    self.logger.error(f"登记{stime.month}月 账号{account} bvid失败: {e}")
+            # 判断是否加入合集
+            if bvid and bvid != base_bvid:
+                self.check_add_to_list(target_group_id,bvid,upload_config)
+        # ------------------------------------
+
         ret_msgs = []
         if self.config['common_event_args'].get('auto_clean') and target_group_id:
             clean_msgs = self._check_for_clean(target_group_id)
             ret_msgs += clean_msgs
 
-        # 判断是否加入合集
-        if target_group_id:
-            bvid=message.data.get("bvid",None)
-            upload_config=message.data.get("config",{}).get('args')
-            self.check_add_to_list(target_group_id,bvid,upload_config)
-
         self._free_state_memory()
+
 
         return ret_msgs
 
@@ -562,11 +667,12 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
     def check_for_merge(self, group_id):
         # is_merge / merge_type / 音量相关配置
-        merge_cfg      = self.config['common_event_args'].get("merge_args", {}) or {}
-        is_merge       = merge_cfg.get("is_merge")
-        merge_type     = merge_cfg.get("merge_type")  # e.g. ['src_video', 'dm_video']
-        is_amplify     = merge_cfg.get("is_amplify", True)
-        extra_gain_db  = merge_cfg.get("extra_gain_db", 0)
+        merge_cfg          = self.config['common_event_args'].get("merge_args", {}) or {}
+        is_merge           = merge_cfg.get("is_merge")
+        merge_type         = merge_cfg.get("merge_type")  # e.g. ['src_video', 'dm_video']
+        is_amplify         = merge_cfg.get("is_amplify", True)
+        extra_gain_db      = merge_cfg.get("extra_gain_db", 0)
+        file_name_template = merge_cfg.get("file_name_template", "{stime.month}月{stime.day}日")
 
         # 基础防御：不开启合并 / 没有这个 group / merge_type 为空 → 直接退出
         if (not is_merge) or (group_id not in self.ended_dict) or (not merge_type):
@@ -575,6 +681,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # 所有 seg 的起止时间（你原来的逻辑）
         stime,etime=read_last_complete_session(self.src_path)
         totaltime=format_duration(stime,etime)
+        final_file_name=file_name_template.format(stime=stime)
 
         # vt -> 目标 slot 名（你原来就是这两个）
         target_slot = {
@@ -646,6 +753,11 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         target_db=-1,
                         extra_gain_db=extra_gain_db,
                         remover=True)
+                # 安全重命名
+                output_path_obj = Path(output_path)
+                dst_path = str(output_path_obj.parent / f"{final_file_name}{output_path_obj.suffix}")
+                renamed = rename_safe(str(output_path), dst_path)
+                output_path = renamed if renamed else output_path
                 meta=probe_media(output_path)
             except Exception as e:
                 # 4. 合并失败：只回滚这一种 vt 的状态
@@ -740,7 +852,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         return ret_msgs
     
     def _free_state_memory(self):
-        self._log_state(prefix="_free_state_memory_start:",level=logging.DEBUG)
+        # self._log_state(prefix="_free_state_memory_start:",level=logging.DEBUG)
 
         final_status =  ['ready']
         if self.config['common_event_args'].get('auto_upload'):
@@ -766,6 +878,10 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                     if st not in final_status:
                         need_free = False
                         break
+                    # zhixin新增：wait 不为空说明还有上传任务在途，不能释放
+                    if info.get('wait'):
+                        need_free = False
+                        break
                 if not need_free:
                     break
 
@@ -783,7 +899,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 self.state_dict.pop(group_id, None)
                 self.live_status.pop(group_id, None)
 
-        self._log_state(prefix="_free_state_memory_end:",level=logging.DEBUG)
+        # self._log_state(prefix="_free_state_memory_end:",level=logging.DEBUG)
 
     def onExit(self, *args, **kwargs) -> None:
         self.logger.info(f'{self.name}: 任务结束.')

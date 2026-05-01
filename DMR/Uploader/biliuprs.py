@@ -19,6 +19,7 @@ class biliuprs():
                  task_upload_lock:bool=True,
                  debug=False, 
                  biliup:str=None, 
+                 base_bvid="",
                  **kwargs,
     ) -> None:
         self.biliup = biliup if biliup else ToolsList.get('biliup')
@@ -38,7 +39,7 @@ class biliuprs():
         self.debug = debug
 
         self.base_args = [self.biliup, '-u', self.cookies]
-        self.task_info = {}
+        self.task_info = {"bvid":base_bvid} if base_bvid else {}
         self._upload_lock = threading.Lock()
         self._upload_procs = {}
         self.logger = logging.getLogger(__name__)

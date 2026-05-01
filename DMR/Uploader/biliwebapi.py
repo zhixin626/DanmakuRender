@@ -39,6 +39,7 @@ class BiliWebApi:
         account:str=None,
         limit=3,
         sort_videos:bool=False,
+        base_bvid="",
         **kwargs,
     ):
         self.cookies = cookies
@@ -65,7 +66,7 @@ class BiliWebApi:
         self.access_token = login_info['token_info']['access_token']
         self.refresh_token = login_info['token_info']['refresh_token']
 
-        self.videos = None
+        self.videos = Data(bvid=base_bvid) if base_bvid else None
         self.stoped = False
 
 
@@ -207,7 +208,7 @@ class BiliWebApi:
             is_new = True
             self.videos = self.videoinfo_to_videos(files[0], kwargs)
         else:
-            self.videos = self.get_remote_data(self.videos.bvid) or self.videos       # 刷新视频信息
+            self.videos = self.get_remote_data(self.videos.bvid) # 刷新视频信息
         if stream_queue is None:
             for file in files:
                 status, info = self.upload_file(
@@ -215,7 +216,7 @@ class BiliWebApi:
                     lines=kwargs.get('line', 'AUTO'),
                     videos=self.videos,
                     submit_api='web'
-                )
+                    )
             # self.submit(submit_api='web', videos=self.videos)
                 
         else:
