@@ -1,7 +1,7 @@
 from pathlib import Path
 from DMR.utils.utils import safe_filename
 from DMR.utils.merge_mp4 import merge_mp4,amplify_mp4
-from upload_only import file_to_args, replace_args_keywords,strip_quotes
+from upload_only import file_to_args,strip_quotes
 import os
 def parse_yn(prompt: str, default: bool) -> bool:
     s = input(prompt).strip().lower()
@@ -89,7 +89,7 @@ def main():
     tmp_output = merge_mp4(videos, remover=remover)  # 返回的是 Path / str
     tmp_output = Path(tmp_output)
     if is_amplify:
-        common_event_args, _, _ = replace_args_keywords(*file_to_args(videos[0]))
+        common_event_args, _, _ = file_to_args(videos[0])
         merge_args=common_event_args.get("merge_args",{})
         extra_gain_db=merge_args.get("extra_gain_db",0)
         tmp_output=amplify_mp4(tmp_output,extra_gain_db=extra_gain_db, remover=remover)
