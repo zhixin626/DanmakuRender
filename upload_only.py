@@ -31,6 +31,13 @@ logger.setLevel(logging.INFO)
 _MANUAL_GROUP_ID = "upload_only"
 
 
+def strip_quotes(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
+        return s[1:-1]
+    return s
+
+
 # ── 配置加载 ─────────────────────────────────────────────
 
 def _pick_upload_arg(upload_args_dict: dict, vtype: str) -> dict:
@@ -61,7 +68,17 @@ def load_config(file_path):
             yml_path = f"{prefix}{taskname}.yml"
             break
     if not yml_path:
-        raise RuntimeError("找不到config文件")
+        matched = list(Path("./configs").glob(f"*{taskname}*.yml"))
+        if len(matched) == 1:
+            yml_path = str(matched[0])
+        elif len(matched) > 1:
+            print(f"找到多个匹配的配置文件，请选择：")
+            for i, p in enumerate(matched):
+                print(f"[{i}] {p}")
+            idx = input("请输入序号: ").strip()
+            yml_path = str(matched[int(idx)])
+        else:
+            raise RuntimeError(f"找不到包含 '{taskname}' 的配置文件")
 
     logger.info(f"将按照 {yml_path} 的配置信息")
     with open(yml_path, "r", encoding="utf-8") as f:
@@ -100,6 +117,7 @@ def _make_live_events(file_path) -> tuple:
     live_events.live_status[_MANUAL_GROUP_ID] = {
         "is_already_render_cover": False,
         "is_live_end": True,
+        "rendered_cover_names": set(),
         "gift_stat": {
             "total_revenue": "未知",
             "total_gifters": "未知",
@@ -181,15 +199,16 @@ def build_videoinfo(file_path: str) -> VideoInfo:
 
 # ── 上传流程 ──────────────────────────────────────────────
 
-def upload_process(video_info: VideoInfo, account_config: dict, engine_type: str,
-                   live_events: LiveEvents):
+def upload_process(video_infos: list, account_config: dict, live_events: LiveEvents):
     """
     单账号上传：
     1. 若配置了 auto_append_monthly，注入 base_bvid（对齐 LiveEvents._check_for_upload）
     2. 调用 DMR 的 uploader
     3. 上传成功后写入 bvid 历史，并通过 live_events.check_add_to_list 处理合集
+    acfun 引擎支持传入多个 VideoInfo 实现分P上传，其他引擎仅使用第一个。
     """
-    account = account_config.get("account")
+    video_info = video_infos[0]
+    account = account_config["account"]
     cfg = account_config.copy()
 
     # --- auto_append_monthly：注入 base_bvid ---
@@ -203,47 +222,42 @@ def upload_process(video_info: VideoInfo, account_config: dict, engine_type: str
             cfg["base_bvid"] = ""
             logger.info(f"[账号{account}] 追加模式：当月暂无稿件，将创建新稿件")
 
+    engine_type = cfg.get("engine", "biliuprs")
+    base_bvid = cfg.get("base_bvid", "")
     if engine_type == "biliuprs":
         from DMR.Uploader.biliuprs import biliuprs
-        uploader = biliuprs(account=account)
-    else:
+        uploader = biliuprs(account=account, base_bvid=base_bvid)
+    elif engine_type == "biliwebapi":
         from DMR.Uploader.biliwebapi import BiliWebApi
-        uploader = BiliWebApi(account=account, cookies=f".login_info/{account}.json")
-
-    status, bvid = uploader.upload([video_info], **cfg)
-
-    if status and bvid:
-        logger.info(f"账号 {account} 上传成功, bvid: {bvid}")
-
-        # --- 写 bvid 历史（对齐 LiveEvents.onUploadEnd） ---
-        if cfg.get("auto_append_monthly") and bvid != cfg.get("base_bvid", ""):
-            try:
-                st, _ = read_last_complete_session(live_events.src_path, only_start=False)
-                write_monthly_bvid(live_events.src_path, st, bvid, account=account)
-                logger.info(f"已登记 {st.month} 月 账号 {account} bvid: {bvid}")
-            except Exception as e:
-                logger.error(f"登记 bvid 失败: {e}")
-
-        # --- 加入合集（通过 LiveEvents.check_add_to_list，不重复造轮子） ---
-        live_events.check_add_to_list(_MANUAL_GROUP_ID, bvid, cfg)
+        uploader = BiliWebApi(account=account, cookies=f".login_info/{account}.json", base_bvid=base_bvid)
+    elif engine_type == "acfun":
+        from DMR.Uploader.acfun import acfun
+        uploader = acfun(account=account, show_progress=True)
     else:
-        logger.error(f"账号 {account} 上传失败: {bvid}")
+        raise ValueError(f"未知上传引擎: {engine_type}")
 
+    upload_files = video_infos if engine_type == "acfun" else [video_info]
+    status, result = uploader.upload(upload_files, **cfg)
 
-# ── 封面渲染（直接调用 LiveEvents.check_render_cover，避免 bark_notify） ──
+    if status:
+        logger.info(f"账号 {account} 上传成功: {result}")
 
-def re_render_cover(live_events: LiveEvents, download_args: dict):
-    url = download_args.get("url", "")
-    live_events.check_render_cover(_MANUAL_GROUP_ID, url=url)
+        if engine_type in ("biliuprs", "biliwebapi"):
+            bvid = result
+            # --- 写 bvid 历史（对齐 LiveEvents.onUploadEnd） ---
+            if cfg.get("auto_append_monthly") and bvid != cfg.get("base_bvid", ""):
+                try:
+                    st, _ = read_last_complete_session(live_events.src_path, only_start=False)
+                    write_monthly_bvid(live_events.src_path, st, bvid, account=account)
+                    logger.info(f"已登记 {st.month} 月 账号 {account} bvid: {bvid}")
+                except Exception as e:
+                    logger.error(f"登记 bvid 失败: {e}")
 
+            # --- 加入合集（通过 LiveEvents.check_add_to_list，不重复造轮子） ---
+            live_events.check_add_to_list(_MANUAL_GROUP_ID, bvid, cfg)
+    else:
+        logger.error(f"账号 {account} 上传失败: {result}")
 
-# ── 工具函数 ──────────────────────────────────────────────
-
-def strip_quotes(s: str) -> str:
-    s = s.strip()
-    if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
-        return s[1:-1]
-    return s
 
 
 # ── 主流程 ────────────────────────────────────────────────
@@ -255,6 +269,7 @@ def main():
     live_events, download_args = _make_live_events(video_path)
     _, _, all_upload_configs = file_to_args(video_path)
     video_info = build_videoinfo(video_path)
+    video_infos = [video_info]
 
     # 选择账号
     print("\n检测到以下上传账号配置：")
@@ -271,17 +286,30 @@ def main():
             print("❌ 输入错误，取消上传")
             return
 
-    engine = input("请选择上传引擎 [1=biliuprs, 2=biliWebAPI] (默认 1)：").strip()
-    engine_type = "biliWebAPI" if engine in ("2", "biliwebapi") else "biliuprs"
+    # acfun 多P：若选中的配置中有 acfun 引擎，允许追加更多视频
+    if any(cfg.get("engine") == "acfun" for cfg in selected_configs):
+        print("\n检测到 AcFun 引擎，支持多P上传。")
+        print("请继续输入更多视频路径作为后续分P（直接回车结束输入）：")
+        while True:
+            extra = strip_quotes(input(f"P{len(video_infos) + 1} 路径（回车结束）: ").strip())
+            if not extra:
+                break
+            try:
+                video_infos.append(build_videoinfo(extra))
+                print(f"已添加 P{len(video_infos)}: {extra}")
+            except Exception as e:
+                print(f"❌ 读取失败，跳过: {e}")
+        if len(video_infos) > 1:
+            logger.info(f"共 {len(video_infos)} P 将一起上传")
 
     render_choice = input("是否重新渲染封面 [1=是, 2=否] (默认 2): ").strip()
     if render_choice == "1":
         logger.info("正在重新渲染封面...")
-        re_render_cover(live_events, download_args)
+        live_events.check_render_cover(_MANUAL_GROUP_ID, sync=True)
 
     for cfg in selected_configs:
         logger.info(f"开始处理账号: {cfg.get('account')}")
-        upload_process(video_info, cfg, engine_type, live_events)
+        upload_process(video_infos, cfg, live_events)
 
 
 if __name__ == "__main__":
