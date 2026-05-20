@@ -306,9 +306,9 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 self.force_stop_trigger = True # 欺骗程序为下播
                 return
 
-            if exists(self.offline_time_path):
+            if exists(self.force_offline_time_path):
                 try:
-                    with open(self.offline_time_path, 'r', encoding='utf-8') as f:
+                    with open(self.force_offline_time_path, 'r', encoding='utf-8') as f:
                         content = f.read().strip()
                     # 情况 A: 内容为空，或写了 "" 表示取消
                     if content == "" or content == '""' or content == "''":
@@ -320,9 +320,9 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                         self.logger.info(f"{self.taskname_disp}🔔收到指令：修改强制下播时间为 {self.force_offline_time}")
                     else:
                         self.logger.error(f"时间格式错误: '{content}'，请使用 HH:MM 格式或保持为空以取消")
-                    os_remove_info(self.offline_time_path)
+                    os_remove_info(self.force_offline_time_path)
                 except Exception as e:
-                    self.logger.error(f"处理 {self.offline_time_path} 失败: {e}")
+                    self.logger.error(f"处理 {self.force_offline_time_path} 失败: {e}")
 
             if self.force_offline_time and is_passed_time_point(self.force_offline_time):
                 self.logger.info(f"到达强制下播时间:{self.force_offline_time}")
@@ -429,7 +429,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.rank_top_n=self.gift_dm_args.get("rank_top_n",3)
         # ==============interactive====================
         self.offline_path= os.path.join(self.output_dir, f"offline.txt")
-        self.offline_time_path= os.path.join(self.output_dir, f"offline_time.txt")
+        self.force_offline_time_path= os.path.join(self.output_dir, f"force_offline_time.txt")
         self.force_offline_time=self.advanced_video_args.get("force_offline_time",None)
         self.segment_path=os.path.join(self.output_dir, f"segment.txt")
         # =============================================

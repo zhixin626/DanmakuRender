@@ -28,7 +28,7 @@ class Render():
         self.render_tasks = {}
         self.failed_tasks = {}
         self.failed_tasks_file = '.temp/failed_renders.json'
-        self.load_failed_tasks()
+        # self.load_failed_tasks()
 
         self._render_class = {}
         self.render_executors = ThreadPoolExecutor(max_workers=self.nrenders)
@@ -61,7 +61,7 @@ class Render():
         with self._lock:
             if uuid in self.failed_tasks:
                 task = self.failed_tasks.pop(uuid)
-                self.save_failed_tasks()
+                # self.save_failed_tasks()
                 
                 # Re-submit
                 task['status'] = 'waiting'
@@ -74,7 +74,7 @@ class Render():
         with self._lock:
             if uuid in self.failed_tasks:
                 self.failed_tasks.pop(uuid)
-                self.save_failed_tasks()
+                # self.save_failed_tasks()
                 return True
             return False
 
@@ -131,7 +131,7 @@ class Render():
             self.render_tasks.pop(task['uuid'], None)
             if status == 'error':
                 self.failed_tasks[task['uuid']] = task
-                self.save_failed_tasks()
+                # self.save_failed_tasks()
 
                 self._pipeSend(
                     event='error',
@@ -198,6 +198,6 @@ class Render():
             for uuid, task in self.render_tasks.items():
                 if uuid not in self.failed_tasks:
                     self.failed_tasks[uuid] = task
-            self.save_failed_tasks()
+            # self.save_failed_tasks()
 
         self.logger.info('Render stopped.')

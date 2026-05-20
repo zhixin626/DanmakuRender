@@ -29,7 +29,7 @@ class Uploader():
         self.upload_tasks = {}
         self.failed_tasks = {}
         self.failed_tasks_file = '.temp/failed_uploads.json'
-        self.load_failed_tasks()
+        # self.load_failed_tasks()
         
         self.upload_executors = ThreadPoolExecutor(max_workers=self.nuploaders)
         self._lock = threading.Lock()
@@ -66,7 +66,7 @@ class Uploader():
         with self._lock:
             if uuid in self.failed_tasks:
                 task = self.failed_tasks.pop(uuid)
-                self.save_failed_tasks()
+                # self.save_failed_tasks()
                 
                 # Re-submit
                 task['status'] = 'waiting'
@@ -82,7 +82,7 @@ class Uploader():
         with self._lock:
             if uuid in self.failed_tasks:
                 self.failed_tasks.pop(uuid)
-                self.save_failed_tasks()
+                # self.save_failed_tasks()
                 return True
             return False
 
@@ -163,7 +163,7 @@ class Uploader():
                     # task['config']['stream_queue'] = None
                 else:
                     self.failed_tasks[task['uuid']] = task
-                    self.save_failed_tasks()
+                    # self.save_failed_tasks()
 
                 self._pipeSend(
                     event='error',
@@ -206,6 +206,8 @@ class Uploader():
                         from .youtubev3 import youtubev3 as TargetUploader
                     elif engine == 'biliwebapi':
                         from .biliwebapi import BiliWebApi as TargetUploader
+                    elif engine == 'acfun':
+                        from .acfun import acfun as TargetUploader
                     else:
                         raise ValueError(f'Unknown engine: {engine}')
                     
@@ -277,6 +279,6 @@ class Uploader():
             for uuid, task in self.upload_tasks.items():
                 if uuid not in self.failed_tasks:
                     self.failed_tasks[uuid] = task
-            self.save_failed_tasks()
+            # self.save_failed_tasks()
 
         self.logger.info('Uploader stopped.')

@@ -60,12 +60,6 @@ def main():
         print("❌ 未输入任何视频文件，程序退出。")
         return
 
-    # 询问是否 amplify
-    is_amplify = parse_yn("合并完成后是否要按照config文件增强音频？(y/n),默认n\n", default=False)
-
-    # 询问是否 remover（删除源文件）
-    remover= parse_yn("是否把原始视频移入回收站？(y/N),默认y\n", default=True)
-
     # 询问输出名称
     print("请输入输出文件名或输出路径(可空行,默认为 *_merged.mp4):")
     target_path = strip_quotes(input("> ").strip())
@@ -83,16 +77,19 @@ def main():
         fp = fp.with_suffix(".mp4")
     target_path = str(fp)
 
-    print("正在合并(将原始文件移入垃圾桶)" if remover else "正在合并(不会移动原始文件)")
+    print("正在合并(将原始文件移入垃圾桶)")
 
     # 合并动作：merge_mp4 永远输出到 merged.mp4
-    tmp_output = merge_mp4(videos, remover=remover)  # 返回的是 Path / str
+    tmp_output = merge_mp4(videos)  # 返回的是 Path / str
     tmp_output = Path(tmp_output)
-    if is_amplify:
-        common_event_args, _, _ = file_to_args(videos[0])
-        merge_args=common_event_args.get("merge_args",{})
-        extra_gain_db=merge_args.get("extra_gain_db",0)
-        tmp_output=amplify_mp4(tmp_output,extra_gain_db=extra_gain_db, remover=remover)
+
+    common_event_args, _, _ = file_to_args(videos[0])
+    merge_args=common_event_args.get("merge_args",{})
+    extra_gain_db=merge_args.get("extra_gain_db",0)
+    # is_amplify=merge_args.get("is_amplify",False)
+    # if is_amplify:
+    #     print(f"正在按配置文件增强音频{extra_gain_db}db")
+    #     tmp_output=amplify_mp4(tmp_output,extra_gain_db=extra_gain_db)
 
     final_path=rename_if_needed(tmp_output,Path(target_path))
     print(f"🎉 合并完成：{final_path}")

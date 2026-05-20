@@ -105,7 +105,7 @@ def main():
     inp = input()
     task_idx = range(len(tasks))
     if inp:
-        task_idx = [int(x) for x in inp.split(' ')]
+        task_idx = [int(x) for x in inp.split()]
 
     if args.mode == 'dmrender':
         from DMR.Render.dmrender import DmRender as TargetRender

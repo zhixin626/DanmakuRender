@@ -279,7 +279,6 @@ def build_headers():
     }
 
 def add_to_list(bvid,sectionId,account):
-    sectionId=parse_sectionId(sectionId,account)
     cookies=get_cookies(account)
     headers = build_headers()
     info=get_info(bvid,account)
@@ -317,32 +316,6 @@ def get_info(bvid,account):
         raise RuntimeError(f"view失败: ")
     info = j["data"]
     return info
-
-def parse_sectionId(sectionId,account):
-    if account == 3546637425182939:
-        Id_dict = {
-            "shou": 7184423,
-            "leng": 7184492,
-            "yue": 7490007,
-            "zuo": 7517357,
-        }
-    elif account==3546981263739190:
-        Id_dict = {
-            "shou": 7710291,
-            "leng": 7710297,
-            "yue": 7710283,
-            "zuo": 7722925,
-        }
-    else:
-        raise RuntimeError("未知account")
-    if isinstance(sectionId,int):
-        return sectionId
-    if isinstance(sectionId, str):
-        if sectionId in Id_dict:
-            return Id_dict[sectionId]
-        raise ValueError(f"未知的 sectionId 字符串：{sectionId}")
-    else:
-        raise ValueError(f"sectionId 类型不合法：{type(sectionId)}")
 
 def build_edit_payload(bvid,account)-> dict:
     """
@@ -525,7 +498,7 @@ def reorder_section_once(section_id: int, account: int, mode: str = "first_to_la
 
 def sync_section_episode_titles(
     account: int,
-    section_id: Union[int, str],
+    section_id: int,
 ) -> dict:
     """
     返回一个字典，里面包含：
@@ -590,8 +563,6 @@ def sync_section_episode_titles(
     url_section = "https://member.bilibili.com/x2/creative/web/season/section"
     cookies = get_cookies(account)
     headers = build_headers()
-
-    section_id = parse_sectionId(section_id,account)
     data = _fetch_section_data(section_id)
     episodes = data.get("episodes") or []
 

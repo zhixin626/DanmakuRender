@@ -112,7 +112,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def onLiveStart(self, message:PipeMessage):
         group_id = message.data
         self.live_status[group_id] = {
-            "is_already_render_cover": False,
+            "rendered_cover_names": set(),
             'is_live_end': False,
             'gift_stat':{
                     "total_revenue" : "未知",
@@ -123,38 +123,60 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.src_path        = Path(str(self.config['download_args']['output_dir']))
         self.dmvideo_path    = Path(str(self.config['download_args']['output_dir']) + '（弹幕版）')
         self.transcode_path  = Path(str(self.config['download_args']['output_dir']) + '（转码后）')
-        self.check_render_cover(group_id,url=message.url)
-        if self.config['common_event_args'].get("bark_notify",False):
-            bark_notify_url(message.url)
+        self.check_render_cover(group_id)
+        bark_args = self.config['common_event_args'].get("bark_args", {})
+        # 兼容旧配置：bark_notify: True 且无 bark_args 时按默认值处理
+        bark_enabled = bark_args.get("is_bark", self.config['common_event_args'].get("bark_notify", False))
+        if bark_enabled:
+            bark_sound = bark_args.get("sound", "birdsong")
+            bark_notify_url(message.url, sound=bark_sound)
 
-    def check_render_cover(self,group_id,url=""):
-        is_already_render_cover=self.live_status[group_id]["is_already_render_cover"]
-        cover_args=self.config['common_event_args'].get("cover_args", {})
-        is_need_render_cover = cover_args.get("is_render_cover")
-        monthly_cover        = cover_args.get("monthly_cover")
+    def check_render_cover(self, group_id, sync=False):
+        rendered = self.live_status[group_id]["rendered_cover_names"]
+        upload_args = self.config.get('upload_args', {})
 
-        if not is_need_render_cover or is_already_render_cover:
+        from DMR.utils.render_with_manimgl import rendercover_with_manimgl
+        import threading
+        _now  = datetime.now()
+        _year = f"{_now.year}"
+
+        pending = []
+        for upload_arg_list in upload_args.values():
+            for arg in upload_arg_list:
+                ca = arg.get('cover_args')
+                if not ca or not ca.get('is_render_cover'):
+                    continue
+                _name = ca.get("name")
+                _account = arg.get("account")
+                if not _name or not _account:
+                    continue
+                _key = (_name, _account)
+                if _key in rendered:
+                    continue
+                _time_template = ca.get("time_template", "{NOW.MONTH}月{NOW.DAY}日")
+                _time = replace_keywords(str(_time_template), {'now': _now})
+                _color = ca.get("name_color","#111111")
+                pending.append((_name, _time, _color, _year, _account, f"cover_{_name}_{_account}.png"))
+                rendered.add(_key)
+
+        if not pending:
             return
 
-        _name = cover_args.get("name")
-        if not _name and url:
-            try:
-                liveapi = LiveAPI(url)
-                streamer_info = retry_safe(liveapi.GetStreamerInfo,max_retries=3)
-                _name = streamer_info.name
-            except Exception as e:
-                print(f"获取主播名字失败将使用 未知主播 作为封面: {e}")
+        output_dir = str(self.src_path)
+        def render_all():
+            for (_name, _time, _color, _year, _account, filename) in pending:
+                try:
+                    rendercover_with_manimgl(_name,_time,_color,_year,
+                                            output_dir=output_dir,
+                                            output_filename=filename)
+                    self.logger.info(f"封面生成成功  name:{_name}  account:{_account}  time:{_time}  year:{_year}")
+                except Exception as e:
+                    self.logger.exception(f"封面生成失败 name:{_name},account:{_account},time:{_time},year:{_year},error:{e}")
 
-        if not _name:
-            _name = "未知主播"
-
-        _now       = datetime.now()
-        _year      = f"{_now.year}"
-        _time      = f"{_now.month}月" if monthly_cover else f"{_now.month}月{_now.day}日"
-        _color     = cover_args.get("name_color","#111111")
-        from DMR.utils.render_with_manimgl import rendercover_with_manimgl_bg
-        rendercover_with_manimgl_bg(_name,_time,_color,_year,output_dir=str(self.src_path))
-        self.live_status[group_id]["is_already_render_cover"]=True
+        if sync:
+            render_all()
+        else:
+            threading.Thread(target=render_all, daemon=True).start()
 
     def _log_state(self, which: str = "all", prefix: str = "", level: int = logging.INFO):
         """
@@ -395,6 +417,28 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                     upload_arg_dict['base_bvid'] = ""
                     self.logger.info(f"[账号{account}] 追加模式：当月暂无稿件，将创建新稿件")
             return upload_arg_dict
+
+        def resolve_cover(arg, video_file=None):
+            """内部辅助：根据 cover_args 自动填充 cover 路径"""
+            ca = arg.get('cover_args')
+            if not ca:
+                return arg
+            arg = dict(arg)
+            if ca.get('is_render_cover'):
+                _name = ca.get('name', '未知主播')
+                _account = arg.get('account', '')
+                arg['cover'] = str(self.src_path / f"cover_{_name}_{_account}.png")
+            elif ca.get('is_extract_frame') and video_file:
+                try:
+                    from DMR.Uploader.acfun import extract_best_frame
+                    arg['cover'] = extract_best_frame(
+                        video_file.path,
+                        output_dir=str(self.src_path),
+                        sample_count=ca.get('sample_count', 10),
+                    )
+                except Exception as e:
+                    self.logger.warning(f'封面自动提取失败: {e}')
+            return arg
         
         upload_args = self.config['upload_args']
         upload_together =self.config["common_event_args"].get("upload_together",False) #zhixin
@@ -426,7 +470,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                     'engine': arg['engine'],
                                     'stateless': False,
                                     'upload_group': upload_group_id+'_'+upload_file_types+'_'+str(upid),
-                                    'args': patch_arg_with_monthly_bvid(arg), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
+                                    'args': patch_arg_with_monthly_bvid(resolve_cover(arg, info['file'])), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
                                 }
                             )
                             # self.logger.debug(
@@ -487,7 +531,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                         'engine': arg['engine'],
                                         'stateless': True,
                                         'upload_group': upload_group_id+'_'+upload_file_types+'_'+str(upid),
-                                        'args': patch_arg_with_monthly_bvid(arg), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
+                                        'args': patch_arg_with_monthly_bvid(resolve_cover(arg, up_videos[0])), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
                                     }
                                 )
                                 # self.logger.debug(
@@ -566,7 +610,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                 'engine': arg['engine'],
                                 'stateless': True,
                                 'upload_group': upload_group_id + '_' + upload_file_types + '_' + str(upid),
-                                'args': patch_arg_with_monthly_bvid(arg), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
+                                'args': patch_arg_with_monthly_bvid(resolve_cover(arg, all_files[0])), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
                             }
                         )
 
@@ -819,7 +863,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # 修改后的清理逻辑：
         # 只在上传完成后检查是否清理
         # 根据文件类型进行清理dm_video，src_video，src_video_pre or all
-        self._log_state(prefix="checkforcleanbefore:",level=logging.DEBUG)
+        # self._log_state(prefix="checkforcleanbefore:",level=logging.DEBUG)
         ret_msgs = []
         clean_args = self.config['clean_args']
         for group_id, video_states in self.state_dict.items():
