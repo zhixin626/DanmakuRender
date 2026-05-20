@@ -6,6 +6,10 @@ from DMR.utils import random_user_agent, SuperChatDanmaku, SimpleDanmaku,GiftDan
 from DMR.LiveAPI.bilivideo_utils import encode_wbi, getWbiKeys
 from .DMAPI import DMAPI
 import base64
+
+import logging
+logger = logging.getLogger(__name__)
+
 def parse_enter_msg(j):
     pb_data = j.get("data", {}).get("pb")
     if not pb_data:
@@ -106,14 +110,14 @@ class Bilibili(DMAPI):
                     cookie_dict = {c['name']: c['value'] for c in cookies_list if c.get('name') in target_keys}
                     Bilibili.headers['cookie'] = ";".join([f"{k}={v}" for k, v in cookie_dict.items()]) + ";"
                     uid = int(cookie_dict['DedeUserID'])  # 登录身份
-                    print(f"[*] 正在使用 {cookie_path} 的cookies获取b站弹幕")
+                    logger.info(f"[*] 正在使用 {cookie_path} 的cookies获取b站弹幕")
                 except FileNotFoundError:
-                    print(f"[*] 警告：找不到 Cookie 文件 {cookie_path}，将使用游客身份获取弹幕")
+                    logger.info(f"[*] 警告：找不到 Cookie 文件 {cookie_path}，将使用游客身份获取弹幕")
                 except Exception as e:
-                    print(f"[*] 解析 Cookie 出错: {e}，将使用游客身份")
+                    logger.info(f"[*] 解析 Cookie 出错: {e}，将使用游客身份")
             else:
                 # 如果没传参数，直接打印
-                print("[*] 未配置 bilibili_dm_cookie_path，将使用游客身份获取弹幕")
+                logger.info("[*] 未配置 bilibili_dm_cookie_path，将使用游客身份获取弹幕")
 
             current_cookie = Bilibili.headers.get('cookie', '')
             # 2025-06-28 B站新风控需要cookies中存在buvid3
@@ -245,9 +249,9 @@ class Bilibili(DMAPI):
                         # print(msg)
                         name, face = parse_enter_msg(j)
                         if "巧丽哇" in name:
-                            print(f"👋 {name} 进入直播间！")
-                            print(f"🖼️ 头像: {face}")
-                            print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                            logger.info(f"👋 {name} 进入直播间！")
+                            logger.info(f"🖼️ 头像: {face}")
+                            logger.info(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
                     elif msg['msg_type'] == 'interactive_danmaku': # 这个分支没用！
                         msg["msg_type"] = "danmaku"

@@ -32,12 +32,13 @@ async def main():
     # url = "https://www.douyu.com/5669195" # 亚瑟王
     # url = "https://live.douyu.com/96291" #东北大鹌鹑
     # url="https://live.bilibili.com/24486091"#月亮3
-    url="https://live.douyin.com/457744421791"
+    url="https://live.douyin.com/zcw199608" # zwc
     dm_queue = asyncio.Queue()
+    douyin_dm_cookies=R"D:\DanmakuRender\.login_info\douyin_cookies.json"
 
     # 实例化客户端
     # client = DanmakuClient(url, dm_queue,bilibili_dm_cookie_path='.login_info/bili_watch_cookies.json')
-    client = DanmakuClient(url, dm_queue)
+    client = DanmakuClient(url, dm_queue,douyin_dm_cookies=douyin_dm_cookies)
 
     print(f"[*] 正在初始化并连接至: {url}")
 
@@ -66,18 +67,20 @@ async def main():
                 uname = dm.uname
                 content = dm.content
                 color=dm.color
-                if "巧丽" in uname or "学会自己爬" in uname or "有点抽象" in uname:
-                    print(f"【弹幕】【{uname}】{content}")
-                    print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                print(f"[danmu]{content}")
+                # if "巧丽" in uname or "学会自己爬" in uname or "有点抽象" in uname:
+                #     print(f"【弹幕】【{uname}】{content}")
+                #     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
             elif dm.dtype == 'gift':
                 # pass
                 uname=dm.uname
                 text=dm.text
                 color=dm.color
-                if "巧丽" in uname or "学会自己爬" in uname or "有点抽象" in uname:
-                    print(f"{YELLOW}【礼物】【{uname}】{RESET}{text}")
-                    print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                print(f"{BLUE}[gift]{RESET}{text}")
+                # if "巧丽" in uname or "学会自己爬" in uname or "有点抽象" in uname:
+                #     print(f"{YELLOW}【礼物】【{uname}】{RESET}{text}")
+                #     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
             elif dm.dtype == 'member':
                 text=dm.text

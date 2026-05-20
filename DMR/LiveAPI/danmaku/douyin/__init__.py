@@ -37,6 +37,7 @@ class Douyin:
 
     def __init__(self, douyin_dm_cookies:str=None) -> None:
         if not douyin_dm_cookies:
+            logger.info(f"[*] 正在使用 游客身份 获取抖音弹幕")
             self.headers = douyin_utils.get_headers()
         else:
             try:
@@ -46,6 +47,7 @@ class Douyin:
                 else:
                     cookies = cookiestr2dict(douyin_dm_cookies)
                 self.headers = douyin_utils.get_headers(extra_cookies=cookies)
+                logger.info(f"[*] 正在使用 {douyin_dm_cookies} 的cookies获取抖音弹幕")
             except Exception as e:
                 logger.exception(f'解析抖音cookies错误: {e}, 使用默认cookies.')
                 self.headers = douyin_utils.get_headers()

@@ -623,6 +623,7 @@ class BiliWebApi:
         try:
             r = self._session.get(url, timeout=5).json()
             if r['code'] == 0:
+                # logger.info(f'get_remote_data {bvid} data: {r["data"]}')
                 data = r['data']
                 info = data['archive']
                 video_data = Data(
@@ -633,7 +634,7 @@ class BiliWebApi:
                     cover=info['cover'],
                     title=info['title'],
                     desc=info['desc'],
-                    desc_v2=info['desc_v2'],
+                    # desc_v2=info['desc_v2'], # 这里会导致简介过长
                     dynamic=info['dynamic'],
                     tag=info['tag'],
                     dtime=info['dtime'],
@@ -676,6 +677,7 @@ class BiliWebApi:
             logger.warning('稿件被锁定或已经删除, 即将提交新稿件')
             raise
         else:
+            logger.warning(f'submit failed {ret}: post_data={post_data}')
             raise Exception(ret)
 
     def submit_web(self, post_data, edit=False):
