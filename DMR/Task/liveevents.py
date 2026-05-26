@@ -373,11 +373,20 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             names_str = ",".join(names_list)
 
             # 3. 存储到 live_status
-            self.live_status[group_id]["gift_stat"] = {
+            gift_stat_data = {
                 "total_revenue": raw_stat.get("total_revenue", 0),
                 "total_gifters": raw_stat.get("total_gifters", 0),
                 "top_ranking": names_str  # 结果示例: "悲伤小猫馄饨(20.7)，似冬(10.8)，放飞气球树(5.7)"
             }
+            self.live_status[group_id]["gift_stat"] = gift_stat_data
+
+            # 4. 回写到 state_dict 中已有的 VideoInfo，否则非 merge 路径上传时字段永远是空字符串
+            for video_state in self.state_dict.get(group_id, []):
+                for info in video_state.values():
+                    if info.get('file'):
+                        info['file'].total_revenue = gift_stat_data["total_revenue"]
+                        info['file'].total_gifters = gift_stat_data["total_gifters"]
+                        info['file'].top_ranking   = gift_stat_data["top_ranking"]
 
         # --- 第三步：触发合并、上传 ---
         self.check_for_merge(group_id)
@@ -435,6 +444,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         video_file.path,
                         output_dir=str(self.src_path),
                         sample_count=ca.get('sample_count', 10),
+                        ratio=ca.get("ratio","16/9"),
                     )
                 except Exception as e:
                     self.logger.warning(f'封面自动提取失败: {e}')
@@ -701,11 +711,11 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
         need_add_to_list = config.get("add_to_list",False)
         account          = config.get('account',None)
-        sectionId        = config.get('sectionId',None)
+        season_id        = config.get('season_id',None)
 
         if need_add_to_list:
             try:
-                add_to_list(bvid,sectionId,account)
+                add_to_list(bvid,season_id,account)
             except Exception as e:
                 self.logger.error(e)
 

@@ -5,6 +5,8 @@ from fastapi.responses import PlainTextResponse
 from fastapi import HTTPException
 from typing import Union
 import os
+import requests
+import json
 # uvicorn api:app --reload --host 0.0.0.0 --port 8000
 # uvicorn api:app --host 0.0.0.0 --port 8000
 
@@ -19,12 +21,12 @@ def ping():
     return {"pong": True}
 
 class SyncReq(BaseModel):
-    account:int
-    sectionId: Union[int, str]
+    account:str
+    season_id:int
 
 @app.post("/synctitle")
 def syn_title(req: SyncReq):
-    result = sync_section_episode_titles(req.account, req.sectionId)
+    result = sync_section_episode_titles(req.account, req.season_id)
     lines: list[str] = []
 
     # 顶部 message（比如“本次检测到 xx 个分P 标题不一致”之类）
@@ -105,3 +107,61 @@ def create_offline_file():
         # 打印具体的错误到后台日志，方便你调试
         print(f"创建文件失败，原因: {e}")
         return PlainTextResponse("创建错误")
+
+@app.get("/seasons", response_class=PlainTextResponse)
+def get_seasons():
+    """
+    account: cookie 文件名，如 b站_不可一世冷狗
+    """
+    cookie_path = f".login_info/b站_不可一世冷狗.json"
+
+    if not os.path.exists(cookie_path):
+        raise HTTPException(status_code=404, detail=f"找不到 cookie 文件：{cookie_path}")
+
+    season_list = get_season_list(cookie_path)
+
+    lines = [f"{s['id']} - {s['title']}" for s in season_list]
+    return "\n".join(lines)
+
+def get_season_list(cookie_path: str) -> list[dict]:
+    with open(cookie_path, "r", encoding="utf-8") as f:
+        login_info = json.load(f)
+
+    cookies = {
+        item["name"]: item["value"]
+        for item in login_info["cookie_info"]["cookies"]
+    }
+
+    url = "https://member.bilibili.com/x2/creative/web/seasons"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://member.bilibili.com/",
+    }
+
+    season_list = []
+    pn = 1
+
+    while True:
+        params = {"pn": pn, "ps": 30, "order": "", "sort": "", "draft": 1, "source": 0}
+        resp = requests.get(url, params=params, headers=headers, cookies=cookies)
+        resp.raise_for_status()
+        data = resp.json()
+
+        seasons = data["data"]["seasons"]
+        if not seasons:
+            break
+
+        for item in seasons:
+            season_list.append({
+                "id": item["season"]["id"],
+                "title": item["season"]["title"]
+            })
+
+        if len(season_list) >= data["data"]["total"]:
+            break
+        pn += 1
+
+    return season_list
+

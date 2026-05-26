@@ -278,7 +278,19 @@ def build_headers():
     "User-Agent": "Mozilla/5.0"
     }
 
-def add_to_list(bvid,sectionId,account):
+def get_section_id_from_season(account, season_id: int) -> int:
+    """从 seasonId 获取第一个 sectionId"""
+    cookies = get_cookies(account)
+    headers = build_headers()
+    url = f'https://member.bilibili.com/x2/creative/web/season?id={season_id}'
+    r = requests.get(url, headers=headers, cookies=cookies, timeout=5)
+    j = r.json()
+    if j.get('code') != 0:
+        raise RuntimeError(f'获取season信息失败: {j}')
+    return j['data']['sections']['sections'][0]['id']
+
+def add_to_list(bvid,season_id,account):
+    sectionId=get_section_id_from_season(season_id=season_id,account=account)
     cookies=get_cookies(account)
     headers = build_headers()
     info=get_info(bvid,account)
@@ -497,14 +509,15 @@ def reorder_section_once(section_id: int, account: int, mode: str = "first_to_la
     return rj
 
 def sync_section_episode_titles(
-    account: int,
-    section_id: int,
+    account: str,
+    season_id: int,
 ) -> dict:
     """
     返回一个字典，里面包含：
     - changed: 修改成功的分P列表
     - errors: 修改失败的分P列表及错误
     """
+    section_id=get_section_id_from_season(account=account,season_id=season_id)
     def _fetch_section_data(sec_id: int) -> dict:
         time.sleep(3)
         r = requests.get(

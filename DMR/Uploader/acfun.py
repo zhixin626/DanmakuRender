@@ -74,7 +74,14 @@ def _crop_face_center(frame, faces, ratio: float = 1.6):
     return frame[y1:y2, x1:x2]
 
 
-def extract_best_frame(video_path: str, output_dir: str = None, sample_count: int = 10, ratio: float = 1.6) -> str:
+def extract_best_frame(video_path: str, output_dir: str = None, sample_count: int = 10, ratio = '16/9') -> str:
+    # 解析 ratio，支持 "16/9" 或 1.778 两种写法
+    if isinstance(ratio, str) and '/' in ratio:
+        a, b = ratio.split('/')
+        ratio = float(a) / float(b)
+    else:
+        ratio = float(ratio)
+
     if not _HAS_CV2:
         raise RuntimeError('cv2 未安装，无法自动提取封面')
 
@@ -413,7 +420,7 @@ class _AcFunClient:
 
             self.complete(fragment_count, token)
             video_id = self.create_video(task_id, file_name)
-            video_infos.append({'videoId': video_id, 'title': f'P{idx+1}'})
+            video_infos.append({'videoId': video_id, 'title': Path(file_path).stem})
             logger.info(f'[P{idx+1}] 上传完成，videoId={video_id}')
 
         cover_url = self.upload_cover(cover)

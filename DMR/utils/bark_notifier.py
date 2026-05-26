@@ -17,8 +17,8 @@ _VALID_SOUNDS = {"birdsong", "glass","healthnotification", "silence"}
 
 
 def _send_bark(bark_key, title, content, face_url=None, platform=None, sound="slience"):
-    encoded_title = quote(title)
-    encoded_body  = quote(content)
+    encoded_title = quote(title, safe='')
+    encoded_body  = quote(content, safe='')
 
     if platform == "douyu":
         jump_url = "douyutv://"
