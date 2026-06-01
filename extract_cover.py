@@ -34,14 +34,15 @@ def main():
             break
         print(f'文件不存在: {video_path}，请重新输入\n')
 
-    ratio_input = input('裁剪比例 width/height（默认 1.6，支持如 16/9 或 1.78）: ').strip()
+    ratio_input = input('裁剪比例 width/height（默认 16/9，支持如 16/9 或 1.78）: ').strip()
     try:
-        ratio = parse_ratio(ratio_input) if ratio_input else 1.6
+        ratio = parse_ratio(ratio_input) if ratio_input else 16/9
+        # ratio = parse_ratio(ratio_input) if ratio_input else 1.6
         if ratio <= 0:
             raise ValueError('比例必须大于0')
     except Exception as e:
-        print(f'比例输入有误 ({e})，使用默认值 1.6')
-        ratio = 1.6
+        print(f'比例输入有误 ({e})，使用默认值 1.78(16/9)')
+        ratio = 1.78
 
     output_dir = os.path.dirname(os.path.abspath(video_path))
 

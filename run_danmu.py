@@ -32,9 +32,10 @@ async def main():
     # url = "https://www.douyu.com/5669195" # 亚瑟王
     # url = "https://live.douyu.com/96291" #东北大鹌鹑
     # url="https://live.bilibili.com/24486091"#月亮3
-    url="https://live.douyin.com/zcw199608" # zwc
+    # url="https://live.douyin.com/zcw199608" # zwc
+    url="https://live.bilibili.com/22230707" # zwc
     dm_queue = asyncio.Queue()
-    douyin_dm_cookies=R"D:\DanmakuRender\.login_info\douyin_cookies.json"
+    douyin_dm_cookies=R"D:\DanmakuRender\.login_info\b站_线代不抽象.json"
 
     # 实例化客户端
     # client = DanmakuClient(url, dm_queue,bilibili_dm_cookie_path='.login_info/bili_watch_cookies.json')
@@ -86,6 +87,15 @@ async def main():
                 text=dm.text
                 print(f"{RED}【会员】{RESET}{text}")
 
+            elif dm.dtype == 'superchat':
+                name=dm.uname
+                price=dm.price
+                price_unit=dm.price_unit
+                duration=dm.duration
+                content=dm.content
+                color=dm.color
+                print(f"{RED}【superchat】{RESET}{name} {price} {price_unit} {duration} {content} {color}")
+                print(dm["raw"])
 
 
 
