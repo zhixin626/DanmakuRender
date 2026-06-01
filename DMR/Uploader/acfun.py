@@ -37,6 +37,8 @@ def _save_image(frame, path: str, quality: int = 97) -> bool:
 
 def _crop_face_center(frame, faces, ratio: float = 1.6):
     h, w = frame.shape[:2]
+    logger.debug(f"[crop] 原始帧尺寸: w={w}, h={h}, ratio={ratio}")
+    logger.debug(f"[crop] 检测到人脸数: {len(faces)}, faces={faces}")
 
     # 竖向以宽为基底，横向以高为基底
     if h > w:
@@ -46,19 +48,25 @@ def _crop_face_center(frame, faces, ratio: float = 1.6):
         crop_h = h
         crop_w = min(int(h * ratio), w)
 
+    logger.debug(f"[crop] 目标裁剪尺寸: crop_w={crop_w}, crop_h={crop_h}")
+
     # 裁剪中心：有人脸取人脸中心，否则取画面中心
     if len(faces) > 0:
         fx, fy, fw, fh = faces[0]
         center_x = fx + fw // 2
         center_y = fy + fh // 2
+        logger.debug(f"[crop] 人脸框: fx={fx}, fy={fy}, fw={fw}, fh={fh}")
+        logger.debug(f"[crop] 人脸中心: center_x={center_x}, center_y={center_y}")
     else:
         center_x = w // 2
         center_y = h // 2
+        logger.debug(f"[crop] 无人脸，使用画面中心: center_x={center_x}, center_y={center_y}")
 
     x1 = center_x - crop_w // 2
     y1 = center_y - crop_h // 2
     x2 = x1 + crop_w
     y2 = y1 + crop_h
+    logger.debug(f"[crop] 裁剪框（平移前）: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
 
     # 平移裁剪框使其不超出边界
     if x1 < 0:
@@ -71,6 +79,8 @@ def _crop_face_center(frame, faces, ratio: float = 1.6):
         y1 -= y2 - h; y2 = h
 
     x1, y1 = max(x1, 0), max(y1, 0)
+    logger.debug(f"[crop] 裁剪框（平移后）: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
+    logger.debug(f"[crop] 最终裁剪尺寸: w={x2-x1}, h={y2-y1}, 宽高比={(x2-x1)/(y2-y1):.3f}")
     return frame[y1:y2, x1:x2]
 
 
@@ -158,8 +168,10 @@ def extract_best_frame(video_path: str, output_dir: str = None, sample_count: in
 
     if open_frames:
         best = max(open_frames, key=lambda x: x['score'])
+        logger.debug(f"[extract] 选用睁眼帧: index={best['index']}, score={best['score']:.2f}, faces={best['faces']}")
     elif all_frames:
         best = max(all_frames, key=lambda x: x['score'])
+        logger.debug(f"[extract] 无睁眼帧，选最高分帧: index={best['index']}, score={best['score']:.2f}, faces={best['faces']}")
     else:
         cap2 = cv2.VideoCapture(video_path)
         cap2.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -170,6 +182,7 @@ def extract_best_frame(video_path: str, output_dir: str = None, sample_count: in
         if display_w != fw_img:
             frame = cv2.resize(frame, (display_w, fh_img))
         best = {'frame': frame, 'score': 0, 'index': 0, 'faces': []}
+        logger.debug(f"[extract] 所有帧都被跳过，使用第0帧兜底")
 
     final = _crop_face_center(best['frame'], best['faces'], ratio=ratio)
     final_path = os.path.join(output_dir, 'extracted_frame.jpg')

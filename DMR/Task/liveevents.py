@@ -388,6 +388,19 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         info['file'].total_gifters = gift_stat_data["total_gifters"]
                         info['file'].top_ranking   = gift_stat_data["top_ranking"]
 
+        # --- 回填开播/下播/总时长到所有分段 VideoInfo ---
+        try:
+            stime, etime = read_last_complete_session(self.src_path)
+            totaltime = format_duration(stime, etime)
+            for video_state in self.state_dict.get(group_id, []):
+                for info in video_state.values():
+                    if info.get('file'):
+                        info['file'].stime     = stime
+                        info['file'].etime     = etime
+                        info['file'].totaltime = totaltime
+        except Exception as e:
+            self.logger.warning(f"回填时间信息失败: {e}")
+
         # --- 第三步：触发合并、上传 ---
         self.check_for_merge(group_id)
 
@@ -442,7 +455,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                     from DMR.Uploader.acfun import extract_best_frame
                     arg['cover'] = extract_best_frame(
                         video_file.path,
-                        output_dir=str(self.src_path),
+                        output_dir=str(Path(video_file.path).parent),
                         sample_count=ca.get('sample_count', 10),
                         ratio=ca.get("ratio","16/9"),
                     )
