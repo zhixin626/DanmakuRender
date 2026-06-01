@@ -53,6 +53,7 @@ class AssWriter():
         self._super_chat_tails = []  # 初始化 _super_chat_tails 属性
         self._super_chat_state = 0
         self._latest_end_time = 0
+        self._latest_y = 100  # 新增，记录下一条SC的y坐标
         self._ntracks = int(((self.height - self.dst) * self.dmrate) / (self.fontsize + self.margin_h))
 
         self.meta_info = [
@@ -170,50 +171,95 @@ class AssWriter():
         return True
 
     def add_super_chat(self, super_chat: SuperChatDanmaku):
+        """
+        写入一条 SuperChat。
+        同时写两部分：
+          1. SC_DATA 注释行 —— 存储原始结构化数据，供后处理的 SCConverter 解析
+          2. 预览用 ASS 行  —— 简单静态堆叠，供直播结束前实时预览用
+        """
         with self._lock:
             if not self._filename:
                 raise RuntimeError("ASS file is not open.")
 
-            # 格式化超级弹幕内容
-            content_lines = []
-            for i in range(0, len(super_chat.content), 15):
-                content_lines.append(super_chat.content[i:i + 15])
-            formatted_content = '\\N'.join(content_lines)
+            # ========== 预览参数（与 SCConverter 保持一致）==========
+            fontsize       = 30
+            sc_duration    = 60
+            box_width      = 360
+            box_top_height = 40
+            line_height    = fontsize + 8
+            padding_v      = 10
+            corner_radius  = 40
+            margin_left    = 10
+            text_padding   = 6
+            buff           = 10
+            base_y         = 100
+            top_opacity    = 0.7
+            bottom_opacity = 0.1
+            # ==========================================================
 
-            # 计算当前超级弹幕数量和更新最晚结束时间
+            content = super_chat.content or ''
+            content_lines = [content[i:i+15] for i in range(0, len(content), 15)] or ['']
+            formatted_content = '\\N'.join(content_lines)
+            n_lines = len(content_lines)
+            bh = n_lines * line_height + padding_v * 2  # 下框高度
+            th = box_top_height
+
+            # 预览用简单堆叠 y 坐标
             current_time = super_chat.time
             if current_time > self._latest_end_time:
-                self._super_chat_state = 0  # 重置状态
+                self._super_chat_state = 0
+                self._latest_y = base_y
             self._super_chat_state += 1
-            self._latest_end_time = current_time + 20  # 每个超级弹幕持续20秒
+            self._latest_end_time = current_time + sc_duration
+            y = self._latest_y
+            self._latest_y += th + bh + buff
+            if y + th + bh > self.height:
+                self._latest_y = base_y
+                y = base_y
+                self._latest_y += th + bh + buff
 
-            # 根据当前状态计算 y 坐标
-            base_y = 100
-            y_offset = 120
-            y = base_y + (self._super_chat_state - 1) * y_offset
+            t0 = '%02d:%02d:%05.2f' % sec2hms(current_time)
+            t1 = '%02d:%02d:%05.2f' % sec2hms(current_time + sc_duration)
+            sx   = -(box_width + margin_left)   # 滑入起始 x
+            tx0  = sx + text_padding
+            tx1  = margin_left + text_padding
+            toph = hex_opacity(top_opacity)
+            both = hex_opacity(bottom_opacity)
+            r    = corner_radius
+            w    = box_width
 
-            t0 = current_time
-            t1 = t0 + 20  # Super Chat 持续时间固定为20秒
+            # ---- 1. SC_DATA 注释行（结构化，供 SCConverter 解析）----
+            # 格式: ; SC_DATA|时间|用户名|价格|单位|内容|上框色|下框色|名字色|内容色
+            #        |sc时长|上框透明度|下框透明度|名字描边|名字描边色|内容描边|内容描边色
+            name_border_width   = 0         # 名字描边宽度（0=不描边）
+            name_border_color   = 'FFFFFF'  # 名字描边色（BGR十六进制）
+            content_border_width= 1         # 内容描边宽度（0=不描边）
+            content_border_color= '000000'  # 内容描边色（BGR十六进制）
+            sc_data_line = (
+                f'; SC_DATA|{current_time}|{super_chat.uname}|{super_chat.price}|'
+                f'{super_chat.price_unit}|{content}|{super_chat.background_color}|'
+                f'{super_chat.background_bottom_color}|{super_chat.name_color}|'
+                f'{super_chat.content_color}|{sc_duration}|{top_opacity}|{bottom_opacity}|'
+                f'{name_border_width}|{name_border_color}|{content_border_width}|{content_border_color}\n'
+            )
 
-            t0_display = '%02d:%02d:%05.2f' %sec2hms(t0)
-            t1_display = '%02d:%02d:%05.2f' %sec2hms(t1)
-
-            # 构建 ASS 格式的弹幕信息
-            dm_info = (
-                f'Dialogue: 0,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\fad(500,500)\\move(-250,{y},0,{y},0,500)\\c&HFF6600\\shad0\\p1}}m 0 0 l 250 0 l 250 81 l 0 81\n'
-                f'Dialogue: 0,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\fad(500,500)\\move(-250,{y + 40},0,{y + 40},0,500)\\shad0\\p1\\c&HCC0000}}m 0 0 l 250 0 l 250 80 l 0 80\n'
-                f'Dialogue: 1,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\fad(500,500)\\move(-244,{y + 5},6,{y + 5},0,500)\\c&HFFFFFF\\fs15\\b1\\q2}}{super_chat.uname}\n'
-                f'Dialogue: 1,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\fad(500,500)\\move(-244,{y + 20},6,{y + 20},0,500)\\c&HFFFFFF\\fs15\\q2}}SuperChat CNY {super_chat.price}\n'
-                f'Dialogue: 1,{t0_display},{t1_display},message_box,,0000,0000,0000,,'
-                f'{{\\fad(500,500)\\move(-244,{y + 40},6,{y + 40},0,500)\\c&HFFFFFF\\q2}}{formatted_content}\n'
+            # ---- 2. 预览用 ASS（静态堆叠，仅供实时预览）----
+            preview = (
+                f'Dialogue: 0,{t0},{t1},message_box,,0,0,0,,'
+                f'{{\\fad(500,500)\\move({sx},{y},{margin_left},{y},0,500)\\c&H{super_chat.background_color}\\1a&H{toph}&\\shad0\\p1}}'
+                f'm {r} 0 l {w-r} 0 b {w} 0 {w} 0 {w} {r} l {w} {th} l 0 {th} l 0 {r} b 0 0 0 0 {r} 0\n'
+                f'Dialogue: 0,{t0},{t1},message_box,,0,0,0,,'
+                f'{{\\fad(500,500)\\move({sx},{y+th},{margin_left},{y+th},0,500)\\c&H{super_chat.background_bottom_color}\\1a&H{both}&\\shad0\\p1}}'
+                f'm 0 0 l {w} 0 l {w} {bh-r} b {w} {bh} {w} {bh} {w-r} {bh} l {r} {bh} b 0 {bh} 0 {bh} 0 {bh-r} l 0 0\n'
+                f'Dialogue: 1,{t0},{t1},message_box,,0,0,0,,'
+                f'{{\\fad(500,500)\\move({tx0},{y+5},{tx1},{y+5},0,500)\\c&H{super_chat.name_color}\\fs{fontsize}\\b1\\bord0\\q2}}{super_chat.uname} ({super_chat.price}{super_chat.price_unit})\n'
+                f'Dialogue: 1,{t0},{t1},message_box,,0,0,0,,'
+                f'{{\\fad(500,500)\\move({tx0},{y+th+padding_v},{tx1},{y+th+padding_v},0,500)\\c&H{super_chat.content_color}\\fs{fontsize}\\b1\\bord1\\3c&H000000&\\q2}}{formatted_content}\n'
             )
 
             with open(self._filename, 'a', encoding='utf-8') as f:
-                f.write(dm_info)
+                f.write(sc_data_line)
+                f.write(preview)
 
             self._super_chat_tails.append(super_chat)
 

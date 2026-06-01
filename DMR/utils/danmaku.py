@@ -105,9 +105,13 @@ class SuperChatDanmaku(SimpleDanmaku):
     def __init__(
         self,
         price: float = 0.0,
-        price_unit: str = '',
+        price_unit: str = 'CNY',
         duration: int = 0,
         name: str = '',
+        background_color="FFF5ED", # 浅蓝（名字和价格的message box）
+        background_bottom_color="B2602A", # 深蓝（内容的message box）
+        name_color="000000",
+        content_color="FFFFFF", # 白色
         *args,
         **kwargs,
     ):
@@ -117,6 +121,10 @@ class SuperChatDanmaku(SimpleDanmaku):
         self.price_unit = price_unit
         self.duration = duration
         self.dtype = 'superchat'
+        self.background_color=background_color
+        self.background_bottom_color=background_bottom_color
+        self.name_color=name_color
+        self.content_color=content_color
 
 
 class EntryDanmaku(SimpleDanmaku):

@@ -267,9 +267,13 @@ class Bilibili(DMAPI):
 
                     elif msg["msg_type"] == "super_chat":  # 新增此部分
                         msg["name"] = j.get('data', {}).get('uinfo', {}).get('base', {}).get('name', '')
+                        msg["face_url"] = j.get('data', {}).get('uinfo', {}).get('base', {}).get('face', '')
                         msg["content"] = j.get('data', {}).get('message', '')
-                        msg["price"] = j.get('data', {}).get('price', 0)
-                        msg["color"] = j.get('data', {}).get('background_color', 'ffffff')
+                        msg["price"] = j.get('data', {}).get('price', 0)* 10 # 换算为电池
+                        # msg["background_color"] = j.get('data', {}).get('background_color', 'ffffff')
+                        # msg["background_bottom_color"] = j.get('data', {}).get('background_bottom_color', 'ffffff')
+                        msg["price_unit"]="电池"
+                        msg["raw"]=j
                         try:
                             msg['timestamp'] = j.get('data', {}).get('ts')
                         except:

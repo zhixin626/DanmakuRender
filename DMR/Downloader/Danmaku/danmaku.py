@@ -13,6 +13,8 @@ from DMR.utils import SimpleDanmaku, replace_keywords
 from DMR.utils.danmaku import GiftDanmaku
 from DMR.utils.gifts_utils import save_gift_to_jsonl
 from typing import Union
+from .sc_converter import SCConverter
+from send2trash import send2trash
 __all__ = ['DanmakuDownloader']
 
 class DanmakuDownloader():
@@ -133,6 +135,13 @@ class DanmakuDownloader():
                 os.rename(old_dm_file, filename)
             except Exception as e:
                 self.logger.error(f'弹幕 {old_dm_file} 分段失败: {e}.')
+                filename = None
+
+        # 只有启用了 superchat 录制才做 SC 动态转换
+        if filename:
+            dm_type = self.dm_filter.get('dm_type') or ''
+            if 'superchat' in dm_type:
+                self._convert_sc_dynamic(filename)
 
     def dm_available(self, dm:SimpleDanmaku) -> bool:
 
@@ -305,3 +314,23 @@ class DanmakuDownloader():
             except Exception as e:
                 self.logger.debug(e)
         return True
+
+    def _convert_sc_dynamic(self, ass_file: str):
+        """
+        将 ASS 文件中的 SC 预览行替换为动态动画版本。
+        流程：先转换到临时文件 → 原文件移入回收站 → 临时文件重命名为原文件名。
+        转换失败时临时文件会被清理，原文件保持不变。
+        """
+        tmp = ass_file + '.tmp'
+        try:
+            sc_count = SCConverter(
+                screen_width=self.dmwriter.width,
+                screen_height=self.dmwriter.height,
+            ).convert(ass_file, tmp)
+            send2trash(ass_file)         # 原文件移入回收站（可还原）
+            os.rename(tmp, ass_file)     # 临时文件改回原名
+            self.logger.info(f'SC动态转换完成：{ass_file}（共{sc_count}条）')
+        except Exception as e:
+            self.logger.warning(f'SC动态转换失败，跳过：{e}')
+            if os.path.exists(tmp):
+                os.remove(tmp)           # 清理残留临时文件
