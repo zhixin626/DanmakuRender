@@ -117,9 +117,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             segment_id=self.segment_id,
             size=os.path.getsize(filename),
             ctime=self.segment_start_time,
-            stime=self.live_start_time if hasattr(self,"live_start_time") else datetime.now(),    #<<<<<添加！！---------------------------
-            etime=self.live_end_time if hasattr(self,"live_end_time") else datetime.now(),    #<<<<<添加！！---------------------------
-            totaltime=format_duration(self.live_start_time,self.live_end_time) if hasattr(self,"live_end_time") and hasattr(self,"live_start_time") else "0",
             duration=duration,
             resolution=(self.width, self.height),
             title=self.room_info['title'],
@@ -471,7 +468,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             # --------- LIVE_END / REPLAY_END ----------
             if state == StreamState.LIVE_END:
                 self.logger.info(f"{self.taskname_disp}⌛下播,本轮录制结束")
-                self.live_end_time = datetime.now()
                 write_time_to_txt("end")
                 stop_waited = 0
                 live_truely_end = False
@@ -500,6 +496,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                         )
                     else:
                         gift_stat=None
+
                     self._pipeSend('liveend', '直播真的结束了', data=self.sess_id, gift_stat= gift_stat)
 
                     self.sess_id = uuid(8)
@@ -512,7 +509,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 if live_truely_end:
                     self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id,url=self.url)
                     self.logger.info(f"{self.taskname_disp}🔔直播开始")
-                    self.live_start_time = datetime.now()
                     write_time_to_txt("start")
                 else:
                     self.logger.info(f"{self.taskname_disp}🔄再次开播,重启录制")
