@@ -38,6 +38,43 @@
 </div>
 
 <div class="card">
+    <h2>已渲染成功的视频</h2>
+    <div id="completed-renders">
+        {% if completed_renders %}
+        <table>
+            <thead>
+                <tr>
+                    <th>视频</th>
+                    <th>输出</th>
+                    <th>模式</th>
+                    <th>完成时间</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for task in completed_renders %}
+                <tr>
+                    <td>{{ task.video }}</td>
+                    <td>{{ task.output }}</td>
+                    <td>{{ task.mode }}</td>
+                    <td>{{ task.time }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>暂无已渲染成功的视频。</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <h2>已合并的视频</h2>
+    <div id="completed-merges">
+        <p>暂无已合并的视频。</p>
+    </div>
+</div>
+
+<div class="card">
     <h2>渲染失败任务</h2>
     <div id="failed-renders">
         {% if failed_renders %}
@@ -80,6 +117,7 @@
                     <th>文件</th>
                     <th>上传至</th>
                     <th>进度/信息</th>
+                    <th>操作</th>
                 </tr>
             </thead>
             <tbody>
@@ -99,6 +137,9 @@
                         {% else %}
                             上传中...
                         {% endif %}
+                    </td>
+                    <td>
+                        <button onclick="stopUploadTask('{{ task.uuid }}')" style="background-color: #dc3545;">停止</button>
                     </td>
                 </tr>
                 {% endfor %}
@@ -145,6 +186,34 @@
     </div>
 </div>
 
+<div class="card">
+    <h2>待清理任务</h2>
+    <div id="pending-clean-tasks">
+        {% if pending_clean_tasks %}
+        <table>
+            <thead>
+                <tr>
+                    <th>文件</th>
+                    <th>操作</th>
+                    <th>剩余时间</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for task in pending_clean_tasks %}
+                <tr>
+                    <td>{% for f in task.files %}<div>{{ f }}</div>{% endfor %}</td>
+                    <td>{{ task.method }}</td>
+                    <td class="remaining-time" data-execute-at="{{ task.execute_at }}" style="color:#888;font-size:0.85em;"></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>没有待清理的任务。</p>
+        {% endif %}
+    </div>
+</div>
+
 <script>
     function retryTask(uuid) {
         if (!confirm('确定要重试此任务吗？')) return;
@@ -170,6 +239,20 @@
                     refreshTasks();
                 } else {
                     alert('删除失败: ' + data.message);
+                }
+            })
+            .catch(error => console.error('Error:', error));
+    }
+
+    function stopUploadTask(uuid) {
+        if (!confirm('确定要停止此上传任务吗？正在上传的进度将丢失。')) return;
+        fetch(`/api/upload_tasks/${uuid}/stop`, { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    refreshTasks();
+                } else {
+                    alert('停止失败: ' + data.message);
                 }
             })
             .catch(error => console.error('Error:', error));
@@ -204,6 +287,30 @@
             .catch(error => console.error('Error:', error));
     }
 
+    function escHtml(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // 把完整路径渲染成 “文件夹\文件名”，文件夹点击打开目录、文件名点击用默认播放器打开
+    // exists 传 false（文件已被删，如合并后）时，文件名加删除线
+    function pathCell(full, exists) {
+        if (!full) return '-';
+        var norm = full.replace(/\//g, '\\');
+        var idx = norm.lastIndexOf('\\');
+        var fileName = idx >= 0 ? norm.slice(idx + 1) : norm;
+        var folderFull = idx >= 0 ? full.slice(0, idx) : full;
+        var parentPart = idx >= 0 ? norm.slice(0, idx) : '';
+        var pidx = parentPart.lastIndexOf('\\');
+        var folderName = pidx >= 0 ? parentPart.slice(pidx + 1) : parentPart;
+        var gone = (exists === false);
+        var fileStyle = gone ? 'color:#c00;text-decoration:line-through;' : 'color:#7fd1ff;text-decoration:none;';
+        var fileTitle = gone ? '文件已不存在（可能已被合并/清理删除）' : '用默认播放器打开';
+        var folderLink = '<a href="javascript:void(0)" title="打开文件夹" onclick=\'openPath(' + JSON.stringify(folderFull) + ',"folder")\' style="color:#4ea1ff;text-decoration:none;">' + escHtml(folderName || folderFull) + '</a>';
+        var fileLink = '<a href="javascript:void(0)" title="' + fileTitle + '" onclick=\'openPath(' + JSON.stringify(full) + ',"file")\' style="' + fileStyle + '">' + escHtml(fileName) + '</a>';
+        return folderLink + '\\' + fileLink;
+    }
+
     function refreshTasks() {
         // Capture open states of details elements before refreshing
         const openDetails = new Set();
@@ -228,8 +335,8 @@
                             statusHtml = '渲染中...';
                         }
                         html += `<tr>
-                            <td>${task.video}</td>
-                            <td>${task.output}</td>
+                            <td>${pathCell(task.video_path)}</td>
+                            <td>${pathCell(task.output_path)}</td>
                             <td>${task.mode}</td>
                             <td>${statusHtml}</td>
                         </tr>`;
@@ -240,14 +347,55 @@
                     renderDiv.innerHTML = '<p>当前没有正在渲染的任务。</p>';
                 }
 
+                // Refresh Completed Renders
+                const completedRenderDiv = document.getElementById('completed-renders');
+                if (completedRenderDiv) {
+                    if (data.completed_renders && data.completed_renders.length > 0) {
+                        let html = '<table><thead><tr><th>视频</th><th>输出</th><th>模式</th><th>完成时间</th></tr></thead><tbody>';
+                        data.completed_renders.forEach(task => {
+                            html += `<tr>
+                                <td>${pathCell(task.video_path, task.video_exists)}</td>
+                                <td>${pathCell(task.output_path, task.output_exists)}</td>
+                                <td>${task.mode}</td>
+                                <td>${task.time}</td>
+                            </tr>`;
+                        });
+                        html += '</tbody></table>';
+                        completedRenderDiv.innerHTML = html;
+                    } else {
+                        completedRenderDiv.innerHTML = '<p>暂无已渲染成功的视频。</p>';
+                    }
+                }
+
+                // Refresh Completed Merges（已合并的视频）
+                const completedMergeDiv = document.getElementById('completed-merges');
+                if (completedMergeDiv) {
+                    if (data.completed_merges && data.completed_merges.length > 0) {
+                        let html = '<table><thead><tr><th>合并文件</th><th>任务</th><th>类型</th><th>段数</th><th>完成时间</th></tr></thead><tbody>';
+                        data.completed_merges.forEach(m => {
+                            html += `<tr>
+                                <td>${pathCell(m.output_path, m.output_exists)}</td>
+                                <td>${escHtml(m.task)}</td>
+                                <td>${escHtml(m.type)}</td>
+                                <td>${m.segments}</td>
+                                <td>${escHtml(m.time)}</td>
+                            </tr>`;
+                        });
+                        html += '</tbody></table>';
+                        completedMergeDiv.innerHTML = html;
+                    } else {
+                        completedMergeDiv.innerHTML = '<p>暂无已合并的视频。</p>';
+                    }
+                }
+
                 // Refresh Failed Renders
                 const failedRenderDiv = document.getElementById('failed-renders');
                 if (data.failed_renders && data.failed_renders.length > 0) {
                     let html = '<table><thead><tr><th>视频</th><th>输出</th><th>模式</th><th>操作</th></tr></thead><tbody>';
                     data.failed_renders.forEach(task => {
                         html += `<tr>
-                            <td>${task.video}</td>
-                            <td>${task.output}</td>
+                            <td>${pathCell(task.video_path)}</td>
+                            <td>${pathCell(task.output_path)}</td>
                             <td>${task.mode}</td>
                             <td>
                                 <button onclick="retryRenderTask('${task.uuid}')">重试</button>
@@ -264,7 +412,7 @@
                 // Refresh Upload Tasks
                 const uploadDiv = document.getElementById('upload-tasks');
                 if (data.upload_tasks.length > 0) {
-                    let html = '<table><thead><tr><th>文件</th><th>上传至</th><th>进度/信息</th></tr></thead><tbody>';
+                    let html = '<table><thead><tr><th>文件</th><th>上传至</th><th>进度/信息</th><th>操作</th></tr></thead><tbody>';
                     data.upload_tasks.forEach(task => {
                         let filesHtml = '';
                         task.files.forEach(f => {
@@ -282,6 +430,7 @@
                             <td>${filesHtml}</td>
                             <td>${task.account} (${task.engine})</td>
                             <td>${infoHtml}</td>
+                            <td><button onclick="stopUploadTask('${task.uuid}')" style="background-color: #dc3545;">停止</button></td>
                         </tr>`;
                     });
                     html += '</tbody></table>';
@@ -313,11 +462,53 @@
                 } else {
                     failedDiv.innerHTML = '<p>没有失败的任务。</p>';
                 }
+                // Refresh Pending Cleanup Tasks
+                const pendingCleanDiv = document.getElementById('pending-clean-tasks');
+                if (pendingCleanDiv) {
+                    if (data.pending_clean_tasks && data.pending_clean_tasks.length > 0) {
+                        let html = '<table><thead><tr><th>文件</th><th>操作</th><th>剩余时间</th></tr></thead><tbody>';
+                        data.pending_clean_tasks.forEach(task => {
+                            const filesHtml = task.files.map(f => `<div>${f}</div>`).join('');
+                            html += `<tr>
+                                <td>${filesHtml}</td>
+                                <td>${task.method}</td>
+                                <td class="remaining-time" data-execute-at="${task.execute_at}" style="color:#888;font-size:0.85em;"></td>
+                            </tr>`;
+                        });
+                        html += '</tbody></table>';
+                        pendingCleanDiv.innerHTML = html;
+                    } else {
+                        pendingCleanDiv.innerHTML = '<p>没有待清理的任务。</p>';
+                    }
+                }
+                updateRemainingTimes();
+                if (window.updateNavBadges) updateNavBadges(data.notifications);
             })
             .catch(error => console.error('Error refreshing tasks:', error));
     }
 
-    // Refresh every 1 second
-    setInterval(refreshTasks, 1000);
+    function fmtRemaining(seconds) {
+        if (seconds <= 0) return '0秒';
+        const d = Math.floor(seconds / 86400);
+        const h = Math.floor((seconds % 86400) / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.floor(seconds % 60);
+        if (d) return `${d}天${h}小时${m}分钟`;
+        if (h) return `${h}小时${m}分钟${s}秒`;
+        if (m) return `${m}分钟${s}秒`;
+        return `${s}秒`;
+    }
+
+    function updateRemainingTimes() {
+        const now = Date.now() / 1000;
+        document.querySelectorAll('.remaining-time').forEach(el => {
+            const executeAt = parseFloat(el.dataset.executeAt);
+            el.textContent = fmtRemaining(executeAt - now);
+        });
+    }
+
+    // 倒计时（纯前端按绝对时间算，暂停不会算错）与任务刷新，均切到后台时暂停
+    startPolling(updateRemainingTimes, 1000);
+    startPolling(refreshTasks, 1000);
 </script>
 {% endblock %}

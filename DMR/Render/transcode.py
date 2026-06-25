@@ -67,6 +67,7 @@ class Transcoder(BaseRender):
             output,
         ]
 
+        self.logger.info(f'开始转码: {output}')
         return self.raw_ffmpeg.call_ffmpeg(ffmpeg_args)
 
     def render_one(self, video: VideoInfo, output: str, **kwargs):

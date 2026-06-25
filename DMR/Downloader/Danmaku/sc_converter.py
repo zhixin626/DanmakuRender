@@ -49,14 +49,16 @@ class SCConverter:
                  fontsize=30,
                  box_width=360,         # 矩形宽度
                  box_top_height=40,     # 上框高度
-                 padding_v=10,          # 下框上下内边距
+                 padding_v=9,           # 下框内容上边距
+                 padding_v_bottom=14,   # 下框内容下边距（圆角会让视觉上变小，故比上边距略大）
                  corner_radius=40,      # 圆角半径
                  margin_left=10,        # 矩形距屏幕左边距
                  text_padding=6,        # 文字内边距
                  buff=10,               # 相邻SC间距
-                 anchor_y_ratio=0.8,    # 新SC出现位置（屏幕高度比例）
+                 anchor_y_ratio=0.93,   # 新SC底边所在位置（屏幕高度比例）
                  push_duration_ms=300,  # push动画时长（毫秒）
                  slide_dur=0.5,         # 滑入/滑出时长（秒）
+                 wrap_width=15,         # 换行宽度（中文算1，英文/ASCII算0.5）
                  # sc_duration/opacity/border 均从 SC_DATA 逐条读取，不在此配置
                  ):
         self.screen_width    = screen_width
@@ -64,8 +66,9 @@ class SCConverter:
         self.fontsize        = fontsize
         self.box_width       = box_width
         self.box_top_height  = box_top_height
-        self.line_height     = fontsize + 8
+        self.line_height     = int(fontsize)
         self.padding_v       = padding_v
+        self.padding_v_bottom = padding_v_bottom
         self.corner_radius   = corner_radius
         self.margin_left     = margin_left
         self.text_padding    = text_padding
@@ -74,6 +77,7 @@ class SCConverter:
         self.push_dur_ms     = push_duration_ms
         self.push_dur_s      = push_duration_ms / 1000.0
         self.slide_dur       = slide_dur
+        self.wrap_width      = wrap_width
 
         # 派生坐标
         self.slide_x  = -(box_width + margin_left)      # 矩形左边缘在屏幕外的 x
@@ -201,10 +205,33 @@ class SCConverter:
     # 内部：位置计算
     # ------------------------------------------------------------------
 
+    def _wrap_lines(self, content):
+        """按显示宽度换行：中文等宽字符算1，英文/ASCII算0.5，每行不超过 wrap_width。"""
+        if not content:
+            return []
+        lines = []
+        cur = ''
+        cur_w = 0.0
+        for ch in content:
+            w = 0.5 if ord(ch) < 128 else 1.0
+            if cur and cur_w + w > self.wrap_width:
+                lines.append(cur)
+                cur, cur_w = ch, w
+            else:
+                cur += ch
+                cur_w += w
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def _wrap_content(self, content):
+        """返回用 \\N 连接的换行后内容（供 Dialogue 行使用）。"""
+        return '\\N'.join(self._wrap_lines(content)) if content else ''
+
     def _box_height(self, content):
         """计算一条SC的总高度（上框 + 下框，不含 buff）。"""
-        n_lines = max(1, len(content) // 15 + (1 if len(content) % 15 else 0)) if content else 1
-        bh = n_lines * self.line_height + self.padding_v * 2
+        n_lines = max(1, len(self._wrap_lines(content)))
+        bh = n_lines * self.line_height + self.padding_v + self.padding_v_bottom
         return self.box_top_height + bh, bh, n_lines
 
     def _compute_positions(self, sc_list):
@@ -214,51 +241,91 @@ class SCConverter:
 
         规则：
           - 同时出现的SC强制排队，间隔1秒
-          - 新SC出现在 anchor_y，旧SC从下往上重新计算理想位置
+          - 新SC的底边出现在 anchor_y，旧SC向上推
+          - 某SC过期时，剩余活跃SC向下落回正确位置
         """
         active = []
         result = []
         last_t0 = -9999.0
 
+        # 第一步：解析有效时间，构建到达事件和过期事件
+        # 事件格式：(时间, 类型, eff_t0, t1, sc, entry_ref)
+        # 类型：0=到达，1=过期（同一时刻到达优先于过期）
+        sc_events = []
         for sc in sc_list:
             raw_t0 = sc['time']
-
-            # 同时出现强制排队
             effective_t0 = max(raw_t0, last_t0 + 1.0) if raw_t0 <= last_t0 else raw_t0
             last_t0 = effective_t0
             t1 = effective_t0 + sc['sc_duration']
+            sc_events.append((effective_t0, t1, sc))
 
-            total_h, bh, n_lines = self._box_height(sc['content'])
+        events = []
+        for eff_t0, t1, sc in sc_events:
+            events.append((eff_t0, 0, eff_t0, t1, sc))  # 到达
+            events.append((t1,     1, eff_t0, t1, sc))  # 过期
+        events.sort(key=lambda e: (e[0], e[1]))
 
-            # 清除已过期的SC
-            active = [a for a in active if a['t1'] > effective_t0]
-
-            # 从下往上重新计算每个活跃SC的理想位置
-            avail = self.anchor_y - self.buff
+        # 辅助：向上推（新SC到达时调用）
+        # new_total_h: 新到达SC的总高度，用于计算其顶边位置（底边固定在 anchor_y）
+        def push_up(event_time, new_total_h):
+            avail = (self.anchor_y - new_total_h) - self.buff
             for a in sorted(active, key=lambda x: -x['current_y']):
-                ah      = a['total_h']   # 已缓存，避免重复计算
-                ideal_y = avail - ah
-                avail    = ideal_y - self.buff
+                ideal_y = avail - a['total_h']
+                avail   = ideal_y - self.buff
                 if ideal_y != a['current_y']:
-                    # 截断上一段（旧元素在 push 时刻消失）
                     last = a['segments'][-1]
-                    a['segments'][-1] = (last[0], effective_t0, last[2], last[3])
-                    # 新段：从当前位置移到理想位置
-                    a['segments'].append((effective_t0, a['t1'], a['current_y'], ideal_y))
+                    a['segments'][-1] = (last[0], event_time, last[2], last[3])
+                    a['segments'].append((event_time, a['t1'], a['current_y'], ideal_y))
                     a['current_y'] = ideal_y
 
-            entry = {
-                'sc'       : sc,
-                'total_h'  : total_h,   # 缓存高度，push时直接用
-                'bh'       : bh,
-                'n_lines'  : n_lines,
-                't0'       : effective_t0,
-                't1'       : t1,
-                'current_y': self.anchor_y,
-                'segments' : [(effective_t0, t1, self.anchor_y, self.anchor_y)],
-            }
-            active.append(entry)
-            result.append(entry)
+        # 辅助：向下落（某SC过期时调用）
+        # 最底部SC落到 ANCHOR_Y，上方SC依次贴紧排列
+        def fall_down(event_time):
+            scs = sorted(active, key=lambda x: -x['current_y'])
+            for i, a in enumerate(scs):
+                # 最底部SC的底边直接落到anchor_y，其余用avail减高度
+                ideal_y = (self.anchor_y - a['total_h']) if i == 0 else avail - a['total_h']
+                avail = ideal_y - self.buff
+                if ideal_y != a['current_y']:
+                    last = a['segments'][-1]
+                    a['segments'][-1] = (last[0], event_time, last[2], last[3])
+                    a['segments'].append((event_time, a['t1'], a['current_y'], ideal_y))
+                    a['current_y'] = ideal_y
+
+        # 第二步：按时间顺序处理事件
+        # 用 (eff_t0, t1) 作为 entry 的唯一标识
+        entry_key = {}
+
+        for event_time, event_type, eff_t0, t1, sc in events:
+            if event_type == 0:  # 到达
+                # 清除已过期（安全措施，正常情况下过期事件先处理）
+                active[:] = [a for a in active if a['t1'] > event_time]
+
+                total_h, bh, n_lines = self._box_height(sc['content'])
+                push_up(event_time, total_h)
+
+                # 新SC顶边位置：底边固定在 anchor_y，顶边 = anchor_y - total_h
+                entry_y = self.anchor_y - total_h
+                entry = {
+                    'sc'       : sc,
+                    'total_h'  : total_h,
+                    'bh'       : bh,
+                    'n_lines'  : n_lines,
+                    't0'       : eff_t0,
+                    't1'       : t1,
+                    'current_y': entry_y,
+                    'segments' : [(eff_t0, t1, entry_y, entry_y)],
+                }
+                active.append(entry)
+                result.append(entry)
+                entry_key[(eff_t0, t1)] = entry
+
+            else:  # 过期
+                # 从 active 中移除
+                active[:] = [a for a in active if not (a['t0'] == eff_t0 and a['t1'] == t1)]
+                # 剩余活跃SC向下落回正确位置
+                if active:
+                    fall_down(event_time)
 
         return result
 
@@ -340,9 +407,9 @@ class SCConverter:
         nb   = f'\\bord{sc["name_border_width"]}\\3c&H{sc["name_border_color"]}&'
         cb   = f'\\bord{sc["content_border_width"]}\\3c&H{sc["content_border_color"]}&'
 
-        # 格式化内容（每15字换行）
+        # 格式化内容（按显示宽度换行：中文1，英文0.5）
         content = sc['content']
-        fmt_content = '\\N'.join(content[i:i+15] for i in range(0, len(content), 15)) if content else ''
+        fmt_content = self._wrap_content(content)
 
         fad_map = {'entry': '\\fad(500,0)', 'push': '\\fad(0,0)',
                    'static': '\\fad(0,0)',  'exit': '\\fad(0,500)'}

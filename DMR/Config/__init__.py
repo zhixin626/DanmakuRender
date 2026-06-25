@@ -17,6 +17,8 @@ class Config():
         self.replay_config_path_raw = []
         self.replay_config_paths:List[str] = []
         self.file_hashes = {}
+        # 用户选择“推迟到重启”的文件：path -> 当时磁盘hash（删除则为 'DELETED'）
+        self.deferred = {}
         self.logger = logging.getLogger(__name__)
         
         self._init_config()
@@ -117,12 +119,95 @@ class Config():
                             clean_config.update(clean_arg)
                             replay_config['clean_args'][clean_file_types].append(clean_config)
 
+            # merge_args / bark_args：顶层独立配置块（全局默认 + 任务覆盖）
+            for key in ('merge_args', 'bark_args'):
+                global_default = self.global_config.get(key) or {}
+                task_value = _replay_config.get(key)
+                if global_default or task_value:
+                    merged = deepcopy(global_default)
+                    if task_value:
+                        merged = merge_dict(merged, task_value)
+                    replay_config[key] = merged
+
             self.replay_config[taskname] = deepcopy(replay_config)
             return taskname
         except Exception as e:
             self.logger.error(f"Error loading config {config_path}:")
             self.logger.exception(e)
             return None
+
+    def _current_task_files(self):
+        """当前磁盘上的任务配置文件集合（与 check_update 使用同一套 glob 规则）。"""
+        current_files = set()
+        for raw_path in self.replay_config_path_raw:
+            if os.path.isfile(raw_path):
+                current_files.add(raw_path)
+            elif os.path.isdir(raw_path):
+                for f in glob.glob(os.path.join(raw_path, 'DMR-**.yml')):
+                    current_files.add(f)
+        return current_files
+
+    def find_task_file(self, filename):
+        """按文件名（basename）在磁盘上找到对应的任务配置路径，找不到返回 None。"""
+        fname = os.path.basename(filename)
+        for f in self._current_task_files():
+            if os.path.basename(f) == fname:
+                return f
+        return None
+
+    def get_all_states(self):
+        """给网页用的完整状态：磁盘上所有任务文件 + 已加载但被删的文件。
+        status: None(已同步) / new(新增) / modified(已修改) / deleted(已删除) / deferred(已推迟到重启)。"""
+        result = []
+        current_files = self._current_task_files()
+        loaded_files = set(self.replay_config_paths)
+        for f in sorted(current_files):
+            h = self._get_file_hash(f)
+            if f not in loaded_files:
+                status = 'new'
+            elif h != self.file_hashes.get(f):
+                status = 'modified'
+            else:
+                status = None
+            # 命中“推迟到重启”且文件内容未再变化 → 标记 deferred（不再提醒）
+            if status in ('new', 'modified') and self.deferred.get(f) == h:
+                status = 'deferred'
+            result.append({'path': f, 'filename': os.path.basename(f),
+                           'taskname': filename_to_taskname(f),
+                           'status': status, 'exists': True})
+        for f in sorted(loaded_files - current_files):
+            status = 'deferred' if self.deferred.get(f) == 'DELETED' else 'deleted'
+            result.append({'path': f, 'filename': os.path.basename(f),
+                           'taskname': filename_to_taskname(f),
+                           'status': status, 'exists': False})
+        return result
+
+    def get_pending_changes(self):
+        """需要用户处理（未推迟）的改动列表，用于红点计数。"""
+        return [s for s in self.get_all_states()
+                if s['status'] in ('new', 'modified', 'deleted')]
+
+    def defer(self, filename):
+        """把某文件标记为“推迟到重启”：记录当前磁盘hash（删除则记 'DELETED'）。"""
+        fname = os.path.basename(filename)
+        disk_path = self.find_task_file(fname)
+        if disk_path is not None:
+            self.deferred[disk_path] = self._get_file_hash(disk_path)
+            return True
+        # 磁盘已删除：在已加载列表里找到原路径，记 DELETED
+        loaded_path = next((p for p in self.replay_config_paths
+                            if os.path.basename(p) == fname), None)
+        if loaded_path is not None:
+            self.deferred[loaded_path] = 'DELETED'
+            return True
+        return False
+
+    def undefer(self, filename):
+        """撤销“推迟到重启”，让该文件重新进入待应用提醒。"""
+        fname = os.path.basename(filename)
+        for p in [p for p in self.deferred if os.path.basename(p) == fname]:
+            self.deferred.pop(p, None)
+        return True
 
     def check_update(self):
         updated_tasks = []

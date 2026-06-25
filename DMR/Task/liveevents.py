@@ -1,12 +1,16 @@
 import logging
 import os
+import re
+from pathlib import Path
 
 from DMR.LiveAPI import LiveAPI
+from DMR.utils.bark_notifier import bark_notify_url
+from DMR.utils.extract_frame import extract_best_frame
+from DMR.utils.render_with_manimgl import rendercover_with_manimgl
 from .baseevents import BaseEvents
 from ..utils import *
 from ..utils.merge_mp4 import *
-from pathlib import Path
-from DMR.utils.bark_notifier  import bark_notify_url
+from ..utils.gifts_utils import generate_gift_statistics
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +18,8 @@ def get_bvid_history_file(src_path):
     """获取统一的 BVID 历史文件路径"""
     return Path(src_path) / "bvid_history.json"
 
-def read_monthly_bvids(src_path, stime, account=None):
-    """
-    根据 stime 读取该月份唯一的 BVID。
-    返回: str (BVID) 或 None
-    """
+def _make_period_key(stime, period):
+    """根据 period ('monthly'/'daily') 和 stime 生成 bvid_history.json 的 key。"""
     if isinstance(stime, datetime):
         dt = stime
     elif isinstance(stime, (int, float)):
@@ -26,36 +27,38 @@ def read_monthly_bvids(src_path, stime, account=None):
     else:
         dt = datetime.now()
 
-    month_key = f"{dt.year}-{dt.month:02d}"
+    if period == 'daily':
+        return f"{dt.year}-{dt.month:02d}-{dt.day:02d}"
+    else:  # monthly（默认）
+        return f"{dt.year}-{dt.month:02d}"
+
+def read_period_bvid(src_path, stime, period='monthly', account=None):
+    """
+    根据 stime 和 period 读取对应周期的 BVID。
+    返回: str (BVID) 或 None
+    """
+    key = _make_period_key(stime, period)
     if account:
-        month_key = f"{month_key}_{account}"
+        key = f"{key}_{account}"
     file_path = get_bvid_history_file(src_path)
 
     if file_path.exists():
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 full_history = json.load(f)
-                # 直接返回该月份对应的 BVID 字符串
-                return full_history.get(month_key)
+                return full_history.get(key)
         except Exception as e:
             print(f"读取 BVID 历史文件失败: {e}")
     return None
 
-def write_monthly_bvid(src_path, stime, bvid, account=None):
+def write_period_bvid(src_path, stime, bvid, period='monthly', account=None):
     """
     更新 BVID 到统一的 JSON 文件。
-    格式: {"2026-03": "bvid1", "2026-04": "bvid2"}
+    monthly 格式: {"2026-03": "bvid1"}，daily 格式: {"2026-03-05": "bvid1"}
     """
-    if isinstance(stime, datetime):
-        dt = stime
-    elif isinstance(stime, (int, float)):
-        dt = datetime.fromtimestamp(stime)
-    else:
-        dt = datetime.now()
-
-    month_key = f"{dt.year}-{dt.month:02d}"
+    key = _make_period_key(stime, period)
     if account:
-        month_key = f"{month_key}_{account}"
+        key = f"{key}_{account}"
     file_path = get_bvid_history_file(src_path)
 
     full_history = {}
@@ -66,8 +69,7 @@ def write_monthly_bvid(src_path, stime, bvid, account=None):
         except Exception:
             full_history = {}
 
-    # 每次上传结束都会更新该月份的 BVID（如果是追加模式，bvid 本身就不变）
-    full_history[month_key] = bvid
+    full_history[key] = bvid
 
     try:
         if not file_path.parent.exists():
@@ -77,12 +79,20 @@ def write_monthly_bvid(src_path, stime, bvid, account=None):
     except Exception as e:
         print(f"写入 BVID 历史文件失败: {e}")
 
+# 向后兼容旧函数名
+def read_monthly_bvids(src_path, stime, account=None):
+    return read_period_bvid(src_path, stime, period='monthly', account=account)
+
+def write_monthly_bvid(src_path, stime, bvid, account=None):
+    return write_period_bvid(src_path, stime, bvid, period='monthly', account=account)
+
 class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def __init__(self, name, config):
         super().__init__(name, config)
         self.state_dict = {}
         self.ended_dict = {}
         self.live_status= {} # zhixin新增
+        self.merged_videos = []  # 合并成功的视频记录（供 WebUI「已合并的视频」展示，最多保留最近若干条）
         self.logger = logging.getLogger(__name__)
 
     @property
@@ -112,71 +122,95 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def onLiveStart(self, message:PipeMessage):
         group_id = message.data
         self.live_status[group_id] = {
-            "rendered_cover_names": set(),
-            'is_live_end': False,
-            'gift_stat':{
-                    "total_revenue" : "未知",
-                    "total_gifters" : "未知",
-                    "top_ranking"   : "未知",
-                    }
+            "is_live_end"   : False,
+            # 会话级字段，由 _backfill_video_info 统一回填到所有 VideoInfo
+            "gifts_revenue" : "",
+            "num_of_gifters": "",
+            "sc_revenue"    : "",
+            "num_of_sc"     : "",
+            "member_revenue": "",
+            "member_info"   : "",
+            "total_revenue" : "",
+            "top_ranking"   : "",
+            "stime"         : None,
+            "etime"         : None,
+            "totaltime"     : "",
         }
         self.src_path        = Path(str(self.config['download_args']['output_dir']))
         self.dmvideo_path    = Path(str(self.config['download_args']['output_dir']) + '（弹幕版）')
         self.transcode_path  = Path(str(self.config['download_args']['output_dir']) + '（转码后）')
-        self.check_render_cover(group_id)
-        bark_args = self.config['common_event_args'].get("bark_args", {})
-        # 兼容旧配置：bark_notify: True 且无 bark_args 时按默认值处理
-        bark_enabled = bark_args.get("is_bark", self.config['common_event_args'].get("bark_notify", False))
-        if bark_enabled:
-            bark_sound = bark_args.get("sound", "birdsong")
-            bark_notify_url(message.url, sound=bark_sound)
+        self.bark_notify(message.url)
 
-    def check_render_cover(self, group_id, sync=False):
-        rendered = self.live_status[group_id]["rendered_cover_names"]
-        upload_args = self.config.get('upload_args', {})
+    def patch_arg_bvid(self, arg, stime):
+        period = arg.get('auto_append_period')
+        if period in ('monthly', 'daily'):
+            account = arg.get('account')
+            target_bvid = read_period_bvid(self.src_path, stime, period=period, account=account)
+            if target_bvid:
+                arg['base_bvid'] = target_bvid
+                self.logger.info(f"[账号{account}] 追加模式({period})：检测到已有稿件 {target_bvid}，将追加至该稿件")
+            else:
+                arg['base_bvid'] = ""
+                self.logger.info(f"[账号{account}] 追加模式({period})：暂无稿件，将创建新稿件")
+        return arg
 
-        from DMR.utils.render_with_manimgl import rendercover_with_manimgl
-        import threading
-        _now  = datetime.now()
-        _year = f"{_now.year}"
+    def patch_arg_cover(self, arg, video_file=None, stime=None):
+        ca = arg.get('cover_args')
+        if not ca:
+            return arg
 
-        pending = []
-        for upload_arg_list in upload_args.values():
-            for arg in upload_arg_list:
-                ca = arg.get('cover_args')
-                if not ca or not ca.get('is_render_cover'):
-                    continue
-                _name = ca.get("name")
-                _account = arg.get("account")
-                if not _name or not _account:
-                    continue
-                _key = (_name, _account)
-                if _key in rendered:
-                    continue
-                _time_template = ca.get("time_template", "{NOW.MONTH}月{NOW.DAY}日")
-                _time = replace_keywords(str(_time_template), {'now': _now})
-                _color = ca.get("name_color","#111111")
-                pending.append((_name, _time, _color, _year, _account, f"cover_{_name}_{_account}.png"))
-                rendered.add(_key)
+        def do_extract():
+            if not video_file:
+                return None
+            try:
+                return extract_best_frame(
+                    video_file.path,
+                    output_dir=str(Path(video_file.path).parent),
+                    sample_count=ca.get('sample_count', 10),
+                    ratio=ca.get('ratio', '16/9'),
+                )
+            except Exception as e:
+                self.logger.warning(f'封面帧提取失败: {e}')
+                return None
 
-        if not pending:
-            return
+        def do_render(image_path=None):
+            _name = ca.get('name', '未知主播')
+            _now = datetime.now()
+            account = arg.get('account', '')
+            safe_account = re.sub(r'[\\/:*?"<>|]', '_', str(account))
+            output_filename = f'cover_{safe_account}.png' if safe_account else None
+            try:
+                return rendercover_with_manimgl(
+                    _name,
+                    replace_keywords(str(ca.get('time_template', '{NOW.MONTH}月{NOW.DAY}日')), {'now': _now, 'stime': stime}),
+                    ca.get('name_color', '#111111'),
+                    str(_now.year),
+                    output_dir=str(self.src_path),
+                    image_path=image_path,
+                    output_filename=output_filename,
+                )
+            except Exception as e:
+                self.logger.warning(f'封面渲染失败: {e}')
+                return None
 
-        output_dir = str(self.src_path)
-        def render_all():
-            for (_name, _time, _color, _year, _account, filename) in pending:
-                try:
-                    rendercover_with_manimgl(_name,_time,_color,_year,
-                                            output_dir=output_dir,
-                                            output_filename=filename)
-                    self.logger.info(f"封面生成成功  name:{_name}  account:{_account}  time:{_time}  year:{_year}")
-                except Exception as e:
-                    self.logger.exception(f"封面生成失败 name:{_name},account:{_account},time:{_time},year:{_year},error:{e}")
-
-        if sync:
-            render_all()
+        arg = dict(arg)
+        if ca.get('is_render_cover'):
+            image_path = do_extract() if ca.get('is_extract_frame') else None
+            cover = do_render(image_path)
+        elif ca.get('is_extract_frame'):
+            cover = do_extract()
         else:
-            threading.Thread(target=render_all, daemon=True).start()
+            return arg
+
+        if cover:
+            arg['cover'] = cover
+        return arg
+
+    def bark_notify(self, url):
+        bark_args = self.config.get("bark_args", {})
+        if not bark_args.get("is_bark"):
+            return
+        bark_notify_url(url, sound=bark_args.get("sound", "birdsong"))
 
     def _log_state(self, which: str = "all", prefix: str = "", level: int = logging.INFO):
         """
@@ -310,6 +344,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         
         if self.config['common_event_args'].get('auto_render'):
             render_args = self.config['render_args']['dmrender']
+            # 配置 dmrender.emoji=true 时改用彩色 emoji 渲染引擎
+            render_mode = 'emoji_dmrender' if render_args.get('emoji') else 'dmrender'
             if render_args.get('output_name'):
                 filename = replace_keywords(render_args['output_name'], video, replace_invalid=True) + \
                         f".{render_args.get('format','mp4')}"
@@ -328,7 +364,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 request_id=uuid(),
                 data={
                     'taskname': self.name,
-                    'mode': 'dmrender',
+                    'mode': render_mode,
                     'video': video,
                     'output': output,
                     'args': render_args,
@@ -361,56 +397,23 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             self.logger.debug(f'No such group:{group_id}.')
 
 
-        # --- 第二步：解析并保存礼物统计（必须在合并前！） ---
-        if hasattr(message, "gift_stat") and message["gift_stat"]:
-            raw_stat = message["gift_stat"]
+        # --- 第二步：收集会话数据写入 live_status ---
+        self._collect_session_data(group_id)
 
-            # 1. 提取名字和金额，并格式化为 "名字(金额)" (Format: Name(Value))
-            # item["total_value"] 是 generate_gift_statistics 生成的数字
-            names_list = [f"{item['name']}({item['total_value']})" for item in raw_stat.get("top_ranking", [])]
-
-            # 2. 使用逗号连接 (Join with comma)
-            names_str = ",".join(names_list)
-
-            # 3. 存储到 live_status
-            gift_stat_data = {
-                "total_revenue": raw_stat.get("total_revenue", 0),
-                "total_gifters": raw_stat.get("total_gifters", 0),
-                "top_ranking": names_str  # 结果示例: "悲伤小猫馄饨(20.7)，似冬(10.8)，放飞气球树(5.7)"
-            }
-            self.live_status[group_id]["gift_stat"] = gift_stat_data
-
-            # 4. 回写到 state_dict 中已有的 VideoInfo，否则非 merge 路径上传时字段永远是空字符串
-            for video_state in self.state_dict.get(group_id, []):
-                for info in video_state.values():
-                    if info.get('file'):
-                        info['file'].total_revenue = gift_stat_data["total_revenue"]
-                        info['file'].total_gifters = gift_stat_data["total_gifters"]
-                        info['file'].top_ranking   = gift_stat_data["top_ranking"]
-
-        # --- 回填开播/下播/总时长到所有分段 VideoInfo ---
-        try:
-            stime, etime = read_last_complete_session(self.src_path)
-            totaltime = format_duration(stime, etime)
-            for video_state in self.state_dict.get(group_id, []):
-                for info in video_state.values():
-                    if info.get('file'):
-                        info['file'].stime     = stime
-                        info['file'].etime     = etime
-                        info['file'].totaltime = totaltime
-        except Exception as e:
-            self.logger.warning(f"回填时间信息失败: {e}")
-
-        # --- 第三步：触发合并、上传 ---
+        # --- 第三步：合并，然后统一回填所有 VideoInfo ---
         self.check_for_merge(group_id)
+        self._backfill_video_info(group_id)
 
         ret_msgs = []
         if self.config['common_event_args'].get('auto_upload'):
             upload_msgs = self._check_for_upload(str(group_id))
             ret_msgs += upload_msgs
 
-        self._free_state_memory()
+        if self.config['common_event_args'].get('auto_clean'):
+            clean_msgs = self._check_for_clean(str(group_id), trigger='liveend')
+            ret_msgs += clean_msgs
 
+        self._free_state_memory()
 
         return ret_msgs
 
@@ -424,45 +427,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             # 假设 read_last_complete_session 已从外部导入
             stime, etime = read_last_complete_session(self.src_path)
         except:
-            stime = time.time() # 兜底逻辑
+            stime = datetime.now() # 兜底逻辑
 
-        def patch_arg_with_monthly_bvid(upload_arg_dict):
-            """内部辅助：如果配置了自动追加，则注入 base_bvid (Inject Base BVID)"""
-            if upload_arg_dict.get('auto_append_monthly'):
-                account = upload_arg_dict.get('account')
-                target_bvid = read_monthly_bvids(self.src_path, stime, account=account)
-                if target_bvid:
-                    upload_arg_dict['base_bvid'] = target_bvid
-                    self.logger.info(f"[账号{account}] 追加模式：检测到当月已有稿件 {target_bvid}，将追加至该稿件")
-                else:
-                    # 如果没找到，留空让后续逻辑创建新稿件
-                    upload_arg_dict['base_bvid'] = ""
-                    self.logger.info(f"[账号{account}] 追加模式：当月暂无稿件，将创建新稿件")
-            return upload_arg_dict
 
-        def resolve_cover(arg, video_file=None):
-            """内部辅助：根据 cover_args 自动填充 cover 路径"""
-            ca = arg.get('cover_args')
-            if not ca:
-                return arg
-            arg = dict(arg)
-            if ca.get('is_render_cover'):
-                _name = ca.get('name', '未知主播')
-                _account = arg.get('account', '')
-                arg['cover'] = str(self.src_path / f"cover_{_name}_{_account}.png")
-            elif ca.get('is_extract_frame') and video_file:
-                try:
-                    from DMR.Uploader.acfun import extract_best_frame
-                    arg['cover'] = extract_best_frame(
-                        video_file.path,
-                        output_dir=str(Path(video_file.path).parent),
-                        sample_count=ca.get('sample_count', 10),
-                        ratio=ca.get("ratio","16/9"),
-                    )
-                except Exception as e:
-                    self.logger.warning(f'封面自动提取失败: {e}')
-            return arg
-        
         upload_args = self.config['upload_args']
         upload_together =self.config["common_event_args"].get("upload_together",False) #zhixin
 
@@ -493,7 +460,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                     'engine': arg['engine'],
                                     'stateless': False,
                                     'upload_group': upload_group_id+'_'+upload_file_types+'_'+str(upid),
-                                    'args': patch_arg_with_monthly_bvid(resolve_cover(arg, info['file'])), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
+                                    'args': self.patch_arg_bvid(self.patch_arg_cover(arg, info['file'], stime), stime), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
                                 }
                             )
                             # self.logger.debug(
@@ -542,6 +509,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                 if arg.get('realtime'): continue
 
                                 up_videos = [video for video in videos if video.duration >= arg.get('min_length', 0)]
+                                if not up_videos:
+                                    self.logger.info(f'{self.name}: 视频时长不足 {arg.get("min_length", 0)} 秒，跳过上传。')
+                                    continue
                                 upload_group_id = up_videos[0].upload_group_id if hasattr(up_videos[0], 'upload_group_id') else group_id
                                 upload_msg = PipeMessage(
                                     source=self.name,
@@ -554,7 +524,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                         'engine': arg['engine'],
                                         'stateless': True,
                                         'upload_group': upload_group_id+'_'+upload_file_types+'_'+str(upid),
-                                        'args': patch_arg_with_monthly_bvid(resolve_cover(arg, up_videos[0])), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
+                                        'args': self.patch_arg_bvid(self.patch_arg_cover(arg, up_videos[0], stime), stime), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
                                     }
                                 )
                                 # self.logger.debug(
@@ -633,7 +603,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                                 'engine': arg['engine'],
                                 'stateless': True,
                                 'upload_group': upload_group_id + '_' + upload_file_types + '_' + str(upid),
-                                'args': patch_arg_with_monthly_bvid(resolve_cover(arg, all_files[0])), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
+                                'args': self.patch_arg_bvid(self.patch_arg_cover(arg, all_files[0], stime), stime), # 这里的arg会传入biliwebapi或biliuprs里进行初始化，和upload函数
                             }
                         )
 
@@ -665,12 +635,21 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         self.state_dict[video.group_id][idx][vtype]['file'] = video
         
         self.check_for_merge(video.group_id)
+        self._backfill_video_info(video.group_id)
 
         ret_msgs = []
+        # 字幕中间文件（txt/ass）渲染完即用完，单独发清理消息（与 auto_clean 无关）
+        ret_msgs += self._subtitle_clean_msgs(message.data.get('config'))
+
         if self.config['common_event_args'].get('auto_upload'):
             upload_msgs = self._check_for_upload(video.group_id)
             ret_msgs += upload_msgs
 
+        if self.config['common_event_args'].get('auto_clean'):
+            clean_msgs = self._check_for_clean(video.group_id, trigger='render')
+            ret_msgs += clean_msgs
+
+        self._free_state_memory()
         return ret_msgs
 
     def onUploadEnd(self, message:PipeMessage):
@@ -689,19 +668,21 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         if len(self.state_dict[group_id][idx][vtype]['wait']) == 0:
                             self.state_dict[group_id][idx][vtype]['status'] = 'uploaded'
 
-        # --- 新增：记录 BVID 到当月历史文件 ---
+        # --- 新增：记录 BVID 到历史文件 ---
         if target_group_id:
             bvid = message.data.get("bvid")
             upload_config = message.data.get("config", {}).get('args', {})
             base_bvid = upload_config.get('base_bvid')
             account = upload_config.get('account')
-            if bvid and upload_config.get('auto_append_monthly'):
+            period = upload_config.get('auto_append_period')
+            if bvid and period in ('monthly', 'daily'):
                 stime, _ = read_last_complete_session(self.src_path)
                 try:
-                    write_monthly_bvid(self.src_path, stime, bvid, account=account)
-                    self.logger.info(f"已登记{stime.month}月 账号{account} bvid:{bvid}")
+                    write_period_bvid(self.src_path, stime, bvid, period=period, account=account)
+                    period_label = f"{stime.year}-{stime.month:02d}-{stime.day:02d}" if period == 'daily' else f"{stime.year}-{stime.month:02d}"
+                    self.logger.info(f"已登记 {period_label} 账号{account} bvid:{bvid}")
                 except Exception as e:
-                    self.logger.error(f"登记{stime.month}月 账号{account} bvid失败: {e}")
+                    self.logger.error(f"登记 账号{account} bvid失败: {e}")
             # 判断是否加入合集
             if bvid and bvid != base_bvid:
                 self.check_add_to_list(target_group_id,bvid,upload_config)
@@ -709,7 +690,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
         ret_msgs = []
         if self.config['common_event_args'].get('auto_clean') and target_group_id:
-            clean_msgs = self._check_for_clean(target_group_id)
+            clean_msgs = self._check_for_clean(target_group_id, trigger='upload')
             ret_msgs += clean_msgs
 
         self._free_state_memory()
@@ -734,10 +715,10 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
     def check_for_merge(self, group_id):
         # is_merge / merge_type / 音量相关配置
-        merge_cfg          = self.config['common_event_args'].get("merge_args", {}) or {}
+        merge_cfg          = self.config.get("merge_args", {}) or {}
         is_merge           = merge_cfg.get("is_merge")
         merge_type         = merge_cfg.get("merge_type")  # e.g. ['src_video', 'dm_video']
-        is_amplify         = merge_cfg.get("is_amplify", True)
+        is_amplify         = merge_cfg.get("is_amplify", False)
         extra_gain_db      = merge_cfg.get("extra_gain_db", 0)
         file_name_template = merge_cfg.get("file_name_template", "{stime.month}月{stime.day}日")
 
@@ -839,8 +820,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 entry['status'] = 'merged'
 
             # 6. 写新占位：只填这个 vt 对应的 slot
-            dst = target_slot.get(vt, vt)  # 默认映射自己
-            gift_stat  = self.live_status[group_id]["gift_stat"]
+            # 会话级字段（gifts_revenue / stime 等）由 _backfill_video_info 统一回填，不在此设置
+            dst = target_slot.get(vt, vt)
             newvideo = VideoInfo(
                 path      = str(output_path),
                 dtype     = dst,
@@ -858,11 +839,18 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 streamer  = tail.streamer,
                 title     = tail.title,
                 resolution= meta.get('resolution') or (0,0),
-                total_revenue = gift_stat.get("total_revenue",""),
-                total_gifters = gift_stat.get("total_gifters",""),
-                top_ranking   = gift_stat.get("top_ranking",""),
             )
             new_state[dst] = {'status': 'ready', 'file': newvideo, 'wait': []}
+
+            # 记录合并产物，供 WebUI「已合并的视频」展示
+            self.merged_videos.append({
+                'output': str(output_path),
+                'type': vt,
+                'segments': len(paths),
+                'time': datetime.now(),
+            })
+            if len(self.merged_videos) > 200:
+                self.merged_videos = self.merged_videos[-200:]
 
             self.logger.info("类型 %s 合并成功 → %s", vt, output_path)
             return True
@@ -882,40 +870,146 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # 至少有一个 vt 合并成功：追加新的 state
         self.state_dict[group_id].append(new_state)
 
-    def _check_for_clean(self, group_id=None):
-        # 修改后的清理逻辑：
-        # 只在上传完成后检查是否清理
-        # 根据文件类型进行清理dm_video，src_video，src_video_pre or all
-        # self._log_state(prefix="checkforcleanbefore:",level=logging.DEBUG)
-        ret_msgs = []
-        clean_args = self.config['clean_args']
-        for group_id, video_states in self.state_dict.items():
-            for idx, video_state in enumerate(video_states):
-                for vtype, info in video_state.items():
-                    # if info['status'] != 'uploaded':
-                    #     continue
-                    for clean_file_types, clean_arg in clean_args.items():
-                        # 判断当前视频是否需要清理
-                        if vtype in clean_file_types.split('+') or clean_file_types == 'all':
-                            for arg in clean_arg:
-                                if file := info['file']:
-                                    self.state_dict[group_id][idx][vtype]['status'] = 'cleaned'
-                                    self.logger.debug(f"file:{file}")
-                                    clean_msg = PipeMessage(
-                                        source=self.name,
-                                        target='cleaner',
-                                        event='newtask',
-                                        request_id=uuid(),
-                                        data={
-                                            'taskname': self.name,
-                                            'files': [file],
-                                            'method': arg['method'],
-                                            'delay': arg['delay'],
-                                            'args': arg,
-                                        }
-                                    )
-                                    ret_msgs.append(clean_msg)
+    def _collect_session_data(self, group_id: str):
+        """
+        收集本场直播的会话级数据，写入 live_status[group_id]：
+          - 礼物/SC 统计（gifts_revenue、sc_revenue 等）
+          - 开播/下播/总时长（stime、etime、totaltime）
+        onLiveEnd 调用，_backfill_video_info 之前执行。
+        """
+        # 礼物统计
+        gift_dm_args = self.config['download_args'].get('gift_dm_args', {})
+        if gift_dm_args.get('gift_recorder', False):
+            try:
+                raw_stat = generate_gift_statistics(
+                    jsonl_paths=[str(self.src_path) + '/gifts.jsonl'],
+                    stat_path=str(self.src_path) + '/gifts_statistics.jsonl',
+                    rank_top=gift_dm_args.get('rank_top_n', 3),
+                    delete_after_process=True,
+                )
+                if raw_stat:
+                    names_str = ",".join(
+                        f"{item['name']}({item['total_value']})"
+                        for item in raw_stat.get("top_ranking", [])
+                    )
+                    self.live_status[group_id].update({
+                        "gifts_revenue" : raw_stat.get("gifts_revenue", ""),
+                        "num_of_gifters": raw_stat.get("num_of_gifters", ""),
+                        "sc_revenue"    : raw_stat.get("sc_revenue", ""),
+                        "num_of_sc"     : raw_stat.get("num_of_sc", ""),
+                        "member_revenue": raw_stat.get("member_revenue", ""),
+                        "member_info"   : raw_stat.get("member_info", ""),
+                        "total_revenue" : raw_stat.get("total_revenue", ""),
+                        "top_ranking"   : names_str,
+                    })
+            except Exception as e:
+                self.logger.warning(f'礼物统计生成失败: {e}')
 
+        # 开播/下播/总时长
+        try:
+            stime, etime = read_last_complete_session(self.src_path)
+            self.live_status[group_id].update({
+                "stime"    : stime,
+                "etime"    : etime,
+                "totaltime": format_duration(stime, etime),
+            })
+        except Exception as e:
+            self.logger.warning(f"获取开播/下播时间失败: {e}")
+
+    def _backfill_video_info(self, group_id: str):
+        """
+        将 live_status 中的会话级字段统一回填到该 group 所有 VideoInfo。
+        在 check_for_merge 之后调用，确保合并生成的新 VideoInfo 也能被覆盖。
+        """
+        status = self.live_status.get(group_id, {})
+        fields = [
+            'gifts_revenue', 'num_of_gifters',
+            'sc_revenue', 'num_of_sc',
+            'member_revenue', 'member_info',
+            'total_revenue', 'top_ranking',
+            'stime', 'etime', 'totaltime',
+        ]
+        for video_state in self.state_dict.get(group_id, []):
+            for info in video_state.values():
+                if info.get('file'):
+                    for field in fields:
+                        val = status.get(field)
+                        if val is not None and val != "":
+                            setattr(info['file'], field, val)
+
+    def _subtitle_clean_msgs(self, render_config):
+        """字幕中间文件（ASR 的 txt 与 (字幕).ass）渲染完即用完，单独发清理消息走清理管线。
+        清理策略读 subtitle 配置：clean(默认True是否清理)、clean_method(默认send2trash)、clean_delay(默认0)。"""
+        cfg = render_config or {}
+        if cfg.get('mode') != 'dmrender':
+            return []
+        sub = (cfg.get('args') or {}).get('subtitle') or {}
+        if not sub.get('enable') or not sub.get('clean', True):
+            return []
+        src = cfg.get('video') or {}
+        src_path = src.get('path') if hasattr(src, 'get') else None
+        if not src_path:
+            return []
+        from DMR.utils.dataclass import FileInfo
+        stem = os.path.splitext(src_path)[0]
+        files = [FileInfo(path=p) for p in (stem + '.txt', stem + '(字幕).ass') if os.path.exists(p)]
+        if not files:
+            return []
+        return [PipeMessage(
+            source=self.name, target='cleaner', event='newtask', request_id=uuid(),
+            data={
+                'taskname': self.name,
+                'files'   : files,
+                'method'  : sub.get('clean_method', 'send2trash'),
+                'delay'   : sub.get('clean_delay', 0),
+                'args'    : {},
+            }
+        )]
+
+    def _check_for_clean(self, group_id: str, trigger: str = 'upload'):
+        """
+        检查并生成清理任务。
+        trigger: 触发阶段，与 clean_args 里各条目的 trigger 字段匹配。
+          'upload'  — 上传完成后触发（默认，向下兼容）
+          'render'  — 渲染完成后触发
+          'liveend' — 直播/录制结束时触发
+        只处理 trigger 匹配的 clean_arg 条目，不填则默认 'upload'。
+        """
+        ret_msgs = []
+        clean_args = self.config.get('clean_args') or {}
+
+        video_states = self.state_dict.get(group_id)
+        if not video_states:
+            return ret_msgs
+
+        for idx, video_state in enumerate(video_states):
+            for vtype, info in video_state.items():
+                for clean_file_types, clean_arg in clean_args.items():
+                    if vtype not in clean_file_types.split('+') and clean_file_types != 'all':
+                        continue
+                    for arg in clean_arg:
+                        # trigger 不填默认 upload，向下兼容
+                        if arg.get('trigger', 'upload') != trigger:
+                            continue
+                        if file := info['file']:
+                            self.state_dict[group_id][idx][vtype]['status'] = 'cleaned'
+                            self.logger.debug(f'清理触发（{trigger}）: {file}')
+                            clean_msg = PipeMessage(
+                                source=self.name,
+                                target='cleaner',
+                                event='newtask',
+                                request_id=uuid(),
+                                data={
+                                    'taskname': self.name,
+                                    'files'   : [file],
+                                    'method'  : arg['method'],
+                                    'delay'   : arg.get('delay', 0),
+                                    'args'    : arg,
+                                }
+                            )
+                            ret_msgs.append(clean_msg)
+
+        self._free_state_memory()
         return ret_msgs
     
     def _free_state_memory(self):
@@ -939,8 +1033,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             for video_state in video_states:
                 for info in video_state.values():
                     st = info.get('status')
-                    if st is None:
-                        continue
+                    if st is None or st == 'merged':
+                        continue  # None=未参与, merged=已被合并消费，均视为终态跳过
                     # merging 这种中间态绝对不能释放
                     if st not in final_status:
                         need_free = False

@@ -1,90 +1,197 @@
 import os
+import re
 import sys
+import subprocess
+import tempfile
 
-# ==========================================
-# 核心设定 1：在代码最开始，强制把模型下载路径指向 D:\models
-# ==========================================
 os.environ["MODELSCOPE_CACHE"] = r"D:\models"
 os.environ["HF_HOME"] = r"D:\models"
 
-# 引入 FunASR
 from funasr import AutoModel
 
-def main():
-    # 你的音频文件放在 D:\test 目录下
-    audio_filename = "05月20日.mp4"  # 👈 记得改成你实际的音频文件名和格式
-    base_folder=r"D:\DanmakuRender\Tasks文件\不可一世杀手（弹幕版）"
-    input_audio_path = os.path.join(base_folder, audio_filename)
+# ── 配置 ─────────────────────────────────────────────────────────────────
+SUBTITLE_OFFSET_MS = 150   # 字幕整体延后，补 FunASR 把起音/换气算进句首导致的偏快
+MIN_DURATION_MS    = 300   # 每条字幕最小持续时间，过短/零时长会被补到这个值
+CLEAN_PUNCTUATION  = True  # 去标点：句末标点删掉、句中标点换空格。设 False 则保留原始标点
+ASR_SAMPLE_RATE    = 16000 # paraformer-zh 要求 16k 单声道
+GAP_REPORT_SEC     = 0.3   # 音频断流检测阈值（秒），仅用于日志提示
+# ─────────────────────────────────────────────────────────────────────────
 
+
+def detect_audio_gaps(path, threshold=GAP_REPORT_SEC):
+    """扫描音频包时间戳，返回 [(位置秒, 空洞秒), ...]。失败返回 []。
+    直播卡顿会在音频流留下时间戳空洞——前一个包到下一个包之间跳变超过阈值即为断流。"""
+    try:
+        out = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'a',
+             '-show_entries', 'packet=dts_time', '-of', 'csv=p=0', path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=300,
+        ).stdout.decode('utf-8', 'ignore')
+    except Exception:
+        return []
+    gaps, prev = [], None
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            t = float(line)
+        except ValueError:
+            continue
+        if prev is not None and t - prev > threshold:
+            gaps.append((prev, t - prev))
+        prev = t
+    return gaps
+
+
+def extract_aligned_audio(src_path):
+    """抽取 16k 单声道 wav，用 aresample=async=1 在时间戳空洞处补静音，
+    使音频时间轴与视频对齐——否则直播卡顿断流处的空洞会被解码"吞掉"，
+    导致空洞之后的字幕整体提前、与画面对不上。
+    返回 (音频路径, 是否为临时文件)；失败时回退原文件直接识别。"""
+    fd, wav_path = tempfile.mkstemp(suffix='.wav', prefix='asr_aligned_')
+    os.close(fd)
+    cmd = [
+        'ffmpeg', '-y', '-v', 'error',
+        '-i', src_path,
+        '-vn',
+        '-af', 'aresample=async=1:first_pts=0',   # 关键：按时间戳补静音/去重叠
+        '-ac', '1', '-ar', str(ASR_SAMPLE_RATE),
+        '-c:a', 'pcm_s16le',
+        wav_path,
+    ]
+    try:
+        p = subprocess.run(cmd, stderr=subprocess.PIPE)
+        ok = (p.returncode == 0 and os.path.exists(wav_path)
+              and os.path.getsize(wav_path) > 0)
+        if not ok:
+            tail = (p.stderr or b'').decode('utf-8', 'ignore')[-500:]
+            print(f"音频预处理失败，回退为直接识别原文件。ffmpeg: {tail}")
+    except Exception as e:
+        print(f"音频预处理异常，回退为直接识别原文件：{e}")
+        ok = False
+    if not ok:
+        try:
+            os.remove(wav_path)
+        except OSError:
+            pass
+        return src_path, False
+    return wav_path, True
+
+
+def resolve_input():
+    """两种启动方式：命令行传入路径，或交互询问。必须提供一个视频。"""
+    if len(sys.argv) > 1:
+        path = sys.argv[1].strip().strip('"')
+        print(f"使用命令行传入的视频：{path}")
+        return path
+    ans = input("请输入视频/音频路径：").strip().strip('"')
+    if not ans:
+        print("未提供视频路径，已退出。")
+        sys.exit(1)
+    return ans
+
+
+_PUNCT = "，。！？、；：,.!?;:…—～~·“”\"'‘’《》（）()【】[]"
+
+def clean_text(text):
+    """去掉句末标点；句中标点用空格代替。CLEAN_PUNCTUATION 为 False 时原样返回。"""
+    if not CLEAN_PUNCTUATION:
+        return text.strip()
+    text = text.strip()
+    text = re.sub(rf"[{re.escape(_PUNCT)}\s]+$", "", text)   # 末尾标点/空白
+    text = re.sub(rf"[{re.escape(_PUNCT)}]+", " ", text)     # 中间标点 -> 空格
+    return re.sub(r"\s+", " ", text).strip()                 # 合并多余空格
+
+
+def ms_to_ts(ms):
+    ms = int(ms)
+    h, r = divmod(ms, 3_600_000)
+    m, r = divmod(r, 60_000)
+    s, ms = divmod(r, 1_000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def fix_durations(items, min_dur=MIN_DURATION_MS):
+    """保证每条至少 min_dur 毫秒；若因此与下一条重叠，则顺移下一条的起点。"""
+    items = sorted(items, key=lambda x: x["start"])
+    for i, it in enumerate(items):
+        if it["end"] - it["start"] < min_dur:
+            it["end"] = it["start"] + min_dur
+        if i + 1 < len(items) and items[i + 1]["start"] < it["end"]:
+            items[i + 1]["start"] = it["end"]
+    return items
+
+
+def main():
+    input_audio_path = resolve_input()
     if not os.path.exists(input_audio_path):
-        print(f"❌ 错误：没有找到文件 {input_audio_path}，请先放进去！")
+        print(f"错误：找不到文件 {input_audio_path}")
         sys.exit(1)
 
-    print("====================================")
-    print("🚀 正在初始化 FunASR 黄金组合 Pipeline...")
-    print("💡 提示：首次运行会下载 4 个模型到 D:\\models，耗时较长，请耐心等待进度条...")
-    print("====================================")
+    # 直播卡顿会在音频流留下时间戳空洞。FunASR 直接读取媒体时会"吞掉"这些空洞，
+    # 使空洞之后的字幕整体提前。这里先检测并补静音对齐，再喂给识别模型。
+    gaps = detect_audio_gaps(input_audio_path)
+    if gaps:
+        total = sum(g for _, g in gaps)
+        print(f"检测到 {len(gaps)} 处音频断流（共约 {total:.2f}s），将补静音对齐后再识别：")
+        for pos, g in gaps[:10]:
+            print(f"  - 约 {pos:.1f}s 处断流 {g:.2f}s")
+        if len(gaps) > 10:
+            print(f"  - ……其余 {len(gaps) - 10} 处略")
 
-    # ==========================================
-    # 核心设定 2：组装最适合王者荣耀分析的 4 合 1 黄金组合
-    # ==========================================
+    asr_input, is_temp = extract_aligned_audio(input_audio_path)
+
     model = AutoModel(
-        model="paraformer-zh",             # ASR 核心大脑：负责转文字和拿时间戳 (Timestamp)
+        model="paraformer-zh",
         model_revision="v2.0.4",
-        vad_model="fsmn-vad",              # VAD 语音切片：负责过滤游戏背景音和 BGM
+        vad_model="fsmn-vad",
         vad_model_revision="v2.0.4",
-        punc_model="ct-punc-c",            # Punc 自动标点：给嘴臭和阴阳怪气的内容加标点
+        punc_model="ct-punc-c",
         punc_model_revision="v2.0.4",
-        spk_model="cam++",                 # SPK 声纹识别：核心！负责把主播和队友的声音“分家” (Speaker Diarization)
-        spk_model_revision="v2.0.2"
+        spk_model="cam++",
+        spk_model_revision="v2.0.2",
+        disable_update=True,   # 跳过每次启动时 funasr 联网检查更新
     )
 
-    print("\n🎉 模型加载成功！开始分析音频内容...")
+    try:
+        results = model.generate(
+            input=asr_input,
+            batch_size_s=300,
+            vad_kwargs={"max_single_segment_time": 30000},
+            # hotword="",
+        )
+    finally:
+        if is_temp:
+            try:
+                os.remove(asr_input)
+            except OSError:
+                pass
 
-    # ==========================================
-    # 核心设定 3：运行推理 (Inference)
-    # ==========================================
-    # batch_size_s=300 表示每 300 秒（5分钟）动态切片处理一次，极大防止 4 小时大视频导致显存/内存爆掉 (OOM)
-    results = model.generate(
-        input=input_audio_path,
-        batch_size_s=300,
-        vad_kwargs={"max_single_segment_time": 30000}
-        # hotword="吃线" # 热词激励 (Hotwords)，提高王者游戏高频词准确率
-    )
+    # 汇总所有句子（保留毫秒精度），整体延后修正偏快
+    items = []
+    for item in results:
+        for s in item.get("sentence_info", []):
+            items.append({
+                "start": max(0, s.get("start", 0) + SUBTITLE_OFFSET_MS),
+                "end":   max(0, s.get("end", 0) + SUBTITLE_OFFSET_MS),
+                "spk":   s.get("spk", "?"),
+                "text":  clean_text(s.get("text", "")),
+            })
 
-    # ==========================================
-    # 核心设定 4：将提取出的数据结构化保存，方便后面喂给大模型
-    # ==========================================
-    output_text_path = os.path.join(base_folder, "step1_asr_result.txt")
+    items = fix_durations(items)
 
-    print(f"\n💾 正在将结构化文本写入：{output_text_path}")
-
+    # 可选第二个参数指定输出 txt 路径；否则默认视频同名 .txt
+    if len(sys.argv) > 2 and sys.argv[2].strip():
+        output_text_path = sys.argv[2].strip().strip('"')
+    else:
+        output_text_path = os.path.splitext(input_audio_path)[0] + ".txt"
     with open(output_text_path, "w", encoding="utf-8") as f:
-        for item in results:
-            # FunASR + spk_model 的句子列表在 sentence_info 里
-            sentences = item.get("sentence_info", [])
+        for it in items:
+            f.write(f"[{ms_to_ts(it['start'])} --> {ms_to_ts(it['end'])}] spk_{it['spk']}: {it['text']}\n")
 
-            if not sentences:
-                # 兜底：如果没有 sentence_info，直接写原始文本
-                f.write(item.get("text", str(item)) + "\n")
-                continue
+    print(f"完成，共 {len(items)} 条，已保存到：{output_text_path}")
 
-            for sentence in sentences:
-                spk   = sentence.get("spk", "?")
-                start = sentence.get("start", 0)
-                end   = sentence.get("end", 0)
-                text  = sentence.get("text", "")
-
-                start_time = f"{int(start//3600000):02d}:{int((start%3600000)//60000):02d}:{int((start%60000)//1000):02d}"
-                end_time   = f"{int(end//3600000):02d}:{int((end%3600000)//60000):02d}:{int((end%60000)//1000):02d}"
-
-                f.write(f"[{start_time} --> {end_time}] spk_{spk}: {text}\n")
-
-    print("====================================")
-    print("✨ Step 1 提取完成！")
-    print(f"请打开 {output_text_path} 查看带有角色标签和精准时间戳的《对线剧本》。")
-    print("接下来你就可以把这个文本中的高能段落复制进任意 LLM（如 DeepSeek/Qwen）进行情感和阴阳怪气的深度分析了！")
-    print("====================================")
 
 if __name__ == "__main__":
     main()

@@ -27,6 +27,7 @@ class Render():
         self._piperecvprocess = None
         self.render_tasks = {}
         self.failed_tasks = {}
+        self.completed_tasks = []   # 渲染成功的视频记录（最近若干条）
         self.failed_tasks_file = '.temp/failed_renders.json'
         # self.load_failed_tasks()
 
@@ -142,6 +143,19 @@ class Render():
                     data=desc,
                 )
             else:
+                # 记录渲染成功的视频（最新在前），只保留最近 200 条避免无限增长
+                output_path = getattr(desc, 'path', None) or task.get('output')
+                video = task.get('video')
+                self.completed_tasks.append({
+                    'uuid': task['uuid'],
+                    'video': video.path if video else 'Unknown',
+                    'output': output_path,
+                    'mode': task.get('mode', 'Unknown'),
+                    'time': datetime.now(),
+                })
+                if len(self.completed_tasks) > 200:
+                    self.completed_tasks = self.completed_tasks[-200:]
+
                 self._pipeSend(
                     event='end',
                     msg=f"视频{task['output']}渲染完成",
@@ -164,6 +178,8 @@ class Render():
 
             if mode == 'dmrender':
                 from .dmrender import DmRender as TargetRender
+            elif mode == 'emoji_dmrender':
+                from .emoji_dmrender import EmojiDmRender as TargetRender
             elif mode == 'transcode':
                 from .transcode import Transcoder as TargetRender
             elif mode == 'rawffmpeg':
@@ -171,7 +187,8 @@ class Render():
                 from .ffmpeg import RawFFmpegRender as TargetRender
             
             target_render = TargetRender(**render_args)
-            self.logger.info(f'正在渲染: {video.path}')
+            verb = {'dmrender': '渲染', 'emoji_dmrender': '彩色emoji渲染', 'transcode': '转码', 'rawffmpeg': '自定义ffmpeg处理'}.get(mode, '处理')
+            self.logger.info(f'准备{verb}任务: {video.path}')
             os.makedirs(os.path.dirname(output), exist_ok=True)
 
             self._render_class[task['uuid']] = target_render

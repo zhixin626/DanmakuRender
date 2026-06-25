@@ -326,9 +326,9 @@ download_args:
     danmaku: True
     # 是否录制直播流
     video: True
-    # 延迟下播计时（分钟）
+    # 延迟下播计时（秒）
     # 使用这个功能可以把主播短暂下播又开播认定为同一场直播
-    stop_wait_time: 120
+    stop_wait_time: 7200
     # 直播流选项
     # 使用streamlink录制时不生效
     stream_option:

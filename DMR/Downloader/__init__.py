@@ -53,7 +53,28 @@ class Downloader(): # 被上层 class engine()初始化，在 add_plugin()里调
             self._pipeSend(event='info', msg=f'下载任务 {taskname} 已停止。', dtype='str', data=taskname)
         else:
             raise ValueError(f'下载任务 {taskname} 不存在。')
-        
+
+    def _get_task(self, taskname: str):
+        """获取指定任务的 StreamDownloader，不存在则返回 None"""
+        return self.download_tasks.get(taskname)
+
+    def cmd_segment(self, taskname: str):
+        task = self._get_task(taskname)
+        if task: task.cmd_segment()
+
+    def cmd_offline(self, taskname: str):
+        task = self._get_task(taskname)
+        if task: task.cmd_offline()
+
+    def cmd_force_offline_time(self, taskname: str, time_str: str):
+        task = self._get_task(taskname)
+        if task: task.cmd_force_offline_time(time_str)
+
+    def cmd_force_live(self, taskname: str):
+        task = self._get_task(taskname)
+        if task: task.cmd_force_live()
+
+
     def newtask(self, message:PipeMessage):  #这里被onReady信息--> 上面的　 _pipeRecvMonitor调用
         taskname = message.data['taskname']
         dltype = message.data['dltype']

@@ -4,6 +4,8 @@
 /venv/
 /test**
 输出/
+douyu_unknown_samples/
+douyin_unknown_samples/
 
 *.7z
 replay-**.yml
@@ -24,3 +26,5 @@ DMR-**.yml
 /python文件/
 /Tasks文件/
 *.bat
+
+*.dll

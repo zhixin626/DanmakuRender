@@ -1,4 +1,4 @@
-import json, re,requests
+import json, os, re, requests
 from struct import pack, unpack
 from datetime import datetime
 from DMR.utils import  SimpleDanmaku,GiftDanmaku,MemberDanmaku
@@ -63,6 +63,29 @@ def get_douyu_gift_info(gid: int):
     except Exception as e:
         return None
 
+# --- 弹幕原始消息采样（用于反推协议格式：开通会员消息 + 其他未识别类型消息） ---
+_sample_counter = {}
+_sample_limit = 10
+_sample_dir = "douyu_unknown_samples"
+
+def sample_raw_message(msg_type, msg):
+    """对指定 msg_type 各采样最多 _sample_limit 条，落盘成按类型分类的 jsonl
+    返回 True 表示本次成功写入了一条新样本，False 表示已达到上限/写入失败"""
+    cnt = _sample_counter.get(msg_type, 0)
+    if cnt >= _sample_limit:
+        return False
+    _sample_counter[msg_type] = cnt + 1
+    try:
+        os.makedirs(_sample_dir, exist_ok=True)
+        path = os.path.join(_sample_dir, f"{msg_type}.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        return True
+    except Exception as e:
+        logger.info(f"{RED}【SAMPLE】{RESET}采样原始弹幕消息失败: {e}")
+        return False
+
+
 RED = "\033[31m"
 YELLOW = "\033[33m"
 GREEN = "\033[32m"
@@ -111,22 +134,26 @@ class Douyu(DMAPI):
                         print(msg)
                         print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-                if msg_type == "member":
-                    uname       = msg.get("nick", "")
-                    member_time = int(msg.get("mn", 1))
-                    uid         = msg.get("uid", 0)
-                    price       = int(msg.get("price", 0))/100
-                    member_danmaku = MemberDanmaku(
-                        uname=uname,
-                        price=price,
-                        price_unit="鱼翅",
-                        member_name="钻石粉丝",
-                        member_time=member_time,
-                        member_time_unit="月",
-                        uid=uid,
-                        )
-                    print(member_danmaku.text) # debug
-                    msgs.append(member_danmaku)
+                elif msg_type == "member":
+                    # 目前字段含义尚未确认完整（如 price 单位、会员等级名称等），
+                    # 暂时注释掉，先采样原始消息用于反推协议格式
+                    # uname       = msg.get("nick", "")
+                    # member_time = int(msg.get("mn", 1))
+                    # uid         = msg.get("uid", 0)
+                    # price       = int(msg.get("price", 0))/100
+                    # member_danmaku = MemberDanmaku(
+                    #     uname=uname,
+                    #     price=price,
+                    #     price_unit="鱼翅",
+                    #     member_name="钻石粉丝",
+                    #     member_time=member_time,
+                    #     member_time_unit="月",
+                    #     uid=uid,
+                    #     )
+                    # print(member_danmaku.text) # debug
+                    # msgs.append(member_danmaku)
+                    if sample_raw_message("member", msg):
+                        print(f"{RED}【SAMPLE】{RESET}已采样开通会员原始消息 -> {_sample_dir}/member.jsonl")
                     continue
 
                 elif msg_type == "gift":
@@ -161,49 +188,16 @@ class Douyu(DMAPI):
 
                     # ===== 2. 判类型 =====
                     if gift_price is None:
-                        douyu_type = "unknown"
                         total_price_cny = None
                         extra = ""
                     elif gift_price == 0:
-                        douyu_type = "free"
                         total_price_cny = 0
                         extra = ""
                     else:
-                        douyu_type = "paid"
                         total_price_cny = gift_price * gift_count
                         extra = f"价值{gift_price}{price_unit}的"
 
-                    # ===== 3. 文本 =====
                     text = f"{uname} 送给{streamer}{extra}{gift_name}×{gift_count}"
-
-                    # ================== DEBUG ==================
-                    if douyu_type == "paid":
-                        pass
-                        # print(f"{YELLOW}【PAID】{RESET}{text}")
-                        # print(
-                        #     f"src={price_src} gfid={gfid} pid={pid} "
-                        #     f"gift_price={gift_price} count={gift_count} "
-                        #     f"total_price_cny={total_price_cny} gpf={gpf} ct={msg.get('ct')}"
-                        # )
-
-                    elif douyu_type == "free":
-                        pass
-                        # print(f"【FREE】{text}")
-                        # print(
-                        #     f"src={price_src} gfid={gfid} pid={pid} "
-                        #     f"gift_price={gift_price} count={gift_count} "
-                        #     f"total_price_cny={total_price_cny} gpf={gpf} ct={msg.get('ct')}"
-                        # )
-
-                    else:  # unknown
-                        print(f"{RED}【UNKNOWN】{RESET}{text}")
-                        print(
-                            f"src={price_src} gfid={gfid} pid={pid} "
-                            f"gift_price={gift_price} count={gift_count} "
-                            f"total_price_cny={total_price_cny} gpf={gpf} ct={msg.get('ct')}"
-                        )
-                        print(msg)
-                    # ================== DEBUG ==================
 
                     gift_msg_obj = GiftDanmaku(
                         timestamp=datetime.now().timestamp(),
@@ -240,6 +234,10 @@ class Douyu(DMAPI):
                             uid=uid,
                         )
                     msgs.append(msg)
+
+                else:  # msg_type == "other"，未识别类型，采样原始消息以便后续分析
+                    raw_type = msg.get("type", "unknown")
+                    sample_raw_message(raw_type, msg)
 
             except Exception as e:
                 logger.debug(f"错误信息:{e}")

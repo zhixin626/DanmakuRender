@@ -86,6 +86,36 @@ class Uploader():
                 return True
             return False
 
+    def stop_task(self, uuid):
+        """手动停止一个正在排队或正在上传的任务。"""
+        with self._lock:
+            task = self.upload_tasks.get(uuid)
+            if not task:
+                return False
+            task['_cancelled'] = True
+            task['status'] = 'cancelled'
+            uploader = task.get('_uploader')
+            upload_group = task.get('upload_group')
+
+        # 在锁外停止底层上传进程，避免阻塞
+        if uploader is not None:
+            try:
+                uploader.stop()
+            except Exception as e:
+                self.logger.warning(f'停止上传任务 {uuid} 时出错: {e}')
+            # 该 group 的上传器实例已被打断，移出池子，后续任务会重建一个干净的实例
+            with self._lock:
+                pooled = self._uploader_pool.get(upload_group)
+                if pooled and pooled['class'] is uploader:
+                    self._uploader_pool.pop(upload_group, None)
+        else:
+            # 还在排队、尚未开始上传：直接从队列移除（执行线程启动时会因 _cancelled 标志跳过）
+            with self._lock:
+                self.upload_tasks.pop(uuid, None)
+
+        self.logger.info(f'已发送停止指令到上传任务 {uuid}.')
+        return True
+
     def _pipeRecvMonitor(self):
         while self.stoped == False and self.recv_queue is not None:
             message:PipeMessage = self.recv_queue.get()
@@ -155,7 +185,19 @@ class Uploader():
     def _gather(self, task, status, desc=''):
         with self._lock:
             self.upload_tasks.pop(task['uuid'], None)
-            if status == 'error':
+            if status == 'cancelled':
+                # 手动停止：不计入失败任务，仅通知来源方释放等待状态
+                if task.get('stream_queue'):
+                    task['stream_queue'] = None
+                self._pipeSend(
+                    event='error',
+                    msg=f"上传已被手动停止: {[f.path for f in task['files']]}",
+                    target=task['source'],
+                    request_id=task['request_id'],
+                    dtype='str',
+                    data='manually stopped',
+                )
+            elif status == 'error':
                 # Save to failed tasks
                 # ignore stream uploads
                 if task.get('stream_queue'):
@@ -187,6 +229,9 @@ class Uploader():
                 )
 
     def _upload_subprocess(self, task): # 这里的task是add_task里构造的那个字典
+        if task.get('_cancelled'):       # 启动前已被手动停止，直接跳过
+            self._gather(task, 'cancelled')
+            return
         task['status'] = 'uploading'
         try:
             upload_args = task['args']  # 重要参数传入biliwebapi和biliuprs（初始化+upload函数）
@@ -218,13 +263,21 @@ class Uploader():
                         'expire': task.get('expire', 7*24*3600)
                     }
 
+            task['_uploader'] = target_uploader   # 记录底层上传器，便于手动停止
+
+            # 取得上传器后、真正开始上传前再次检查是否已被手动停止
+            if task.get('_cancelled'):
+                self._gather(task, 'cancelled')
+                self._free_uploader_pool()
+                return
+
             files = task['files']
             stream_queue = task.get('stream_queue', None)
             retry = upload_args.get('retry', 0)
             if stream_queue:
                 retry = 0       # 流式上传无法重试
             status = info = None
-            
+
             while retry >= 0:
                 try:
                     if stream_queue:
@@ -248,6 +301,8 @@ class Uploader():
                     self.logger.exception(e)
                 
                 retry -= 1
+                if task.get('_cancelled'):   # 被手动停止，立即结束，不再重试
+                    break
                 if status or self.stoped:
                     break
                 elif retry < 0:
@@ -258,7 +313,9 @@ class Uploader():
                     self.logger.debug(info)
                     time.sleep(60)
             
-            if status:
+            if task.get('_cancelled'):
+                self._gather(task, 'cancelled')
+            elif status:
                 self._gather(task, 'info', desc=info)
             else:
                 self._gather(task, 'error', desc=info)

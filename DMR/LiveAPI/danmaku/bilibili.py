@@ -2,9 +2,10 @@ from datetime import datetime
 import json, re, select, random, traceback
 import asyncio, aiohttp, zlib, brotli
 from struct import pack, unpack
-from DMR.utils import random_user_agent, SuperChatDanmaku, SimpleDanmaku,GiftDanmaku
+from DMR.utils import random_user_agent, SuperChatDanmaku, SimpleDanmaku, GiftDanmaku, MemberDanmaku
 from DMR.LiveAPI.bilivideo_utils import encode_wbi, getWbiKeys
 from .DMAPI import DMAPI
+from DMR.utils.bark_notifier  import bark_notify
 import base64
 
 import logging
@@ -200,15 +201,38 @@ class Bilibili(DMAPI):
                     # print(j.get('cmd')) #debug
 
                     msg['msg_type'] = {
-                        'SEND_GIFT': 'gift',
-                        'DANMU_MSG': 'danmaku',
-                        'INTERACT_WORD_V2': 'enter',
-                        'NOTICE_MSG': 'broadcast',
-                        'SUPER_CHAT_MESSAGE': 'super_chat',  # 新增此行
+                        'SEND_GIFT'                    : 'gift',
+                        'DANMU_MSG'                    : 'danmaku',
+                        'SUPER_CHAT_MESSAGE'           : 'super_chat',
+                        'GUARD_BUY'                    : 'guard_buy',
+                        'USER_TOAST_MSG'               : 'skip',
+                        'USER_TOAST_MSG_V2'            : 'skip',
+                        'SUPER_CHAT_MESSAGE_JPN'       : 'skip',
+                        'INTERACT_WORD_V2'             : 'enter',
+                        'NOTICE_MSG'                   : 'broadcast',
+                        'LIKE_INFO_V3_UPDATE'          : 'like_update',
+                        'ONLINE_RANK_V3'               : 'online_rank',
+                        'ONLINE_RANK_COUNT'            : 'online_count',
+                        'ENTRY_EFFECT'                 : 'entry_effect',
+                        'COMBO_SEND'                   : 'gift_combo',
+                        'RANK_CHANGED'                 : 'rank',
+                        'RANK_CHANGED_V2'              : 'rank',
+                        'LIKE_INFO_V3_CLICK'           : 'like',
+                        'WATCHED_CHANGE'               : 'watched',
+                        'COMMON_NOTICE_DANMAKU'        : 'common_notice',
+                        'STOP_LIVE_ROOM_LIST'          : 'stop_live',
+                        'HOT_ROOM_NOTIFY'              : 'hot_room',
+                        'ROOM_REAL_TIME_MESSAGE_UPDATE': 'room_update',
+                        'VOICE_JOIN_ROOM_COUNT_INFO'   : 'voice_join',
+                        'PREPARING'                    : 'preparing',
+                        'ANCHOR_LOT_AWARD'             : 'lot_award',
+                        'ANCHOR_LOT_END'               : 'lot_end',
+                        'POPULAR_RANK_CHANGED'         : 'rank_changed',
+                        'INTERACT_WORD'                : 'interact_word',
                     }.get(j.get('cmd'), 'other')  # 类型判断
 
-                    if 'DANMU_MSG' in j.get('cmd'): # 类型判断的兜底
-                        msg["msg_type"] = "danmaku"
+                    if msg["msg_type"] == 'skip':
+                        continue
 
                     if msg["msg_type"] == "danmaku": # 普通弹幕类型
                         # print(j)
@@ -252,12 +276,8 @@ class Bilibili(DMAPI):
                             logger.info(f"👋 {name} 进入直播间！")
                             logger.info(f"🖼️ 头像: {face}")
                             logger.info(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                            bark_notify("b站通知", f"{name} 进入直播间！",face_url=face)
 
-                    elif msg['msg_type'] == 'interactive_danmaku': # 这个分支没用！
-                        msg["msg_type"] = "danmaku"
-                        msg['name'] = j.get('data', {}).get('uname', '')
-                        msg['content'] = j.get('data', {}).get('msg', '')
-                        msg["color"] = 'ffffff'
 
                     elif msg["msg_type"] == "broadcast":
                         msg["type"] = j.get("msg_type", 0)
@@ -269,16 +289,41 @@ class Bilibili(DMAPI):
                         msg["name"] = j.get('data', {}).get('uinfo', {}).get('base', {}).get('name', '')
                         msg["face_url"] = j.get('data', {}).get('uinfo', {}).get('base', {}).get('face', '')
                         msg["content"] = j.get('data', {}).get('message', '')
-                        msg["price"] = j.get('data', {}).get('price', 0)* 10 # 换算为电池
-                        # msg["background_color"] = j.get('data', {}).get('background_color', 'ffffff')
-                        # msg["background_bottom_color"] = j.get('data', {}).get('background_bottom_color', 'ffffff')
-                        msg["price_unit"]="电池"
+                        msg["price_cny"] = j.get('data', {}).get('price', 0)   # 真实元价格
+                        msg["price"] = msg["price_cny"] * 10                   # 换算为电池（显示用）
+                        msg["price_unit"] = "电池"
+                        msg["background_color"] = j.get('data', {}).get('background_color', 'FFF5ED')
+                        msg["background_bottom_color"] = j.get('data', {}).get('background_bottom_color', 'B2602A')
+                        msg["name_color"] = '666666' # 灰色
+                        msg["content_color"] = 'FFFFFF' # 白色
+                        # msg["name_color"] = j.get('data', {}).get('uinfo', {}).get('base',{}).get('name_color_str','000000')
+                        # msg["content_color"] = j.get('data', {}).get('message_font_color', 'FFFFFF')
+                        msg["sc_duration"] = max(30, min(180, j.get('data', {}).get('time', 60)))
                         msg["raw"]=j
                         try:
                             msg['timestamp'] = j.get('data', {}).get('ts')
                         except:
                             msg['timestamp'] = datetime.now().timestamp()  # 如果没有时间戳，则使用当前时间
                         msg = SuperChatDanmaku(**msg)  # 转换为 SuperChatDanmaku 对象
+
+                    elif msg["msg_type"] == "guard_buy":
+                        data = j.get('data', {})
+                        uname = data.get('username', '未知用户')
+                        price = data.get('price', 0) / 1000  # 金瓜子 → 元
+                        member_name = data.get('gift_name', '舰长')
+                        num = data.get('num', 1)
+                        ts = data.get('start_time', datetime.now().timestamp())
+                        uid = data.get('uid', '')
+                        msg = MemberDanmaku(
+                            uname=uname,
+                            price=price,
+                            price_unit='元',
+                            member_name=member_name,
+                            member_time=num,
+                            member_time_unit='月',
+                            timestamp=ts,
+                            uid=uid,
+                        )
 
                     elif msg["msg_type"] == "gift":
                         data = j.get('data', {})
@@ -324,7 +369,7 @@ class Bilibili(DMAPI):
                     else:
                         msg["content"] = j
                 else:
-                    msg = {"name": "", "content": dm.get('body'), "msg_type": "other"}
+                    continue  # 非业务包（心跳回包等），直接跳过
 
                 msgs.append(msg)
 

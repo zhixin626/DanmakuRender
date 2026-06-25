@@ -3,6 +3,8 @@
 # 2024.6.23 抖音的弹幕录制参考了 https://github.com/SecPhases/DanmakuRender/commit/fd6d85afede5845274ad699bbcdf5db98e68977e
 
 from datetime import datetime
+import base64
+import os
 import threading
 import asyncio
 import gzip
@@ -24,16 +26,143 @@ from .dy_pb2 import PushFrame, Response, ChatMessage, GiftMessage, MemberMessage
 from .utils import DouyinDanmakuUtils
 import aiohttp
 
-from .douyin_shortcodes import replace_shortcodes_to_emoji
-
 from DMR.utils.bark_notifier  import bark_notify
 
 logger = logging.getLogger(__name__)
+
+RED = "\033[31m"
+YELLOW = "\033[33m"
+GREEN = "\033[32m"
+BLUE = "\033[34m"
+RESET = "\033[0m"
+
+def _decode_protobuf_raw(data: bytes, max_depth: int = 4):
+    """
+    在没有 .proto 定义的情况下，按 protobuf wire format 通用解码（类似 protoc --decode_raw）。
+    返回 {field_number: [values...]}，遇到长度分隔字段(wire type 2)会尝试递归当作嵌套消息解析，
+    解析失败则退化为字符串/原始字节，方便人工查看反推协议结构。
+    """
+    result = {}
+    i = 0
+    n = len(data)
+    while i < n:
+        # 解析 tag（varint）
+        tag = 0
+        shift = 0
+        start = i
+        while True:
+            if i >= n:
+                return result
+            b = data[i]
+            i += 1
+            tag |= (b & 0x7F) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 0:  # varint
+            value = 0
+            shift = 0
+            while True:
+                if i >= n:
+                    return result
+                b = data[i]
+                i += 1
+                value |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+        elif wire_type == 1:  # 64-bit
+            if i + 8 > n:
+                return result
+            raw = data[i:i+8]
+            value = {
+                "hex": raw.hex(),
+                "as_uint64_le": int.from_bytes(raw, "little"),
+            }
+            i += 8
+        elif wire_type == 2:  # length-delimited
+            length = 0
+            shift = 0
+            while True:
+                if i >= n:
+                    return result
+                b = data[i]
+                i += 1
+                length |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+            if i + length > n:
+                return result
+            raw = data[i:i+length]
+            i += length
+            if max_depth > 0:
+                try:
+                    nested = _decode_protobuf_raw(raw, max_depth=max_depth - 1)
+                    if nested:
+                        value = nested
+                    else:
+                        raise ValueError
+                except Exception:
+                    try:
+                        value = raw.decode('utf-8')
+                    except Exception:
+                        value = base64.b64encode(raw).decode('ascii')
+            else:
+                try:
+                    value = raw.decode('utf-8')
+                except Exception:
+                    value = base64.b64encode(raw).decode('ascii')
+        elif wire_type == 5:  # 32-bit
+            if i + 4 > n:
+                return result
+            raw = data[i:i+4]
+            value = {
+                "hex": raw.hex(),
+                "as_uint32_le": int.from_bytes(raw, "little"),
+            }
+            i += 4
+        else:
+            # 未知 wire type，停止解析，返回已解出的部分
+            return result
+
+        result.setdefault(str(field_number), []).append(value)
+    return result
 
 
 class Douyin:
     heartbeat = b':\x02hb'
     heartbeatInterval = 10
+
+    # --- 未识别消息采样（用于反推协议格式，如开通会员消息） ---
+    _unknown_sample_counter = {}
+    _unknown_sample_limit = 10
+    _unknown_sample_dir = "douyin_unknown_samples"
+
+    @classmethod
+    def _sample_unknown_message(cls, msg):
+        """对未识别的 method 各采样最多 _unknown_sample_limit 条，落盘成按 method 分类的 jsonl"""
+        method = msg.method
+        cnt = cls._unknown_sample_counter.get(method, 0)
+        if cnt >= cls._unknown_sample_limit:
+            return
+        cls._unknown_sample_counter[method] = cnt + 1
+        try:
+            os.makedirs(cls._unknown_sample_dir, exist_ok=True)
+            record = {
+                "method": method,
+                "msgId": msg.msgId,
+                "decoded": _decode_protobuf_raw(msg.payload),
+            }
+            path = os.path.join(cls._unknown_sample_dir, f"{method}.jsonl")
+            with open(path, "a", encoding="utf-8") as f:
+                # indent=2 方便人工查看/直接复制粘贴发给我分析；用 --- 分隔每条样本
+                f.write(json.dumps(record, ensure_ascii=False, indent=2) + "\n---\n")
+        except Exception as e:
+            logger.info(f"{RED}【SAMPLE】{RESET}采样未识别弹幕消息失败: {e}")
 
     def __init__(self, douyin_dm_cookies:str=None) -> None:
         if not douyin_dm_cookies:
@@ -122,9 +251,13 @@ class Douyin:
         wss_package = PushFrame()
         wss_package.ParseFromString(data)
         log_id = wss_package.logId
-        decompressed = gzip.decompress(wss_package.payload)
+        # 抖音的 payload 不一定 gzip 压缩:只有以 gzip 魔数(\x1f\x8b)开头才解压,
+        # 否则是未压缩的 Response protobuf,直接解析(否则 gzip.decompress 会抛 BadGzipFile)。
+        payload = wss_package.payload
+        if payload[:2] == b'\x1f\x8b':
+            payload = gzip.decompress(payload)
         payload_package = Response()
-        payload_package.ParseFromString(decompressed)
+        payload_package.ParseFromString(payload)
 
         ack = None
         if payload_package.needAck:
@@ -157,7 +290,7 @@ class Douyin:
                 msg_dict = SimpleDanmaku(
                     timestamp=now,
                     uname=name,
-                    content=replace_shortcodes_to_emoji(content),
+                    content=content,   # 保留原始 [xxx],交给渲染引擎用表情包替换(不再转 unicode)
                     dtype='danmaku',
                     color='ffffff',
                     uid=uid,
@@ -184,7 +317,7 @@ class Douyin:
                     print(user_info)
                     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                     print(f"目标id is 55557889854")
-                    bark_notify("通知", f"{name} 进入直播间！")
+                    bark_notify("抖音通知", f"{name} 进入直播间！")
 
                 msg_dict = EntryDanmaku(
                     timestamp = now,
@@ -194,6 +327,7 @@ class Douyin:
                     color     = 'ffffff',
                     uid       = uid,
                 )
+
             elif msg.method == 'WebcastGiftMessage':
                 giftMessage = GiftMessage()
                 giftMessage.ParseFromString(msg.payload)
@@ -225,30 +359,8 @@ class Douyin:
                 )
 
             else:
+                cls._sample_unknown_message(msg)
                 msg_dict = {"timestamp": now, "name": "", "content": "", "msg_type": "other", "raw_data": msg}
-
-                # if msg.method in ['WebcastRoomStatsMessage', 'WebcastLikeMessage', 'WebcastRoomUserSeqMessage']:
-                #     continue
-
-                # # 搜索“财富”关键词的二进制指纹
-                # payload_str = msg.payload.decode('utf-8', errors='ignore')
-
-                # # 嗅探关键词：gift (礼物), diamond (钻石/抖币), score (得分)
-                # if any(k in payload_str.lower() for k in ["gift", "diamond", "score", "送出", "加了"]):
-                #     print(f"\n[🔥 关键载体发现] Method: {msg.method}")
-                #     # 打印出这个包里所有的可见字符，排除掉乱码
-                #     visible_text = "".join(filter(lambda x: x.isprintable(), payload_str))
-                #     print(f"有效信息预览: {visible_text}")
-
-                #     # 针对 WebcastRoomMessage 的特殊处理
-                #     if msg.method == 'WebcastRoomMessage' and "加了" in visible_text:
-                #         print(f">>> 捕获到礼物等效加分，建议计入 revenue")
-
-                # # 如果是 Banner 消息，且不是你刚才发的那种任务 JSON，才打印
-                # elif msg.method == 'WebcastInRoomBannerMessage':
-                #     if "甄选展馆" not in payload_str:
-                #         print(f"[横幅变动]: {payload_str[:200]}")
-
 
             msgs.append(msg_dict)
 

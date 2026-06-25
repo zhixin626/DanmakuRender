@@ -6,7 +6,7 @@ from DMR.utils.merge_mp4 import *
 from DMR.utils import *
 from DMR.LiveAPI import LiveAPI
 from DMR.utils.dataclass import VideoInfo, StreamerInfo
-from DMR.Task.liveevents import LiveEvents, read_monthly_bvids, write_monthly_bvid
+from DMR.Task.liveevents import LiveEvents, read_period_bvid, write_period_bvid
 
 import colorlog
 handler = colorlog.StreamHandler()
@@ -89,7 +89,11 @@ def load_config(file_path):
 def file_to_args(file_path):
     """返回 (common_event_args, download_args, [upload_config, ...])。"""
     taskname, vtype, data = load_config(file_path)
-    common_event_args = data.get("common_event_args")
+    common_event_args = data.get("common_event_args") or {}
+    # 兼容：merge_args/bark_args 现已上移为顶层；回填进 common_event_args，旧调用方无需改动
+    for key in ("merge_args", "bark_args"):
+        if data.get(key) is not None and key not in common_event_args:
+            common_event_args[key] = data.get(key)
     download_args = data.get("download_args")
     raw_upload_args = _pick_upload_arg(data.get("upload_args", {}), vtype)
     if isinstance(raw_upload_args, dict):
@@ -113,17 +117,22 @@ def _make_live_events(file_path) -> tuple:
     live_events.dmvideo_path   = Path(str(download_args.get("output_dir")) + "（弹幕版）")
     live_events.transcode_path = Path(str(download_args.get("output_dir")) + "（转码后）")
 
-    # 手动初始化 live_status，避免调用 onLiveStart
+    # 手动初始化 live_status（结构与 onLiveStart 保持一致）
     live_events.live_status[_MANUAL_GROUP_ID] = {
-        "is_already_render_cover": False,
-        "is_live_end": True,
         "rendered_cover_names": set(),
-        "gift_stat": {
-            "total_revenue": "未知",
-            "total_gifters": "未知",
-            "top_ranking":   "未知",
-        },
+        "is_live_end"   : True,
+        "gifts_revenue" : "",
+        "num_of_gifters": "",
+        "sc_revenue"    : "",
+        "num_of_sc"     : "",
+        "total_revenue" : "",
+        "top_ranking"   : "",
+        "stime"         : None,
+        "etime"         : None,
+        "totaltime"     : "",
     }
+    # 从磁盘读取礼物统计和开播时间，写入 live_status
+    live_events._collect_session_data(_MANUAL_GROUP_ID)
     return live_events, download_args
 
 
@@ -148,22 +157,27 @@ def get_last_gift_stats(folder_path):
 
 # ── VideoInfo 构建 ────────────────────────────────────────
 
-def build_videoinfo(file_path: str) -> VideoInfo:
+def build_videoinfo(file_path: str, live_events) -> VideoInfo:
+    """
+    构建基础 VideoInfo，会话级字段（礼物统计、时间）由 live_events._backfill_video_info 统一填入。
+    live_events 须已调用过 _collect_session_data。
+    """
     p = Path(file_path)
     if not p.exists():
         raise FileNotFoundError(file_path)
 
     _, download_args, _ = file_to_args(file_path)
-    out_dir = download_args.get("output_dir")
 
-    st, et = read_last_complete_session(out_dir, only_start=False)
+    try:
+        api      = LiveAPI(download_args.get("url"))
+        roominfo = api.GetRoomInfo() or {}
+    except Exception:
+        roominfo = {}
 
-    api = LiveAPI(download_args.get("url"))
-    roominfo = api.GetRoomInfo()
-    streamer = StreamerInfo(name=roominfo.get("name", ""), url=download_args.get("url"))
-
-    raw_stat = get_last_gift_stats(out_dir)
-    names_list = [f"{item['name']}({item['total_value']})" for item in raw_stat.get("top_ranking", [])]
+    streamer = StreamerInfo(
+        name = roominfo.get("name", ""),
+        url  = download_args.get("url", ""),
+    )
 
     st_stat = p.stat()
     media   = probe_media(str(p))
@@ -178,23 +192,31 @@ def build_videoinfo(file_path: str) -> VideoInfo:
     else:
         dtype = ""
 
-    return VideoInfo(
-        path          = str(p),
-        dtype         = dtype,
-        size          = st_stat.st_size,
-        ctime         = datetime.fromtimestamp(st_stat.st_ctime),
-        stime         = st,
-        etime         = et,
-        totaltime     = format_duration(st, et),
-        duration      = media["duration"],
-        resolution    = media["resolution"],
-        title         = roominfo.get("title", ""),
-        streamer      = streamer,
-        taskname      = taskname,
-        total_revenue = raw_stat.get("total_revenue", 0),
-        total_gifters = raw_stat.get("total_gifters", 0),
-        top_ranking   = ",".join(names_list),
+    video_info = VideoInfo(
+        path       = str(p),
+        dtype      = dtype,
+        file_id    = uuid(),
+        size       = st_stat.st_size,
+        ctime      = datetime.fromtimestamp(st_stat.st_ctime),
+        duration   = media["duration"],
+        resolution = media["resolution"],
+        title      = roominfo.get("title", ""),
+        streamer   = streamer,
+        taskname   = taskname,
+        group_id   = _MANUAL_GROUP_ID,
+        segment_id = 1,
     )
+
+    # 把 VideoInfo 注入 state_dict，让 _backfill_video_info 能找到它
+    if _MANUAL_GROUP_ID not in live_events.state_dict:
+        live_events.state_dict[_MANUAL_GROUP_ID] = []
+    live_events.state_dict[_MANUAL_GROUP_ID].append({
+        dtype: {"status": "ready", "file": video_info, "wait": []}
+    })
+    # 统一回填会话级字段（礼物统计、stime/etime/totaltime 等）
+    live_events._backfill_video_info(_MANUAL_GROUP_ID)
+
+    return video_info
 
 
 # ── 上传流程 ──────────────────────────────────────────────
@@ -202,7 +224,7 @@ def build_videoinfo(file_path: str) -> VideoInfo:
 def upload_process(video_infos: list, account_config: dict, live_events: LiveEvents):
     """
     单账号上传：
-    1. 若配置了 auto_append_monthly，注入 base_bvid（对齐 LiveEvents._check_for_upload）
+    1. 若配置了 auto_append_period，注入 base_bvid（对齐 LiveEvents._check_for_upload）
     2. 调用 DMR 的 uploader
     3. 上传成功后写入 bvid 历史，并通过 live_events.check_add_to_list 处理合集
     acfun 引擎支持传入多个 VideoInfo 实现分P上传，其他引擎仅使用第一个。
@@ -211,16 +233,17 @@ def upload_process(video_infos: list, account_config: dict, live_events: LiveEve
     account = account_config["account"]
     cfg = account_config.copy()
 
-    # --- auto_append_monthly：注入 base_bvid ---
-    if cfg.get("auto_append_monthly"):
+    # --- auto_append_period：注入 base_bvid ---
+    period = cfg.get("auto_append_period")
+    if period in ('monthly', 'daily'):
         st, _ = read_last_complete_session(live_events.src_path, only_start=False)
-        target_bvid = read_monthly_bvids(live_events.src_path, st, account=account)
+        target_bvid = read_period_bvid(live_events.src_path, st, period=period, account=account)
         if target_bvid:
             cfg["base_bvid"] = target_bvid
-            logger.info(f"[账号{account}] 追加模式：检测到当月已有稿件 {target_bvid}，将追加至该稿件")
+            logger.info(f"[账号{account}] 追加模式({period})：检测到已有稿件 {target_bvid}，将追加至该稿件")
         else:
             cfg["base_bvid"] = ""
-            logger.info(f"[账号{account}] 追加模式：当月暂无稿件，将创建新稿件")
+            logger.info(f"[账号{account}] 追加模式({period})：暂无稿件，将创建新稿件")
 
     engine_type = cfg.get("engine", "biliuprs")
     base_bvid = cfg.get("base_bvid", "")
@@ -245,11 +268,13 @@ def upload_process(video_infos: list, account_config: dict, live_events: LiveEve
         if engine_type in ("biliuprs", "biliwebapi"):
             bvid = result
             # --- 写 bvid 历史（对齐 LiveEvents.onUploadEnd） ---
-            if cfg.get("auto_append_monthly") and bvid != cfg.get("base_bvid", ""):
+            _period = cfg.get("auto_append_period")
+            if _period in ('monthly', 'daily') and bvid != cfg.get("base_bvid", ""):
                 try:
                     st, _ = read_last_complete_session(live_events.src_path, only_start=False)
-                    write_monthly_bvid(live_events.src_path, st, bvid, account=account)
-                    logger.info(f"已登记 {st.month} 月 账号 {account} bvid: {bvid}")
+                    write_period_bvid(live_events.src_path, st, bvid, period=_period, account=account)
+                    period_label = f"{st.year}-{st.month:02d}-{st.day:02d}" if _period == 'daily' else f"{st.year}-{st.month:02d}"
+                    logger.info(f"已登记 {period_label} 账号 {account} bvid: {bvid}")
                 except Exception as e:
                     logger.error(f"登记 bvid 失败: {e}")
 
@@ -268,7 +293,7 @@ def main():
     # 加载配置 & 创建 LiveEvents 实例（不触发 onLiveStart）
     live_events, download_args = _make_live_events(video_path)
     _, _, all_upload_configs = file_to_args(video_path)
-    video_info = build_videoinfo(video_path)
+    video_info = build_videoinfo(video_path, live_events)
     video_infos = [video_info]
 
     # 选择账号
@@ -295,7 +320,7 @@ def main():
             if not extra:
                 break
             try:
-                video_infos.append(build_videoinfo(extra))
+                video_infos.append(build_videoinfo(extra, live_events))
                 print(f"已添加 P{len(video_infos)}: {extra}")
             except Exception as e:
                 print(f"❌ 读取失败，跳过: {e}")

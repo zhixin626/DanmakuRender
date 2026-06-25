@@ -19,6 +19,11 @@ VERSION = '2026.05.01'
 
 from DMR import DanmakuRender
 from DMR.Config import Config
+from DMR.utils.console_buffer import install_console_tee
+
+# 接管控制台输出，镜像到内存缓冲区供 WebService 日志页读取
+# 必须在下面 logging.StreamHandler(sys.stdout) 创建之前调用
+install_console_tee()
 
 if __name__ == '__main__':    
     parser = argparse.ArgumentParser()

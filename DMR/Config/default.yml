@@ -48,9 +48,9 @@ download_args:
     danmaku: True
     # 是否录制直播流
     video: True
-    # 延迟下播计时（分钟）
+    # 延迟下播计时（秒）
     # 使用这个功能可以把主播短暂下播又开播认定为同一场直播
-    stop_wait_time: 120
+    stop_wait_time: 7200
     # 直播流选项
     # 使用streamlink录制时不生效
     stream_option:
@@ -158,7 +158,12 @@ download_args:
       # 弹幕文件最小录制时间（秒），小于此录制时间的弹幕文件将被删除
       # 此功能可用于删除因为录制错误导致的许多空弹幕文件
       dm_file_min_time: 30
-  
+    # SuperChat（醒目留言）渲染参数
+    sc_dm_args:
+      # 最新一条 SC 的底边所在位置（屏幕高度比例，0~1），旧 SC 向上堆叠，默认 0.93
+      # 与礼物框 gift_dm_args.anchor_y_ratio（默认 0.88）分开，避免上下重叠
+      anchor_y_ratio: 0.93
+
   # 视频下载
   videos:
     # 需要下载的视频链接
@@ -236,6 +241,18 @@ render_args:
     aencoder: aac
     # 音频编码器参数，默认恒定码率320Kbps
     aencoder_args: [-b:a, 320K]
+    # ===== 彩色 emoji / 表情渲染(可选) =====
+    # 设为 true 改用 EmojiDmRender 引擎:libass 烧普通弹幕 + 彩色 emoji/方括号表情贴图(多核并行)。
+    # 注意:此引擎仅支持 nvenc 等接受 nv12 输入的编码器,且暂不支持 output_resize。
+    emoji: false
+    # 表情包目录:[xxx]弹幕表情替换成 目录/xxx.png。
+    # 留空(~)自动用 ./emoji_pack/<平台>(平台从弹幕识别:bilibili/douyin/douyu);也可显式指定如 ./emoji_pack/bilibili
+    emoji_pack: ~
+    # emoji 字体(留空用系统 Segoe UI Emoji);可换 Noto/Twemoji 等 ttf
+    emoji_font: ~
+    # 并行路数(建议4~6)与 段倍率(段数=路数×段倍率,负载均衡)
+    workers: 4
+    segmul: 3
     # 输出重缩放，会把输出重缩放到指定分辨率，可以设置为'WxH'直接指定输出分辨率，例如'3840x2160'（4K）
     # 也可以指定为当前视频的大小倍数，例如'1.5'，这样1080P视频将会被放大到2880x1620（这个也符合了B站的4K视频标准）
     output_resize: ~
@@ -245,6 +262,25 @@ render_args:
       # 直接定义video filter，这里的{DANMAKU}代表弹幕文件路径
       # 注意设置filter_complex之后将会禁用fps等其他有关filter的选项
       filter_complex: subtitles=filename='{DANMAKU}'
+    # 语音识别字幕：渲染弹幕时对该段视频做 ASR，生成字幕并和弹幕一起烧进画面（单遍编码）
+    # 需要 run_asr.py 所在的 FunASR 环境（与 DMR 同环境即可），首次会下载/加载模型，较慢
+    subtitle:
+      # 是否开启自动字幕识别（默认关闭）
+      enable: false
+      # 字体名（需系统已安装，ffmpeg/libass 按此名匹配）
+      font_name: 微软雅黑
+      # 字号（像素，基于视频真实分辨率）
+      font_size: 60
+      # 距视频下边缘的距离，比例 0~1（0.06 = 6%，基于视频高度，与 GUI 一致）
+      margin_bottom: 0.06
+      # 字体颜色 #RRGGBB
+      font_color: '#FFD500'
+      # 描边宽度，0 为无描边
+      outline: 6
+      # 描边颜色 #RRGGBB
+      outline_color: '#000000'
+      # 每行最多字数，超过则自动换行（0=不换行）
+      wrap_chars: 20
   # 原视频转码
   transcode:
     # 渲染输出文件夹，默认为在录制输出文件夹后面加上“转码后”
@@ -489,5 +525,29 @@ clean_args:
     w_srcfile: False
     w_srcpre: True
 
+# 录制分段合并参数（可选，按 group_id 把同场直播的多个分段合并成一个文件）
+merge_args:
+  # 是否开启合并，默认关闭
+  is_merge: False
+  # 要合并的视频类型，可选 src_video / dm_video，可多选，例如 ['dm_video']
+  merge_type: ~
+  # 是否对合并后的音频做增益
+  is_amplify: False
+  # 增益分贝数（is_amplify 为 True 时生效）
+  extra_gain_db: 0
+  # 合并后输出文件名模板，可用 {stime} 占位，例如 {stime.month:02d}月{stime.day:02d}日
+  file_name_template: "{stime.month}月{stime.day}日"
+
+# Bark 推送通知参数（可选）
+bark_args:
+  # 是否开启 Bark 推送，默认关闭
+  is_bark: False
+  # 推送提示音
+  sound: birdsong
+
 webservice_kernel_args:
   web_api: True
+  # 打开文件夹用的 AutoHotkey 脚本路径（复用资源管理器窗口）；留空则用系统默认方式打开
+  folder_opener_ahk: ~
+  # AutoHotkey 可执行程序路径，留空自动探测
+  ahk_exe: ~

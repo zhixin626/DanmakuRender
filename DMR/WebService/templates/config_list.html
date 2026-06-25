@@ -4,43 +4,152 @@
 <div class="card">
     <div style="display: flex; justify-content: space-between; align-items: center;">
         <h2>配置文件管理</h2>
-        <a href="{{ url_for('config_create') }}"><button class="btn-secondary">新增配置</button></a>
+        <div>
+            <button id="btn-apply-all" class="btn-secondary" style="display:none;" onclick="applyAll()">全部应用</button>
+            <button id="btn-defer-all" class="btn-secondary" style="display:none;" onclick="deferAll()">全部推迟到重启</button>
+            <a href="{{ url_for('config_create') }}"><button class="btn-secondary">新增配置</button></a>
+        </div>
     </div>
-    
+
+    <p style="color:#888;font-size:13px;margin:4px 0 12px;">
+        改了配置不会自动生效 —— 点「应用更新」热重载（录制中会等空闲），或重启程序统一应用。
+    </p>
+
     <table>
         <thead>
             <tr>
                 <th>文件名</th>
                 <th>任务名</th>
+                <th>状态</th>
                 <th>操作</th>
             </tr>
         </thead>
-        <tbody>
-            {% for config in configs %}
-            <tr>
-                <td>{{ config.filename }}</td>
-                <td>{{ config.taskname }}</td>
-                <td>
-                <a href="{{ url_for('config_edit', filename=config.filename) }}">编辑</a>
-                 {% if not config.filename.startswith('example-') %}
-                 <a href="javascript:void(0);" onclick="confirmDelete('{{ config.filename }}', '{{ url_for('config_delete', filename=config.filename) }}')" style="color: red; margin-left: 10px;">删除</a>
-                 {% endif %}
-             </td>
-            </tr>
-            {% endfor %}
+        <tbody id="config-tbody">
+            <tr><td colspan="4" style="color:#999;">加载中...</td></tr>
         </tbody>
     </table>
 </div>
 
 <script>
-    function confirmDelete(filename, url) {
-        if (confirm('确定要删除配置文件 ' + filename + ' 吗？此操作不可恢复。')) {
-            var form = document.createElement('form');
-            form.method = 'POST';
-            form.action = url;
-            document.body.appendChild(form);
-            form.submit();
-        }
+    var STATUS_META = {
+        'new':      { text: '待应用（新增）',      color: '#1a8917' },
+        'modified': { text: '待应用（修改）',      color: '#e08e00' },
+        'deleted':  { text: '待应用（删除）',      color: '#c00'    },
+        'deferred': { text: '待应用（重启时生效）', color: '#7a8aa0' }
+    };
+
+    function esc(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
+
+    function buildRow(c) {
+        var meta = STATUS_META[c.status];
+        var statusHtml = meta
+            ? '<span style="color:' + meta.color + ';font-weight:bold;">● ' + meta.text + '</span>'
+            : '<span style="color:#999;">已同步</span>';
+
+        var nameStyle = c.exists ? '' : 'text-decoration:line-through;color:#c00;';
+        var fnAttr = esc(c.filename);
+
+        var ops = [];
+        var isPending = (c.status === 'new' || c.status === 'modified' || c.status === 'deleted');
+        if (c.exists) {
+            ops.push('<a href="/config/edit/' + encodeURIComponent(c.filename) + '">编辑</a>');
+        }
+        if (isPending) {
+            ops.push('<a href="javascript:void(0);" class="op-apply" data-fn="' + fnAttr + '" style="color:#0066cc;font-weight:bold;">应用更新</a>');
+            ops.push('<a href="javascript:void(0);" class="op-defer" data-fn="' + fnAttr + '" style="color:#7a8aa0;">推迟到重启</a>');
+        }
+        if (c.status === 'deferred') {
+            ops.push('<a href="javascript:void(0);" class="op-undefer" data-fn="' + fnAttr + '" style="color:#0066cc;">撤销推迟</a>');
+        }
+        if (c.exists && !c.is_example) {
+            ops.push('<a href="javascript:void(0);" class="op-delete" data-fn="' + fnAttr + '" style="color:red;">删除</a>');
+        }
+
+        return '<tr>' +
+            '<td style="' + nameStyle + '">' + esc(c.filename) + '</td>' +
+            '<td>' + esc(c.taskname) + '</td>' +
+            '<td>' + statusHtml + '</td>' +
+            '<td>' + ops.join('&nbsp;&nbsp;') + '</td>' +
+            '</tr>';
+    }
+
+    function refreshConfigList() {
+        return fetch('/api/config/list')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var tbody = document.getElementById('config-tbody');
+                var configs = data.configs || [];
+                if (configs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="color:#999;">暂无配置文件。</td></tr>';
+                } else {
+                    tbody.innerHTML = configs.map(buildRow).join('');
+                }
+                var hasPending = configs.some(function (c) {
+                    return c.status === 'new' || c.status === 'modified' || c.status === 'deleted';
+                });
+                document.getElementById('btn-apply-all').style.display = hasPending ? '' : 'none';
+                document.getElementById('btn-defer-all').style.display = hasPending ? '' : 'none';
+                if (window.updateNavBadges) updateNavBadges(data.notifications);
+            })
+            .catch(function (e) { console.error('刷新配置列表失败:', e); });
+    }
+
+    function applyConfig(filename) {
+        if (!confirm('确定应用 ' + filename + ' 的改动吗？\n对应任务若空闲会立即重启生效，正在录制则等空闲后再生效。')) return;
+        fetch('/api/config/apply/' + encodeURIComponent(filename), { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) { alert(d.message || (d.ok ? '已应用' : '应用失败')); refreshConfigList(); })
+            .catch(function (e) { alert('请求失败: ' + e); });
+    }
+
+    function deferConfig(filename) {
+        fetch('/api/config/defer/' + encodeURIComponent(filename), { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function () { refreshConfigList(); });
+    }
+
+    function undeferConfig(filename) {
+        fetch('/api/config/undefer/' + encodeURIComponent(filename), { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function () { refreshConfigList(); });
+    }
+
+    function confirmDelete(filename) {
+        if (!confirm('确定要删除配置文件 ' + filename + ' 吗？此操作不可恢复。')) return;
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/config/delete/' + encodeURIComponent(filename);
+        document.body.appendChild(form);
+        form.submit();
+    }
+
+    function applyAll() {
+        if (!confirm('确定应用所有待应用的改动吗？')) return;
+        var btns = document.querySelectorAll('.op-apply');
+        var names = Array.prototype.map.call(btns, function (b) { return b.dataset.fn; });
+        Promise.all(names.map(function (fn) {
+            return fetch('/api/config/apply/' + encodeURIComponent(fn), { method: 'POST' });
+        })).then(function () { refreshConfigList(); });
+    }
+
+    function deferAll() {
+        fetch('/api/config/defer_all', { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) { alert(d.message || '已推迟'); refreshConfigList(); });
+    }
+
+    // 事件委托：动态行里的操作按钮
+    document.getElementById('config-tbody').addEventListener('click', function (e) {
+        var t = e.target;
+        if (!t.dataset || !t.dataset.fn) return;
+        if (t.classList.contains('op-apply'))   applyConfig(t.dataset.fn);
+        else if (t.classList.contains('op-defer'))   deferConfig(t.dataset.fn);
+        else if (t.classList.contains('op-undefer')) undeferConfig(t.dataset.fn);
+        else if (t.classList.contains('op-delete'))  confirmDelete(t.dataset.fn);
+    });
+
+    startPolling(refreshConfigList, 1000);
 </script>
 {% endblock %}

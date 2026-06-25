@@ -87,6 +87,8 @@ button:hover { opacity: 0.9; }
 }
 .status-running { background-color: #4caf50; color: white; }
 .status-stopped { background-color: #000000; color: #888888; border: 1px solid #333333; }
+.status-replay  { background-color: #1976d2; color: white; }
+.status-stopping { background-color: #f0a500; color: white; }
 
 .flash-messages {
     margin-bottom: 20px;
@@ -98,6 +100,87 @@ button:hover { opacity: 0.9; }
 }
 .flash-success { background-color: rgba(76, 175, 80, 0.2); border: 1px solid #4caf50; }
 .flash-error { background-color: rgba(244, 67, 54, 0.2); border: 1px solid #f44336; }
+
+/* Time Picker (wheel style) */
+.tp-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.tp-modal {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 20px;
+    width: 280px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+}
+
+.tp-modal h3 { text-align: center; margin-bottom: 15px; }
+
+.tp-wheels {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    gap: 4px;
+}
+
+.tp-wheel {
+    height: 200px;
+    width: 70px;
+    overflow-y: scroll;
+    scroll-snap-type: y mandatory;
+    scrollbar-width: none;
+}
+.tp-wheel::-webkit-scrollbar { display: none; }
+
+.tp-spacer { height: 80px; }
+
+.tp-item {
+    height: 40px;
+    line-height: 40px;
+    text-align: center;
+    scroll-snap-align: center;
+    font-family: monospace;
+    font-size: 1.3rem;
+    color: #777;
+    cursor: pointer;
+    user-select: none;
+}
+.tp-item.tp-active { color: var(--accent-color); font-weight: bold; }
+
+.tp-colon {
+    line-height: 200px;
+    font-size: 1.3rem;
+    font-family: monospace;
+    color: var(--text-color);
+}
+
+.tp-highlight {
+    position: absolute;
+    top: 80px;
+    left: 0;
+    right: 0;
+    height: 40px;
+    border-top: 1px solid var(--accent-color);
+    border-bottom: 1px solid var(--accent-color);
+    pointer-events: none;
+}
+
+.tp-buttons {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 15px;
+}
+.tp-buttons button { flex: 1; padding: 8px 0; }
+.tp-btn-clear { background-color: #555; color: #fff; }
+.tp-btn-close { background-color: transparent; color: var(--text-color); border: 1px solid var(--border-color); }
 
 /* Login Page Specific Styles */
 .login-body {

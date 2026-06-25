@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>控制台日志 <span id="log-status" style="font-size:0.8rem;font-weight:normal;color:#888;"></span></h2>
+    <pre id="console-box" style="background:#111;color:#ddd;padding:12px;border-radius:6px;height:70vh;overflow-y:auto;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.5;white-space:pre-wrap;word-break:break-all;margin:0;"></pre>
+</div>
+
+<script>
+    const box = document.getElementById('console-box');
+    const statusEl = document.getElementById('log-status');
+    let lastText = null;
+    let firstLoad = true;
+
+    function refreshConsole() {
+        fetch('/api/console?lines=1000')
+            .then(r => r.json())
+            .then(d => {
+                if (window.updateNavBadges) updateNavBadges(d.notifications);
+                statusEl.textContent = '（自动刷新中）';
+                const text = d.lines.join('\n');
+                if (text === lastText) return;
+                // 用户停留在底部时才自动跟随滚动，往上翻阅历史时不打扰
+                const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+                lastText = text;
+                box.textContent = text;
+                if (firstLoad || atBottom) {
+                    box.scrollTop = box.scrollHeight;
+                    firstLoad = false;
+                }
+            })
+            .catch(() => { statusEl.textContent = '（连接断开，重试中…）'; });
+    }
+
+    startPolling(refreshConsole, 1000);
+</script>
+{% endblock %}

@@ -1,5 +1,19 @@
 from datetime import datetime
 from typing import Union
+
+
+def format_price(v):
+    """格式化价格：保留最多 1 位小数并去掉多余的 0。
+    1.0->1, 1.2->1.2, 1.20->1.2, 1.234->1.2；None 原样返回。"""
+    if v is None:
+        return None
+    try:
+        f = round(float(v), 1)
+    except (TypeError, ValueError):
+        return v
+    return int(f) if f == int(f) else f
+
+
 class SimpleDanmaku():
     def __init__(self,
                  time:float=None,
@@ -57,15 +71,17 @@ class MemberDanmaku(SimpleDanmaku):
         **kwargs,
     ):
         super().__init__(uname=uname,dtype=dtype,**kwargs)
-        self.member_name=member_name
-        self.member_time=member_time
-        self.member_time_unit=member_time_unit
-        self.price=price
+        self.dtype            = 'member'
+        self.member_name      = member_name
+        self.member_time      = member_time
+        self.member_time_unit = member_time_unit
+        self.price            = format_price(price)
         if text:
             self.text=text
         else:
-            self.text=f"{uname} 开通了{member_time}个{member_time_unit}的{member_name}价值{price}{price_unit}"
+            self.text=f"{uname} 开通了{member_time}个{member_time_unit}的{member_name}价值{self.price}{price_unit}"
 
+        self.gift_coverter_content=f"开通{member_name}({self.price}{price_unit})x{member_time}{member_time_unit}"
 
 class GiftDanmaku(SimpleDanmaku):
     def __init__(
@@ -81,46 +97,43 @@ class GiftDanmaku(SimpleDanmaku):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self.dtype           = 'gift'
         self.gift_name       = gift_name
         self.gift_count      = int(gift_count)
-        self.gift_price      = float(gift_price) if gift_price is not None else 0.0
-        self.total_price_cny = total_price_cny
+        self.price_unit      = price_unit
+        self.gift_price      = format_price(gift_price if gift_price is not None else 0.0)
+        self.total_price_cny = format_price(total_price_cny)
+        self.price           = format_price(price if price is not None else self.gift_price * self.gift_count)
 
-        # 新增：如果 gift_price 小数部分为 0，转成 int
-        if self.gift_price.is_integer():
-            self.gift_price = int(self.gift_price)
+        if text:
+            self.text = text
+        else:
+            self.text =f'{self.uname} 送给主播价值{self.gift_price}{self.price_unit}的{self.gift_name}x{self.gift_count}'
 
-        self.price_unit = price_unit
-        self.price = price if price is not None else self.gift_price * self.gift_count
-        # 新增：如果 price 小数部分为 0，转成 int
-        if isinstance(self.price, float) and self.price.is_integer():
-            self.price = int(self.price)
-
-        self.dtype = 'gift'
-        self.text = text if text is not None else\
-            f'{self.uname} 送给主播价值{self.gift_price}{self.price_unit}的{self.gift_name}x{self.gift_count}'
-
+        self.gift_coverter_content=f"送出{self.gift_name}({self.gift_price}{self.price_unit})x{self.gift_count}"
 
 class SuperChatDanmaku(SimpleDanmaku):
     def __init__(
         self,
         price: float = 0.0,
         price_unit: str = 'CNY',
-        duration: int = 0,
+        price_cny: float = 0.0,   # 真实元价格，用于统计收益
+        sc_duration: int = 0,
         name: str = '',
-        background_color="FFF5ED", # 浅蓝（名字和价格的message box）
-        background_bottom_color="B2602A", # 深蓝（内容的message box）
+        background_color="FFF5ED",
+        background_bottom_color="B2602A",
         name_color="000000",
-        content_color="FFFFFF", # 白色
+        content_color="FFFFFF",
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self.dtype = 'superchat'
         self.uname = name
         self.price = price
         self.price_unit = price_unit
-        self.duration = duration
-        self.dtype = 'superchat'
+        self.price_cny = float(price_cny)   # 真实元价格
+        self.sc_duration = sc_duration
         self.background_color=background_color
         self.background_bottom_color=background_bottom_color
         self.name_color=name_color
@@ -136,5 +149,4 @@ class EntryDanmaku(SimpleDanmaku):
     ):
         super().__init__(*args, **kwargs)
         self.dtype = 'entry'
-
         self.text = text if text is not None else f'{self.uname} 进入直播间'

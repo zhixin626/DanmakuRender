@@ -14,6 +14,7 @@ from DMR.utils.danmaku import GiftDanmaku
 from DMR.utils.gifts_utils import save_gift_to_jsonl
 from typing import Union
 from .sc_converter import SCConverter
+from .gift_converter import GiftConverter
 from send2trash import send2trash
 __all__ = ['DanmakuDownloader']
 
@@ -29,14 +30,17 @@ class DanmakuDownloader():
                  advanced_dm_args:dict={},
                  gifts_file_path:Union[str,None]=None,
                  gift_dm_args:dict={},
+                 sc_dm_args:dict={},
                  enable_gift_recorder=False,
                  gift_minimum_cny=None,
-                 uid_lists:list=[],
+                 vip_lists=None,
+                 uid_lists=None,   # 旧名，兼容保留（纯 uid 列表，无专属药丸色）
                  **kwargs) -> None:
 
-        self.gift_minimum_cny=gift_minimum_cny
+        self.gift_minimum_cny=gift_minimum_cny   # 来自 gift_dm_args.gift_min_cny，None=不过滤
         self.enable_gift_recorder=enable_gift_recorder
         self.gift_dm_args = gift_dm_args
+        self.sc_dm_args = sc_dm_args
         self.gifts_file_path=gifts_file_path if gifts_file_path else os.path.join(os.path.dirname(output), "gifts.jsonl")
         self.stoped = False
 
@@ -54,7 +58,26 @@ class DanmakuDownloader():
         self.dm_file_min_time = self.advanced_dm_args.get('dm_file_min_time', 10)
 
         self.dm_filter = dm_filter.copy() if dm_filter else {}
-        self.uid_lists=uid_lists
+        # vip_lists 归一为 {uid(str): pill_color(str或None)}。
+        # 支持三种写法：dict{uid:color} / [uid,...] / [{uid:..,pill_color:..}, [uid,color], ...]
+        # pill_color 为 None 表示该 VIP 的药丸用弹幕自身颜色。uid_lists（旧）并入，颜色一律 None。
+        vip_map = {}
+        for u in (uid_lists or []):
+            vip_map[str(u)] = None
+        _vl = vip_lists
+        if isinstance(_vl, dict):
+            for u, c in _vl.items():
+                vip_map[str(u)] = (str(c) if c else None)
+        elif isinstance(_vl, (list, tuple)):
+            for it in _vl:
+                if isinstance(it, dict):
+                    if it.get('uid') is not None:
+                        vip_map[str(it['uid'])] = (str(it.get('pill_color')) if it.get('pill_color') else None)
+                elif isinstance(it, (list, tuple)) and it:
+                    vip_map[str(it[0])] = (str(it[1]) if len(it) > 1 and it[1] else None)
+                else:
+                    vip_map[str(it)] = None
+        self.vip_map = vip_map
 
 
         try:
@@ -142,6 +165,8 @@ class DanmakuDownloader():
             dm_type = self.dm_filter.get('dm_type') or ''
             if 'superchat' in dm_type:
                 self._convert_sc_dynamic(filename)
+            if 'gift' in dm_type or 'member' in dm_type:
+                self._convert_gift_dynamic(filename)
 
     def dm_available(self, dm:SimpleDanmaku) -> bool:
 
@@ -225,19 +250,21 @@ class DanmakuDownloader():
                         )
                     # 将绝对时间转换为相对时间
                     dm.time = dm.timestamp - self.part_start_time - self.dm_delay_fixed
-                    if self.enable_gift_recorder and dm.dtype == "gift":
-                        save_gift_to_jsonl(dm,self.gifts_file_path)
+                    if self.enable_gift_recorder and dm.dtype in ("gift", "superchat", "member"):
+                        save_gift_to_jsonl(dm, self.gifts_file_path)
 
                     # 载入弹幕模板
                     if dm_templ := self.dm_template.get(dm.dtype):
                         dm.text = replace_keywords(dm_templ, dm)
 
                     # vip弹幕
-                    if self.uid_lists and (uid := str(getattr(dm, "uid", ""))) in self.uid_lists:
+                    vip_pill_color = None
+                    if self.vip_map and (uid := str(getattr(dm, "uid", ""))) in self.vip_map:
                         # 这里是为了给asswriter的get_length能获取到正确的长度
                         # vip弹幕最终的格式由asswriter决定，默认是下面这样
                         dm.text=f"{dm.uname}:{dm.content}"
                         dm.is_vip=True
+                        vip_pill_color = self.vip_map[uid]   # None=用弹幕自身颜色
 
                     if not self.dm_available(dm):
                         continue
@@ -248,7 +275,7 @@ class DanmakuDownloader():
                             continue
 
                     retry = 0
-                    if self.dmwriter.add(dm):
+                    if self.dmwriter.add(dm, pill_color=vip_pill_color):
                         last_dm_time = datetime.now().timestamp()
                     else:
                         # print(f"未写入{dm.text}")
@@ -323,14 +350,37 @@ class DanmakuDownloader():
         """
         tmp = ass_file + '.tmp'
         try:
+            sc = self.sc_dm_args or {}
             sc_count = SCConverter(
                 screen_width=self.dmwriter.width,
                 screen_height=self.dmwriter.height,
+                anchor_y_ratio=sc.get('anchor_y_ratio', 0.93),   # SC 最新一条底边位置（屏幕高度比例）
             ).convert(ass_file, tmp)
             send2trash(ass_file)         # 原文件移入回收站（可还原）
             os.rename(tmp, ass_file)     # 临时文件改回原名
-            self.logger.info(f'SC动态转换完成：{ass_file}（共{sc_count}条）')
+            self.logger.info(f'SC成功加入：{ass_file}（共{sc_count}条）')
         except Exception as e:
-            self.logger.warning(f'SC动态转换失败，跳过：{e}')
+            self.logger.warning(f'SC加入失败，跳过：{e}')
             if os.path.exists(tmp):
                 os.remove(tmp)           # 清理残留临时文件
+
+    def _convert_gift_dynamic(self, ass_file: str):
+        """将 ASS 文件中的 GIFT_DATA 注释行替换为动态礼物动画（右侧滑入）。"""
+        g = self.gift_dm_args or {}
+        if not g.get('gift_box_enable', True):
+            return   # 未开启礼物框：GIFT_DATA 注释行保留为注释（不渲染），不做转换
+        tmp = ass_file + '.gift.tmp'
+        try:
+            n = GiftConverter(
+                screen_width=self.dmwriter.width,
+                screen_height=self.dmwriter.height,
+                duration=g.get('gift_duration', 10),
+                anchor_y_ratio=g.get('anchor_y_ratio', 0.88),   # 由 gift_dm_args 传入，默认 0.88
+            ).convert(ass_file, tmp)
+            send2trash(ass_file)
+            os.rename(tmp, ass_file)
+            self.logger.info(f'礼物成功加入：{ass_file}（共{n}条）')
+        except Exception as e:
+            self.logger.warning(f'礼物加入失败，跳过：{e}')
+            if os.path.exists(tmp):
+                os.remove(tmp)

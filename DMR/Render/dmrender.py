@@ -17,6 +17,7 @@ class DmRender(BaseRender):
                  aencoder_args: list,
                  output_resize: str,
                  advanced_render_args: dict=None,
+                 subtitle: dict=None,
                  ffmpeg: str = None,
                  debug=False,
                  **kwargs
@@ -28,6 +29,7 @@ class DmRender(BaseRender):
         self.aencoder_args = aencoder_args
         self.output_resize = output_resize
         self.advanced_render_args = advanced_render_args if isinstance(advanced_render_args, dict) else {}
+        self.subtitle = subtitle if isinstance(subtitle, dict) else {}
         self.ffmpeg = ffmpeg if ffmpeg else ToolsList.get('ffmpeg')
         self.debug = debug
 
@@ -52,9 +54,28 @@ class DmRender(BaseRender):
         else:
             scale_args = ['-noautoscale']
 
-        if platform.system().lower() == 'windows':
-            danmaku = danmaku.replace("\\", "/").replace(":/", "\\:/")
-        
+        def _escape_sub(path):
+            if platform.system().lower() == 'windows':
+                return path.replace("\\", "/").replace(":/", "\\:/")
+            return path
+
+        danmaku = _escape_sub(danmaku)
+
+        # 语音识别字幕：对该视频做 ASR 生成字幕 ass，作为第二层叠加到弹幕之上
+        sub_filter = ''
+        if self.subtitle.get('enable'):
+            try:
+                import subtitle_core as sc
+                keys = ('font_name', 'font_size', 'margin_bottom', 'font_color',
+                        'outline', 'outline_color', 'wrap_chars')
+                style = {k: self.subtitle[k] for k in keys if k in self.subtitle}
+                self.logger.info(f'开始对 {video} 做语音识别并生成字幕...')
+                sub_ass = sc.generate_subtitle_ass(video, style=style, do_asr=True)
+                sub_filter = ",subtitles=filename='%s'" % _escape_sub(sub_ass)
+                self.logger.info(f'字幕已生成: {sub_ass}')
+            except Exception as e:
+                self.logger.error(f'生成语音识别字幕失败，本次跳过字幕: {e}')
+
         # 自定义video filter
         if self.advanced_render_args.get('filter_complex'):
             filter_name = '-filter_complex'
@@ -63,7 +84,9 @@ class DmRender(BaseRender):
         else:
             filter_name = '-vf'
             filter_str = 'subtitles=filename=\'%s\'' % danmaku
-        
+
+        filter_str += sub_filter   # 弹幕在下、字幕在上，单遍编码一起烧
+
         ffmpeg_args += [
             '-fflags', '+discardcorrupt+genpts',
             '-analyzeduration', '2147483647', '-probesize', '2147483647',
@@ -75,9 +98,12 @@ class DmRender(BaseRender):
             '-c:a', self.aencoder,
             *self.aencoder_args,
             *scale_args,
+            '-video_track_timescale', '90000', # 新加放置合并出现时间戳跳变
+            '-ar', '48000', # 新加
             output,
         ]
 
+        self.logger.info(f'开始渲染: {output}')   # 此处才真正开始 ffmpeg 渲染
         return self.raw_ffmpeg.call_ffmpeg(ffmpeg_args)
 
     def render_one(self, video: VideoInfo, output: str, **kwargs):

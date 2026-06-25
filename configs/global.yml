@@ -12,11 +12,11 @@ executable_tools_path:
 dmr_engine_args: 
   # 选择组件
   # 可选组件： downloader（下载器）, render（渲染器）, uploader（上传器）, cleaner（清理器），webservice（WebUI服务，默认不启用）
-  enabled_plugins: ['downloader', 'render', 'uploader', 'cleaner']
+  enabled_plugins: ['downloader', 'render', 'uploader', 'cleaner','webservice']
   # 配置文件路径
   # 可设置为文件/文件夹列表
   config_path: ./configs
-  dynamic_config: True
+  dynamic_config: false
 
 # 默认下载参数
 download_args:
@@ -48,9 +48,9 @@ download_args:
     danmaku: True
     # 是否录制直播流
     video: True
-    # 延迟下播计时（分钟）
+    # 延迟下播计时（秒）
     # 使用这个功能可以把主播短暂下播又开播认定为同一场直播
-    stop_wait_time: 120
+    stop_wait_time: 7200
     # 直播流选项
     # 使用streamlink录制时不生效
     stream_option:
@@ -512,6 +512,11 @@ upload_args:
     # 为保证安全调用，请使用参数列表的形式，例如：['python', 'upload.py', '{PATH}']
     command: ~
 
+# 清理器核心参数
+cleaner_kernel_args:
+  # 启动时是否恢复上次未完成的清理任务（从 pending_cleanup.json 读取），默认 true
+  resume_pending: true
+
 # 清理器默认参数
 clean_args:
   # 移动文件
@@ -556,6 +561,26 @@ clean_args:
     w_srcfile: False
     w_srcpre: True
 
+# 录制分段合并参数（可选，按 group_id 把同场直播的多个分段合并成一个文件）
+merge_args:
+  # 是否开启合并，默认关闭（任务可在自己的 DMR-*.yml 顶层覆盖）
+  is_merge: False
+  # 要合并的视频类型，可选 src_video / dm_video，可多选，例如 ['dm_video']
+  merge_type: ~
+  # 是否对合并后的音频做增益
+  is_amplify: False
+  # 增益分贝数（is_amplify 为 True 时生效）
+  extra_gain_db: 0
+  # 合并后输出文件名模板，可用 {stime} 占位
+  file_name_template: "{stime.month}月{stime.day}日"
+
+# Bark 推送通知参数（可选，一般全局设一次即可，所有任务共用）
+bark_args:
+  # 是否开启 Bark 推送，默认关闭
+  is_bark: False
+  # 推送提示音
+  sound: birdsong
+
 # WebUI参数
 webservice_kernel_args:
   # 启用 Web API
@@ -563,10 +588,15 @@ webservice_kernel_args:
   # 服务端口
   port: 5000
   # 绑定地址
-  host: '127.0.0.1'
+  host: '0.0.0.0'
   # 是否强制登录
   force_login: false
   # 管理员用户名
   username: 'admin'
   # 管理员密码
   password: 'admin'
+  # 打开文件夹用的 AutoHotkey 脚本（复用资源管理器窗口，避免每次新开窗口）
+  # 留空则回退用系统默认方式打开（os.startfile，会新开窗口）；仅本机访问 WebUI 时生效
+  folder_opener_ahk: 'C:/Users/zhixin/Documents/AutoHotkey/filexplorer.ahk'
+  # AutoHotkey 可执行程序路径，留空自动探测 C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe
+  ahk_exe: ~

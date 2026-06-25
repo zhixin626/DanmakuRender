@@ -14,13 +14,31 @@ def save_gift_to_jsonl(dm, file_path: str):
     if directory:
         os.makedirs(directory, exist_ok=True)
 
-    gift_data = {
-        "uname": getattr(dm, 'uname', '未知用户'),
-        "gift_name": getattr(dm, 'gift_name', '未知礼物'),
-        "gift_type": getattr(dm, 'gift_type', 'gift'),
-        "count": getattr(dm, 'gift_count', 1),
-        "total_price_cny": getattr(dm, 'total_price_cny', 0.0),
-    }
+    dtype = getattr(dm, 'dtype', 'gift')
+    if dtype == 'superchat':
+        gift_data = {
+            "dtype"          : "superchat",
+            "uname"          : getattr(dm, 'uname', '未知用户'),
+            "gift_name"      : "醒目留言",
+            "count"          : 1,
+            "total_price_cny": getattr(dm, 'price_cny', 0.0),
+        }
+    elif dtype == 'member':
+        gift_data = {
+            "dtype"          : "member",
+            "uname"          : getattr(dm, 'uname', '未知用户'),
+            "gift_name"      : getattr(dm, 'member_name', '舰长'),
+            "count"          : getattr(dm, 'member_time', 1),
+            "total_price_cny": getattr(dm, 'price', 0.0),
+        }
+    else:
+        gift_data = {
+            "dtype"          : "gift",
+            "uname"          : getattr(dm, 'uname', '未知用户'),
+            "gift_name"      : getattr(dm, 'gift_name', '未知礼物'),
+            "count"          : getattr(dm, 'gift_count', 1),
+            "total_price_cny": getattr(dm, 'total_price_cny', 0.0),
+        }
 
     # 3. 写入文件 (Append mode)
     # open会创建file_path如果不存在
@@ -44,29 +62,41 @@ def generate_gift_statistics(jsonl_paths, stat_path, start_time=None, rank_top=3
     if not all_gifts:
         return None
 
-    # 2. 核心计算 (Core Calculation)
-    total_revenue = sum((g.get("total_price_cny") or 0) for g in all_gifts)
+    # 2. 分类统计
+    gift_entries   = [g for g in all_gifts if g.get("dtype", "gift") == "gift"]
+    sc_entries     = [g for g in all_gifts if g.get("dtype") == "superchat"]
+    member_entries = [g for g in all_gifts if g.get("dtype") == "member"]
 
-    # 计算每个人的总额
+    gifts_revenue  = sum((g.get("total_price_cny") or 0) for g in gift_entries)
+    sc_revenue     = sum((g.get("total_price_cny") or 0) for g in sc_entries)
+    member_revenue = sum((g.get("total_price_cny") or 0) for g in member_entries)
+    total_revenue  = gifts_revenue + sc_revenue + member_revenue
+    num_of_sc      = len(sc_entries)
+    _member_counts = Counter(g.get("gift_name", "未知") for g in member_entries)
+    member_info    = ",".join(f"{count}个{name}" for name, count in _member_counts.items()) if _member_counts else "无"
+
+    # 所有人的总消费（礼物 + SC 合并计算排行）
     user_totals = Counter()
     for g in all_gifts:
         user_totals[g["uname"]] += (g.get("total_price_cny") or 0)
 
-    # 获取前 N 名
     top_ranking = [
         {"name": name, "total_value": round(price, 2)}
         for name, price in user_totals.most_common(rank_top)
     ]
 
-    # 3. 构建结果字典 (Result Dictionary)
-    # 使用传入的 start_time，如果没传就用现在的时间
     report_time = start_time if start_time else datetime.now()
 
     stat_entry = {
-        "timestamp": report_time.strftime("%Y-%m-%d %H:%M:%S"),
-        "total_revenue": round(total_revenue, 2),
-        "total_gifters": len(user_totals),
-        "top_ranking": top_ranking
+        "timestamp"      : report_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "gifts_revenue"  : round(gifts_revenue, 2),
+        "num_of_gifters" : len({g["uname"] for g in gift_entries}),
+        "sc_revenue"     : round(sc_revenue, 2),
+        "num_of_sc"      : num_of_sc,
+        "member_revenue" : round(member_revenue, 2),
+        "member_info"    : member_info,
+        "total_revenue"  : round(total_revenue, 2),
+        "top_ranking"    : top_ranking,
     }
 
     # 4. 写入文件 (Write to file)

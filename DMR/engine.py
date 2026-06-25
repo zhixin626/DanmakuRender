@@ -1,6 +1,10 @@
+import os
+import sys
 import queue
 import logging
 import threading
+import time
+import subprocess
 
 from .Cleaner import Cleaner
 from .Downloader import Downloader
@@ -130,6 +134,69 @@ class DMREngine(): # 被上层__init__调用 先被init初始化，后add_plugin
             self.logger.debug(f'Task {taskname} deleted.')
         else:
             self.logger.debug(f'Task {taskname} not exists.')
+
+    def is_task_idle(self, taskname: str) -> bool:
+        """检查指定任务是否空闲（无直播、无渲染/上传队列）。"""
+        task_info = self.task_dict.get(taskname)
+        if not task_info:
+            return True  # 任务不存在视为空闲
+        event_class = task_info['class'].event_class
+        for group_status in event_class.live_status.values():
+            if not group_status.get('is_live_end', True):
+                return False
+        if event_class.state_dict:
+            return False
+        if event_class.ended_dict:
+            return False
+        return True
+
+    def is_idle(self) -> bool:
+        """
+        检查所有任务是否空闲：
+        1. 无活跃直播（live_status 里所有组 is_live_end=True）
+        2. 所有任务的 state_dict 和 ended_dict 均为空（渲染/上传已完成）
+        回放/下播中的监控任务不影响判断。
+        """
+        for task_info in self.task_dict.values():
+            event_class = task_info['class'].event_class
+
+            # 有正在直播的组（is_live_end=False）→ 不空闲
+            for group_status in event_class.live_status.values():
+                if not group_status.get('is_live_end', True):
+                    return False
+
+            # 有未处理完的渲染/上传 → 不空闲
+            if event_class.state_dict:
+                return False
+            if event_class.ended_dict:
+                return False
+
+        return True
+
+    def restart_when_idle(self, check_interval: int = 30):
+        """
+        等待所有任务空闲后原地重启程序（os.execv，PID 不变）。
+        重复调用无效，只有第一次生效。
+        check_interval: 轮询间隔（秒），默认 30 秒
+        """
+        if getattr(self, '_restart_pending', False):
+            self.logger.info('已有空闲重启任务在等待中，忽略重复请求。')
+            return
+        self._restart_pending = True
+
+        def _wait_and_restart():
+            self.logger.info('已设置空闲重启，等待所有任务完成...')
+            while not self.stoped:
+                if self.is_idle():
+                    self.logger.info('所有任务已完成，正在重启程序...')
+                    # 标记重启子进程，让 WebService 不再自动开新浏览器标签（原标签会自动重连）
+                    subprocess.Popen([sys.executable] + sys.argv,
+                                     env=dict(os.environ, DMR_NO_BROWSER='1'))
+                    os._exit(0)
+                time.sleep(check_interval)
+            self._restart_pending = False  # engine 被 stop 时取消重启
+
+        threading.Thread(target=_wait_and_restart, daemon=True, name='restart-watcher').start()
 
     def stop(self):
         self.stoped = True

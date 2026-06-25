@@ -26,25 +26,27 @@ class StreamState(str, Enum):
     REPLAY_END = "replay_end"    # 瞬时态：回放刚结束（不发 liveend，仅复位）
     LIVE_START = "live_start"
     REPLAY_START = "replay_start"
+    STOPPING = "stopping"        # 稳态：刚下播,等待确认是否真的下播(stop_wait_time)
 
 class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中初始化
-    def __init__(self, 
-                 url, 
-                 output_dir, 
-                 send_queue:queue.Queue, 
-                 segment:int, 
-                 output_name=None, 
-                 taskname=None, 
-                 danmaku=True, 
-                 video=True, 
-                 stop_wait_time=0, 
-                 output_format='flv', 
-                 stream_option=None, 
+    def __init__(self,
+                 url,
+                 output_dir,
+                 send_queue:queue.Queue,
+                 segment:int,
+                 output_name=None,
+                 taskname=None,
+                 danmaku=True,
+                 video=True,
+                 stop_wait_time=0,
+                 output_format='flv',
+                 stream_option=None,
                  advanced_video_args:dict=None,
                  advanced_dm_args:dict=None,
-                 engine='ffmpeg', 
+                 engine='ffmpeg',
                  debug=False,
                  gift_dm_args={},
+                 sc_dm_args={},
                  **kwargs
         ) -> None:
         self.taskname = taskname
@@ -67,6 +69,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.advanced_video_args = advanced_video_args if advanced_video_args else {}
         self.advanced_dm_args = advanced_dm_args if advanced_dm_args else {}
         self.gift_dm_args=gift_dm_args
+        self.sc_dm_args=sc_dm_args
         self.stoped = True
 
         # if self.engine not in ['ffmpeg', 'streamlink', 'streamgears', 'pyrequests', 'auto']:
@@ -102,13 +105,13 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
     def segment_callback(self, filename:str):
         if self.room_info is None or not exists(filename):
             self.logger.debug(f'No video file {filename}')
-            return 
+            return
 
         duration = datetime.now().timestamp()-self.segment_start_time.timestamp()
         # 如果视频时长小于60秒，尝试使用ffprobe获取视频时长
         if duration < 60:
             duration = max(duration, FFprobe.get_duration(filename))
-        
+
         video_info = VideoInfo(
             path=filename,
             file_id=uuid(),
@@ -122,9 +125,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             title=self.room_info['title'],
             streamer=self.streamer_info,
             taskname=self.taskname,
-            total_revenue = "",
-            total_gifters = "",
-            top_ranking   = "",
         )
 
         max_fn_length = self.advanced_video_args.get('max_fn_length', 80)
@@ -138,13 +138,13 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         else:
             newfile = filename
             self.logger.error(f'视频 {newfile} 分段失败，将使用默认名称 {filename}.')
-            
+
         if self.danmaku:
             newdmfile = splitext(newfile)[0]+'.'+self.kwargs.get('dm_format', 'ass')
             self.dmw.split(newdmfile)
         else:
             newdmfile = None
-        
+
         video_info.path = newfile
         video_info.dm_file_id = newdmfile
         if self.advanced_video_args.get('group_id'):
@@ -174,13 +174,13 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
     def start_once(self):
         self.stoped = False
-        
+
         # init segment info
         self.room_info = retry_safe(self.liveapi.GetRoomInfo)
         self.streamer_info = retry_safe(self.liveapi.GetStreamerInfo)
         if not(self.room_info and self.streamer_info):
             raise RuntimeError(f'{self.taskname}: 获取主播信息出现错误.')
-        
+
         self.segment_start_time = datetime.now()
         os.makedirs(self.output_dir,exist_ok=True)
 
@@ -227,14 +227,14 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         elif this_engine == 'pyrequests':
             from .pyrequests import PyRequestsDownloader
             downloader_class = PyRequestsDownloader
-        else: 
+        else:
             raise NotImplementedError(f'No Downloader Named {this_engine}.')
 
         if not (width and height):
             default_resolution = self.advanced_video_args.get('default_resolution', (1920, 1080))
             self.logger.warning(f'无法获取视频大小，使用默认值 {default_resolution}.')
             width, height = default_resolution
-        
+
         self.width,self.height = width, height
 
         self.downloader = None
@@ -254,10 +254,11 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                                      enable_gift_recorder=self.enable_gift_recorder, # zhixin新增
                                      gift_minimum_cny=self.gift_minimum_cny,         # zhixin新增
                                      gift_dm_args=self.gift_dm_args,         # zhixin新增
+                                     sc_dm_args=self.sc_dm_args,             # SC 布局参数（如 anchor_y_ratio）
                                      **self.kwargs)
 
             self.dmw.start(self_segment=not self.video)
-        
+
         def video_thread():
             self.downloader = downloader_class(
                 stream_url=stream_url,
@@ -284,58 +285,38 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         if self.video:
             futures.append(self.executor.submit(video_thread))
 
-        def os_remove_info(path):
-            try:
-                os.remove(path)
-                self.logger.info(f"已删除{path}")
-            except:
-                self.logger.info(f"删除{path}失败，请手动删除！")
+        last_onair_check = time.time()
 
         while not self.stoped:
-            if exists(self.segment_path):
+            # --- 分段指令 ---
+            if self._cmd_segment:
+                self._cmd_segment = False
                 self.logger.info(f"{self.taskname_disp}🔔收到指令：立即手动分段")
-                os_remove_info(self.segment_path)
                 return "segment"
 
-            if exists(self.offline_path):
+            # --- 强制下播指令 ---
+            if self._cmd_offline:
+                self._cmd_offline = False
                 self.logger.info(f"{self.taskname_disp}🔔收到指令：强制结束录制")
-                os_remove_info(self.offline_path)
-                self.force_stop_trigger = True # 欺骗程序为下播
+                self.force_stop_trigger = True
                 return
 
-            if exists(self.force_offline_time_path):
-                try:
-                    with open(self.force_offline_time_path, 'r', encoding='utf-8') as f:
-                        content = f.read().strip()
-                    # 情况 A: 内容为空，或写了 "" 表示取消
-                    if content == "" or content == '""' or content == "''":
-                        self.force_offline_time = ""
-                        self.logger.info(f"{self.taskname_disp}🚫收到指令：已取消强制下播时间限制")
-                    # 情况 B: 写了具体的时间点
-                    elif re.match(r"^\d{1,2}:\d{2}$", content):
-                        self.force_offline_time = content
-                        self.logger.info(f"{self.taskname_disp}🔔收到指令：修改强制下播时间为 {self.force_offline_time}")
-                    else:
-                        self.logger.error(f"时间格式错误: '{content}'，请使用 HH:MM 格式或保持为空以取消")
-                    os_remove_info(self.force_offline_time_path)
-                except Exception as e:
-                    self.logger.error(f"处理 {self.force_offline_time_path} 失败: {e}")
-
+            # --- 到达定时下播时间 ---
             if self.force_offline_time and is_passed_time_point(self.force_offline_time):
                 self.logger.info(f"到达强制下播时间:{self.force_offline_time}")
-                self.force_stop_trigger = True # 欺骗程序为下播
+                self.force_stop_trigger = True
                 return
 
-
+            # --- 等待录制结束，每1秒检查一次命令，每60秒检查一次是否下播 ---
             try:
-                # 正常情况下as_completed拿不到结果，过了60秒后进入timeouterror
-                for future in as_completed(futures, timeout=60):
+                for future in as_completed(futures, timeout=1):
                     return future.result()
             except TimeoutError:
-                # 正常情况下主播还在播就会进入while not self.stoped循环
-                if self.liveapi.Onair() == False:
-                    self.logger.debug('LIVE END.')
-                    return
+                if time.time() - last_onair_check >= 60:
+                    last_onair_check = time.time()
+                    if not self.liveapi.Onair():
+                        self.logger.debug('LIVE END.')
+                        return
 
 
     def get_effective_onair(self):
@@ -368,10 +349,20 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 raise ValueError(f"未知的 mode: {mode}")
 
         def in_record_window(now=None) -> bool:
-            if not enable_record_windows:
+            ranges = self.advanced_video_args.get("record_windows", {}).get("ranges")
+            if not ranges:
                 return True
-            ranges = self.advanced_video_args.get("record_windows", {}).get("ranges", [])
             return is_now_in_time_ranges(ranges, now=now)
+
+        def sleep_or_force_live(duration) -> bool:
+            """睡眠 duration 秒，期间每秒检查一次手动开播指令，收到则提前返回 True"""
+            waited = 0
+            while waited < duration:
+                if self._cmd_force_live:
+                    return True
+                time.sleep(min(1, duration - waited))
+                waited += 1
+            return self._cmd_force_live
 
         def update_state(state):
             now = datetime.now()
@@ -385,11 +376,16 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                     state = StreamState.OFFLINE
                 return state
 
-            if state in (StreamState.LIVE_END, StreamState.REPLAY_END):
+            if state == StreamState.LIVE_END:
+                return StreamState.STOPPING
+            if state == StreamState.REPLAY_END:
                 return StreamState.OFFLINE
 
             if now_onair:
-                if state == StreamState.OFFLINE:
+                if state in (StreamState.OFFLINE, StreamState.STOPPING):
+                    if self.forced_replay_pending:
+                        self.forced_replay_pending = False
+                        return StreamState.REPLAY_START
                     return (StreamState.LIVE_START if in_record_window(now) else StreamState.REPLAY_START)
 
                 if state == StreamState.LIVE_START:
@@ -406,29 +402,35 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             if state == StreamState.REPLAY:
                 return StreamState.REPLAY_END
 
+            # OFFLINE/STOPPING 稳态保持（STOPPING -> OFFLINE 的转换由主循环在确认"真的下播"后手动设置）
+            if state == StreamState.STOPPING:
+                return StreamState.STOPPING
+
             return StreamState.OFFLINE
 
 
         # =================初始化=========================================================================
         self.loop = True
-        enable_record_windows = self.advanced_video_args.get("record_windows", {}).get("enabled", False)
         trust_onair_at_startup = self.advanced_video_args.get("trust_onair_at_startup",True)
 
         stop_waited = 0
-        stop_wait_time = int(self.stop_wait_time * 60)
+        stop_wait_time = int(self.stop_wait_time)
         stop_check_interval = self.advanced_video_args.get('stop_check_interval', 60)
         start_check_interval = self.advanced_video_args.get('start_check_interval', 60)
         check_policy = self.advanced_video_args.get('check_policy', {})
         # ==============gift_dm_args=============
         self.enable_gift_recorder=self.gift_dm_args.get("gift_recorder",False)
-        self.gift_minimum_cny= self.gift_dm_args.get("gift_minimum_cny",None)
+        self.gift_minimum_cny= self.gift_dm_args.get("gift_min_cny",None)
         self.gifts_file_path= self.output_dir + "/gifts.jsonl"
         self.rank_top_n=self.gift_dm_args.get("rank_top_n",3)
         # ==============interactive====================
-        self.offline_path= os.path.join(self.output_dir, f"offline.txt")
-        self.force_offline_time_path= os.path.join(self.output_dir, f"force_offline_time.txt")
-        self.force_offline_time=self.advanced_video_args.get("force_offline_time",None)
-        self.segment_path=os.path.join(self.output_dir, f"segment.txt")
+        self.force_offline_time = self.advanced_video_args.get("force_offline_time", "")
+        self._cmd_segment = False           # 手动分段
+        self._cmd_offline = False           # 强制下播
+        self._cmd_force_live = False        # 回放状态下手动强制开始录制
+        self.force_stop_trigger = False     # 人为强制下播触发标志
+        self.forced_replay_pending = False  # 人为强制下播但主播实际未下播时，下一次开播应视为回放
+        self.live_start_time = None         # 本场直播开播时间，用于"开播到现在"录制时长统计
         # =============================================
 
         restart_cnt = 0
@@ -447,10 +449,11 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             self.logger.info(f"{self.taskname_disp}💤未开播")
 
         # 进入loop前的初始化
-        live_truely_end = True
         state = None
         while self.loop:
+            prev_state = state
             state = update_state(state)
+            self.live_state = state
             # ---------- REPLAY end----------
             if state == StreamState.REPLAY_END:
                 self.logger.info(f"{self.taskname_disp}📺回放结束")
@@ -459,66 +462,66 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             # ---------- REPLAY start----------(1)
             if state == StreamState.REPLAY_START:
                 self.logger.info(f"{self.taskname_disp}📺回放开始")
-                time.sleep(stop_check_interval)
                 continue
             # ---------- REPLAY ing ----------
             if state == StreamState.REPLAY:
-                time.sleep(stop_check_interval)
+                if sleep_or_force_live(stop_check_interval):
+                    self._cmd_force_live = False
+                    self.forced_replay_pending = False
+                    self.logger.info(f"{self.taskname_disp}🔔收到指令：手动开始录制")
+                    state = StreamState.OFFLINE  # 借助OFFLINE->LIVE_START的正常路径走一次livestart
                 continue
-            # --------- LIVE_END / REPLAY_END ----------
+            # --------- LIVE_END ----------
             if state == StreamState.LIVE_END:
                 self.logger.info(f"{self.taskname_disp}⌛下播,本轮录制结束")
                 write_time_to_txt("end")
                 stop_waited = 0
-                live_truely_end = False
+                continue
+
+            # ---------- STOPPING：刚下播,等待确认是否真的下播 ----------
+            if state == StreamState.STOPPING:
+                restart_cnt = 0
+                interval = get_check_interval(stop_check_interval,check_policy)
+                time.sleep(interval)
+                stop_waited += interval
+                if stop_waited > stop_wait_time:
+                    self.logger.info(f"{self.taskname_disp}🔴直播真的结束了")
+                    self._pipeSend('liveend', '直播真的结束了', data=self.sess_id)
+
+                    self.sess_id = uuid(8)
+                    self.segment_id = 1
+
+                    # 如果是人为强制下播（force_offline_time/cmd_offline）但主播实际未下播，
+                    # 下一次检测到在线时应视为回放，而不是继续按直播处理
+                    if self.force_stop_trigger and self.liveapi.Onair():
+                        self.forced_replay_pending = True
+
+                    self.force_stop_trigger = False
+                    state = StreamState.OFFLINE
                 continue
 
             # ---------- OFFLINE ----------(2)
             if state == StreamState.OFFLINE:
                 restart_cnt = 0
-                if live_truely_end:
-                    interval = get_check_interval(start_check_interval,check_policy)
-                    time.sleep(interval)
-                else:
-                    interval = get_check_interval(stop_check_interval,check_policy)
-                    time.sleep(interval)
-                    stop_waited += stop_check_interval
-
-                if stop_waited > stop_wait_time and not live_truely_end:
-                    live_truely_end = True
-                    self.logger.info(f"{self.taskname_disp}🔴直播真的结束了")
-                    if self.enable_gift_recorder :
-                        gift_stat=generate_gift_statistics(
-                            jsonl_paths=[self.gifts_file_path],
-                            stat_path=self.output_dir + "/gifts_statistics.jsonl",
-                            rank_top=self.rank_top_n,
-                            delete_after_process=True
-                        )
-                    else:
-                        gift_stat=None
-
-                    self._pipeSend('liveend', '直播真的结束了', data=self.sess_id, gift_stat= gift_stat)
-
-                    self.sess_id = uuid(8)
-                    self.segment_id = 1
-                    self.force_stop_trigger = False
+                interval = get_check_interval(start_check_interval,check_policy)
+                time.sleep(interval)
                 continue
 
             # ---------- LIVE_START ----------
             if state == StreamState.LIVE_START:
-                if live_truely_end:
+                if prev_state == StreamState.STOPPING:
+                    self.logger.info(f"{self.taskname_disp}🔄再次开播,重启录制")
+                else:
+                    self.live_start_time = datetime.now()   # 记录本场开播时间
                     self._pipeSend('livestart', '直播开始', dtype='str', data=self.sess_id,url=self.url)
                     self.logger.info(f"{self.taskname_disp}🔔直播开始")
                     write_time_to_txt("start")
-                else:
-                    self.logger.info(f"{self.taskname_disp}🔄再次开播,重启录制")
                 state = StreamState.LIVE # 直接切换为稳态 防止不知名bug
                 continue
 
             # ---------- LIVE：允许录制 ----------(3)
             try:
                 stop_waited = 0
-                live_truely_end = False
 
                 res = self.start_once()
 
@@ -555,11 +558,38 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         thread = threading.Thread(target=self.start_helper,daemon=True)
         thread.start()
         return thread
-    
+
     def stop(self):
         self.loop = False
         self.stop_once()
         self._pipeSend('livestop', '录制终止', dtype='str', data=self.sess_id if hasattr(self, 'sess_id') else None)
+
+    # ------------------------------------------------------------------
+    # API 实时命令方法（由 Downloader 插件转发，WebAPI 调用）
+    # ------------------------------------------------------------------
+
+    def cmd_segment(self):
+        """立即手动分段"""
+        self._cmd_segment = True
+
+    def cmd_offline(self):
+        """强制结束当前录制"""
+        self._cmd_offline = True
+
+    def cmd_force_offline_time(self, time_str: str):
+        """设置/取消定时下播，time_str 格式 HH:MM，传空字符串取消（任意状态下立即生效）"""
+        if time_str == "":
+            self.force_offline_time = ""
+            self.logger.info(f"{self.taskname_disp}🚫收到指令：已取消强制下播时间限制")
+        elif re.match(r"^\d{1,2}:\d{2}$", time_str):
+            self.force_offline_time = time_str
+            self.logger.info(f"{self.taskname_disp}🔔收到指令：修改强制下播时间为 {time_str}")
+        else:
+            self.logger.error(f"时间格式错误: '{time_str}'，请使用 HH:MM 格式或留空取消")
+
+    def cmd_force_live(self):
+        """回放状态下手动强制开始录制"""
+        self._cmd_force_live = True
 
     def stop_once(self): # 会调用segment callback分段视频
         self.stoped = True

@@ -49,7 +49,10 @@ def is_now_in_time_ranges(ranges=None, now=None):
         start = time_to_minutes(r["start"])
         end = time_to_minutes(r["end"])
 
-        if start <= end:
+        if start == end:
+            # 起止相同，如 00:00 - 00:00，视为全天
+            return True
+        elif start < end:
             # 非跨天，如 12:00 - 13:30
             if start <= now_min < end:
                 return True
