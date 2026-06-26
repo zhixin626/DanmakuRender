@@ -72,19 +72,8 @@ class DMREngine(): # 被上层__init__调用 先被init初始化，后add_plugin
         self._piperecvprocess = threading.Thread(target=self._pipeRecvMonitor, daemon=True)
         self._piperecvprocess.start()
         self.logger.debug('DMR engine started.')
-
-        for name, plugin in self.plugin_dict.values():
-            if plugin['status'] == 0:
-                plugin['class'].start()
-                self.plugin_dict['name']['status'] = 1
-                self.logger.debug(f'Plugin {name} started.')
-        
-        for name, task in self.task_dict.values():
-            if task['status'] == 0:
-                task['class'].start()
-                self.task_dict['name']['status'] = 1
-                self.pipeSend(PipeMessage('engine', f'replay/{name}', 'ready'))
-                self.logger.debug(f'Task {name} started.')
+        # 注意：插件/任务都在 engine.start() 之后才 add_plugin/add_task，
+        # 并在各自的 add_* 里直接 start()，故此处无需（也没有内容可）遍历启动。
 
     def add_plugin(self, name, config): # 被上层__init__调用 （2）
         send_queue = queue.Queue()

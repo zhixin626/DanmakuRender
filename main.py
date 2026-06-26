@@ -11,7 +11,6 @@ import logging.handlers
 import yaml
 from glob import glob
 from os.path import exists, splitext
-from IPython import embed
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append('./tools')
 
