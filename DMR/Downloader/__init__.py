@@ -99,8 +99,8 @@ class Downloader(): # 被上层 class engine()初始化，在 add_plugin()里调
         self.download_tasks[taskname] = downloader_task(taskname=taskname, send_queue=self.send_queue, **config)
         self.download_tasks[taskname].start()
         # zhixin
-        name_block = pad_disp(taskname, 13,fill="-")
-        self._pipeSend(event='info', msg=f'下载任务-{name_block}已启动', dtype='str', data=taskname) # 这里会写入log file
+        # name_block = pad_disp(taskname, 13,fill="-")
+        # self._pipeSend(event='info', msg=f'下载任务-{name_block}已启动', dtype='str', data=taskname) # 这里会写入log file
         
     def start(self):
         self.stoped = False
