@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 import logging
 import os
+import time
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
@@ -131,9 +132,7 @@ class Render():
         with self._lock:
             self.render_tasks.pop(task['uuid'], None)
             if status == 'error':
-                self.failed_tasks[task['uuid']] = task
-                # self.save_failed_tasks()
-
+                # 渲染失败已交由 liveevents 挂起转人工（见 onRenderError），不再留存 failed_tasks
                 self._pipeSend(
                     event='error',
                     msg=f"渲染视频{task['output']}时出现错误: {desc}",
@@ -192,8 +191,22 @@ class Render():
             os.makedirs(os.path.dirname(output), exist_ok=True)
 
             self._render_class[task['uuid']] = target_render
-            status, info = target_render.render_one(video=video, output=output)
-            self._render_class.pop(task['uuid'])
+
+            # 重试：失败最多重试 retry 次（默认3），都失败才回 render/error → liveevents 挂起转人工
+            retry = render_args.get('retry', 3)
+            status, info = False, '未执行'
+            for attempt in range(retry + 1):
+                try:
+                    status, info = target_render.render_one(video=video, output=output)
+                except Exception as e:
+                    status, info = False, e
+                    self.logger.exception(e)
+                if status or self.stoped:
+                    break
+                if attempt < retry:
+                    self.logger.warning(f'{verb}失败，重试 {attempt + 1}/{retry}: {video.path}')
+                    time.sleep(5)
+            self._render_class.pop(task['uuid'], None)
 
             if status:
                 self._gather(task, 'info', desc=info)

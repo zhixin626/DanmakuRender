@@ -1,10 +1,10 @@
 import copy
 import logging
 import os
-import platform
 
 from .baserender import BaseRender
 from .ffmpeg import RawFFmpegRender
+from .subtitle import escape_sub, generate_subtitle_ass, clean_subtitle_intermediates
 from os.path import exists
 from DMR.utils import *
 
@@ -54,27 +54,13 @@ class DmRender(BaseRender):
         else:
             scale_args = ['-noautoscale']
 
-        def _escape_sub(path):
-            if platform.system().lower() == 'windows':
-                return path.replace("\\", "/").replace(":/", "\\:/")
-            return path
+        danmaku = escape_sub(danmaku)
 
-        danmaku = _escape_sub(danmaku)
-
-        # 语音识别字幕：对该视频做 ASR 生成字幕 ass，作为第二层叠加到弹幕之上
+        # 语音识别字幕：对该视频做 ASR 生成字幕 ass，作为第二层叠加到弹幕之上（共用模块）
         sub_filter = ''
-        if self.subtitle.get('enable'):
-            try:
-                import subtitle_core as sc
-                keys = ('font_name', 'font_size', 'margin_bottom', 'font_color',
-                        'outline', 'outline_color', 'wrap_chars')
-                style = {k: self.subtitle[k] for k in keys if k in self.subtitle}
-                self.logger.info(f'开始对 {video} 做语音识别并生成字幕...')
-                sub_ass = sc.generate_subtitle_ass(video, style=style, do_asr=True)
-                sub_filter = ",subtitles=filename='%s'" % _escape_sub(sub_ass)
-                self.logger.info(f'字幕已生成: {sub_ass}')
-            except Exception as e:
-                self.logger.error(f'生成语音识别字幕失败，本次跳过字幕: {e}')
+        sub_ass = generate_subtitle_ass(video, self.subtitle, self.logger)
+        if sub_ass:
+            sub_filter = ",subtitles=filename='%s'" % escape_sub(sub_ass)
 
         # 自定义video filter
         if self.advanced_render_args.get('filter_complex'):
@@ -83,7 +69,11 @@ class DmRender(BaseRender):
             filter_str = replace_keywords(filter_str, {'danmaku': danmaku})
         else:
             filter_name = '-vf'
-            filter_str = 'subtitles=filename=\'%s\'' % danmaku
+            # fps 放在 subtitles 之前：先把(可变帧率的直播)源铺成均匀 CFR，再让 libass 逐帧画弹幕
+            # → 滚动弹幕匀速顺滑(不再因源 VFR 而抖)。取干净的标称帧率；探测失败则不加(沿用原行为)。
+            fps = FFprobe.get_fps(video)
+            fps_prefix = f'fps={fps:.6g},' if fps and fps > 0 else ''
+            filter_str = '%ssubtitles=filename=\'%s\'' % (fps_prefix, danmaku)
 
         filter_str += sub_filter   # 弹幕在下、字幕在上，单遍编码一起烧
 
@@ -104,7 +94,12 @@ class DmRender(BaseRender):
         ]
 
         self.logger.info(f'开始渲染: {output}')   # 此处才真正开始 ffmpeg 渲染
-        return self.raw_ffmpeg.call_ffmpeg(ffmpeg_args)
+        result = self.raw_ffmpeg.call_ffmpeg(ffmpeg_args)
+        # 渲染成功后，ASR 字幕中间文件由本步自己清理（共用模块），不进主清理管线
+        ok = result[0] if isinstance(result, (tuple, list)) else result
+        if ok and self.subtitle.get('enable'):
+            clean_subtitle_intermediates(video, sub_ass, self.subtitle.get('clean', True), self.logger)
+        return result
 
     def render_one(self, video: VideoInfo, output: str, **kwargs):
         if not exists(video.path):

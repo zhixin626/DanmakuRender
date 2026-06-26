@@ -235,7 +235,12 @@ def render_segment(cfg):
 
     dec_cmd = [FFMPEG, "-v", "error", "-fflags", "+genpts+discardcorrupt"]
     if use_hwaccel: dec_cmd += ["-hwaccel", "auto"]
-    dec_cmd += ["-i", os.path.basename(seg_file), "-vf", f"subtitles={os.path.basename(textonly_ass)},fps={fps}",
+    # 字幕（可选）：和弹幕在同一遍 libass 里一起烧，几乎不增加编码成本
+    sub_seg = cfg.get("subtitle")
+    sub_filter = f",subtitles={os.path.basename(sub_seg)}" if sub_seg else ""
+    dec_cmd += ["-i", os.path.basename(seg_file),
+                # fps 在 subtitles 之前：先把(可变帧率的)源铺成均匀 CFR，再让 libass 逐帧画弹幕 → 顺滑
+                "-vf", f"fps={fps},subtitles={os.path.basename(textonly_ass)}{sub_filter}",
                 "-fps_mode", "cfr", "-f", "rawvideo", "-pix_fmt", "nv12", "-"]
     dec = subprocess.Popen(dec_cmd, cwd=segdir, stdout=subprocess.PIPE)
     venc = cfg.get("venc", "h264_nvenc")
@@ -434,6 +439,7 @@ def main():
     vencoder = opt("--vencoder", "h264_nvenc")
     use_hwaccel = "--no-hwaccel" not in sys.argv
     resize = opt("--resize")   # "宽x高" 或 缩放系数(如 0.5);留空=原分辨率
+    subtitle_ass = opt("--subtitle")   # ASR 字幕 ass（可选）；和弹幕一起在同一遍 libass 烧
     emoji_font = resolve_emoji_font(opt("--emoji-font"))
     try:   # 位图字体(如 Noto)按 strike 缩放,较慢且略糊;矢量(Segoe)更快更清晰
         ImageFont.truetype(emoji_font, 32)
@@ -452,7 +458,17 @@ def main():
     import av
     c = av.open(flv); v = c.streams.video[0]
     W, H = v.codec_context.width, v.codec_context.height
-    fps = float(v.average_rate); dur = float(c.duration) / 1e6 if c.duration else 0
+    # 输出帧率：--fps 优先；否则取源的标称帧率(guessed_rate，干净的 60)而非 average_rate
+    # (直播是可变帧率，average 会算成 62 这种)。配合解码滤镜里 fps 放在 subtitles 之前，
+    # 让 libass 在均匀的 CFR 时间轴上逐帧画弹幕 → 滚动弹幕顺滑，且几乎不增加耗时。
+    if opt("--fps"):
+        fps = float(opt("--fps"))
+    else:
+        try:
+            fps = float(v.guessed_rate or v.average_rate)
+        except Exception:
+            fps = float(v.average_rate)
+    dur = float(c.duration) / 1e6 if c.duration else 0
     c.close()
     if not dur:
         def _probe(entries, sel=None):
@@ -525,6 +541,18 @@ def main():
         dia_textonly.append((st, et, l))
     print(f"特殊弹幕(emoji/表情): {len(emoji_all)} 行")
 
+    # 字幕 ass（可选）：解析成 header + dialogue 列表，后面按段切分、与弹幕同遍 libass 烧
+    sub_header, sub_dia = [], []
+    if subtitle_ass and os.path.exists(subtitle_ass):
+        stx = open(subtitle_ass, encoding="utf-8").read().splitlines()
+        sub_header = [l for l in stx if not l.startswith("Dialogue")]
+        for l in stx:
+            if not l.startswith("Dialogue"):
+                continue
+            sf = l.split(",", 9)
+            sub_dia.append((ass_time(sf[1]), ass_time(sf[2]), l))
+        print(f"字幕: {len(sub_dia)} 行")
+
     seg_time = max(20.0, dur / max(1, workers * segmul)) if dur else 120.0
     print(f"切段中（每段约 {fmt(seg_time)}）...")
     seg_in = ["-fflags", "+genpts+discardcorrupt", "-i", flv, "-map", "0:v"]
@@ -546,10 +574,25 @@ def main():
                            + seg_in + ["-c:v", vencoder, "-b:v", vb] + seg_out("ts"), cwd=work)
     if r.returncode != 0:
         print("切段失败"); sys.exit(1)
+    # 段时间不用 csv（直播源时间戳不规则/有起点偏移时，csv 的 start/end 会与段文件实际时长对不上，
+    # 尤其第一段；跨段弹幕按错误时间点重定位 → 段边界整体跳）。改用各段「实际时长」累计出 off/send，
+    # 让弹幕时间轴与拼接后的视频时间轴严格对齐（干净源上 csv==实际，无副作用）。
     segs = []
+    cum = 0.0
     for line in open(os.path.join(work, "segs.csv"), encoding="utf-8"):
         parts = line.strip().split(",")
-        if len(parts) >= 3: segs.append((parts[0], float(parts[1]), float(parts[2])))
+        if not parts or not parts[0].strip():
+            continue
+        segfile = parts[0].strip()
+        d = subprocess.run([FFPROBE, "-v", "error", "-show_entries", "format=duration",
+                            "-of", "csv=p=0", os.path.join(work, segfile)],
+                           capture_output=True, text=True).stdout.strip()
+        try:
+            seg_dur = float(d)
+        except ValueError:    # 探测失败兜底用 csv 跨度
+            seg_dur = (float(parts[2]) - float(parts[1])) if len(parts) >= 3 else 0.0
+        segs.append((segfile, cum, cum + seg_dur))
+        cum += seg_dur
     print(f"共 {len(segs)} 段")
 
     jobs = []
@@ -562,25 +605,60 @@ def main():
             nst, net = st - off, et - off
             body = f[9]
             if nst < 0:
-                # 跨段进来的弹幕:开始时间钳到0,必须重算 \move 起点坐标,否则会"突然变快"
-                mv = re.search(r"\\move\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)", body)
+                # 跨段进来:开始时间被钳到 0。\move 和 \fad 都相对"开始时间"，必须按"到本段起点已过的时间 elapsed"
+                # 重定，否则会重新滑入(move)或重新淡入闪一下(fad)。
+                elapsed = (off - st) * 1000.0   # 毫秒
+                # --- \move：同时匹配 4 参数 \move(x0,y0,x1,y1) 和 6 参数 \move(...,t0,t1)(SC/醒目留言用后者) ---
+                mv = re.search(r"\\move\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*(?:,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*)?\)", body)
                 if mv and et > st:
                     x0, y0, x1, y1 = (float(mv.group(i)) for i in range(1, 5))
-                    frac = (off - st) / (et - st)
-                    nx0 = x0 + (x1 - x0) * frac; ny0 = y0 + (y1 - y0) * frac
-                    body = body[:mv.start()] + f"\\move({nx0:.0f},{ny0:.0f},{x1:.0f},{y1:.0f})" + body[mv.end():]
+                    if mv.group(5) is not None:
+                        # 6 参数:运动只在 [t0,t1](毫秒)内发生。按 elapsed 重算位置和剩余时间。
+                        t0, t1 = float(mv.group(5)), float(mv.group(6))
+                        if elapsed >= t1:                       # 运动早已结束 → 本段静止在终点(SC 的情形)
+                            new_mv = f"\\pos({x1:.0f},{y1:.0f})"
+                        elif elapsed <= t0:                     # 还没开始 → 起点不变，时间整体前移
+                            new_mv = f"\\move({x0:.0f},{y0:.0f},{x1:.0f},{y1:.0f},{t0-elapsed:.0f},{t1-elapsed:.0f})"
+                        else:                                    # 运动到一半 → 起点 lerp 到当前位置，剩余时间从 0 起
+                            fr = (elapsed - t0) / (t1 - t0)
+                            cx = x0 + (x1 - x0) * fr; cy = y0 + (y1 - y0) * fr
+                            new_mv = f"\\move({cx:.0f},{cy:.0f},{x1:.0f},{y1:.0f},0,{t1-elapsed:.0f})"
+                        body = body[:mv.start()] + new_mv + body[mv.end():]
+                    else:
+                        # 4 参数:运动跨整条弹幕时长(ASS 默认) → 按时长比例算起点(原逻辑)
+                        frac = (off - st) / (et - st)
+                        nx0 = x0 + (x1 - x0) * frac; ny0 = y0 + (y1 - y0) * frac
+                        body = body[:mv.start()] + f"\\move({nx0:.0f},{ny0:.0f},{x1:.0f},{y1:.0f})" + body[mv.end():]
+                # --- \fad(淡入,淡出)：淡入相对开始 → 扣掉 elapsed(SC 早已淡完→变 0 不再淡)；淡出相对结束 → 不动 ---
+                fd = re.search(r"\\fad\(\s*(\d+\.?\d*)\s*,\s*(\d+\.?\d*)\s*\)", body)
+                if fd:
+                    fin, fout = float(fd.group(1)), float(fd.group(2))
+                    new_fin = max(0.0, fin - elapsed)
+                    body = body[:fd.start()] + f"\\fad({new_fin:.0f},{fout:.0f})" + body[fd.end():]
                 nst = 0.0
             f[1] = sec_to_ass(nst); f[2] = sec_to_ass(net); f[9] = body
             lines.append(",".join(f))
         ass_k = os.path.join(work, f"textonly_{idx:03d}.ass")
         open(ass_k, "w", encoding="utf-8").write("\n".join(lines))
+        # 字幕按段切分 + 重定时（静态字幕，无 \move，只需窗口过滤 + 平移时间）
+        sub_k = None
+        if sub_dia:
+            slines = list(sub_header)
+            for st, et, l in sub_dia:
+                if et <= off or st >= send:
+                    continue
+                sf = l.split(",", 9)
+                sf[1] = sec_to_ass(max(0.0, st - off)); sf[2] = sec_to_ass(et - off)
+                slines.append(",".join(sf))
+            sub_k = os.path.join(work, f"subtitle_{idx:03d}.ass")
+            open(sub_k, "w", encoding="utf-8").write("\n".join(slines))
         ev_k = []
         for ev in emoji_all:
             if ev["e"] <= off or ev["s"] >= send: continue
             e2 = dict(ev); e2["s"] = ev["s"] - off; e2["e"] = ev["e"] - off; ev_k.append(e2)
         out_ts = os.path.join(work, f"done_{idx:03d}.ts")
         prog = os.path.join(work, f"prog_{idx:03d}.txt"); open(prog, "w").write("0")
-        cfg = dict(seg=os.path.join(work, segfile), textonly=ass_k, out=out_ts, prog=prog,
+        cfg = dict(seg=os.path.join(work, segfile), textonly=ass_k, subtitle=sub_k, out=out_ts, prog=prog,
                    W=W, H=H, fps=fps, vb=vb, venc=vencoder, hwaccel=use_hwaccel, fs=fs,
                    resize=resize_str,
                    textfont=textfont, emojifont=emoji_font, pack=pack, events=ev_k)
@@ -643,8 +721,8 @@ def main():
                 fl = f" 失败{len(failed)}段" if failed else ""
                 if total:
                     dtot = max(total, done)   # 估算帧数偏少时动态抬高,避免显示超过100%/负剩余
-                    pct = done / dtot * 100; eta = max(0.0, (dtot - done) / cur) if cur > 0 else 0; bn = int(pct / 100 * 30)
-                    sys.stdout.write(f"\r[{'#'*bn}{'-'*(30-bn)}] {pct:5.1f}%  {done}/{dtot}帧  {cur:.0f}fps  已用{fmt(el)} 剩~{fmt(eta)}{fl}   ")
+                    pct = done / dtot * 100; eta = max(0.0, (dtot - done) / cur) if cur > 0 else 0; bn = int(pct / 100 * 20)
+                    sys.stdout.write(f"\r[{'#'*bn}{'-'*(20-bn)}] {pct:5.1f}%  {done}/{dtot}帧  {cur:.0f}fps  已用{fmt(el)} 剩~{fmt(eta)}{fl}   ")
                 else:
                     sys.stdout.write(f"\r{done}帧  {cur:.0f}fps  已用{fmt(el)}{fl}   ")
                 sys.stdout.flush()

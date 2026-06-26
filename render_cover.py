@@ -6,15 +6,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 from DMR.utils.render_with_manimgl import rendercover_with_manimgl
 
 # ── 在这里修改参数 ────────────────────────────────────────────
-NAME       = "少年不太冷"
-TIME       = "5月4日~月末"
-COLOR      = "#58C4DD"
+NAME       = "月亮3"
+TIME       = "6月24日"
+COLOR      = "#FFFF00"
 YEAR       = "2026"
 FILENAME   = "cover.png"   # 输出文件名
 # ─────────────────────────────────────────────────────────────
 
-output_dir = Path(__file__).parent / "covers"
-output_dir.mkdir(exist_ok=True)
+output_dir = Path(__file__).parent
 
 rendercover_with_manimgl(
     name            = NAME,

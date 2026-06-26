@@ -6,6 +6,7 @@ import subprocess
 from os.path import exists, abspath, join, dirname, isdir
 
 from .baserender import BaseRender
+from .subtitle import generate_subtitle_ass, clean_subtitle_intermediates
 from DMR.utils import *
 
 # 项目根目录下的多核 emoji 渲染脚本
@@ -42,6 +43,7 @@ class EmojiDmRender(BaseRender):
                  workers: int = 3,
                  segmul: int = 3,
                  hwaccel: bool = True,
+                 subtitle: dict = None,
                  ffmpeg: str = None,
                  debug=False,
                  **kwargs):
@@ -49,6 +51,7 @@ class EmojiDmRender(BaseRender):
         self.vencoder_args = vencoder_args or []
         self.aencoder_args = aencoder_args or []
         self.output_resize = output_resize
+        self.subtitle = subtitle if isinstance(subtitle, dict) else {}
         self.emoji_pack = emoji_pack   # 填了就直接用该路径;留空(None)时默认 ./emoji_pack/<平台>
         self.emoji_font = emoji_font
         self.workers = int(workers)
@@ -89,6 +92,9 @@ class EmojiDmRender(BaseRender):
             pack = join("./emoji_pack", platform) if platform else "./emoji_pack"
         self.logger.info(f"emoji 平台={platform or '未知'} 表情包={pack}")
 
+        # 语音识别字幕（共用模块）：生成字幕 ass，交给脚本与弹幕同遍 libass 一起烧
+        sub_ass = generate_subtitle_ass(video.path, self.subtitle, self.logger)
+
         cmd = [sys.executable, _MT_SCRIPT, video.path, danmaku, output,
                "--workers", str(self.workers), "--segmul", str(self.segmul),
                "--vencoder", self.vencoder, "--vb", str(vb), "--ab", str(ab)]
@@ -100,6 +106,8 @@ class EmojiDmRender(BaseRender):
             cmd += ["--resize", str(self.output_resize)]
         if not self.hwaccel:
             cmd += ["--no-hwaccel"]
+        if sub_ass:
+            cmd += ["--subtitle", sub_ass]
 
         start_time = datetime.now()
         self.logger.info(f"开始 emoji 渲染: {output}")
@@ -128,6 +136,9 @@ class EmojiDmRender(BaseRender):
             output_info.ctime = start_time
             output_info.dm_file_id = None
             output_info.src_video_id = video.file_id
+            # ASR 字幕中间文件渲染完即清理（共用模块），受 subtitle.clean 控制
+            if self.subtitle.get('enable'):
+                clean_subtitle_intermediates(video.path, sub_ass, self.subtitle.get('clean', True), self.logger)
             self.logger.info(f"emoji 渲染完成: {output}")
             return True, output_info
         else:

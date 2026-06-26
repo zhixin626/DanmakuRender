@@ -78,3 +78,20 @@ class FFprobe():
             return resolution
         except:
             return 0,0
+
+    @classmethod
+    def get_fps(cls, url:str, header=None) -> float:
+        """取标称帧率(r_frame_rate，如 '60/1' → 60.0)。用 r_frame_rate 而非 avg_frame_rate：
+        直播源 avg 常算成 62 这种怪值，r 才是干净的标称值。失败返回 0。"""
+        try:
+            if url.startswith('http'):
+                res = cls.run_ffprobe_livestream(url, header)
+            else:
+                res = cls.run_ffprobe(url)
+            st = res['streams'][0]
+            rate = st.get('r_frame_rate') or st.get('avg_frame_rate') or '0'
+            num, _, den = str(rate).partition('/')
+            den = float(den) if den else 1.0
+            return float(num) / den if den else 0.0
+        except Exception:
+            return 0.0
