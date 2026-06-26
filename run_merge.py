@@ -11,12 +11,12 @@
     }
 
 成功时最后一行打印 "MERGE_DONE\t<输出路径>"，退出码 0；失败退出码非 0。
-合并逻辑（分辨率/时间基归一、按需重编码、NVENC、时间戳修复）全部复用 DMR.utils.merge_mp4。
+合并逻辑（分辨率/时间基归一、按需重编码、NVENC、时间戳修复）全部复用 DMR.utils.video_merge。
 """
 import json
 import sys
 
-from DMR.utils.merge_mp4 import merge_mp4
+from DMR.utils.video_merge import merge_mp4
 
 
 def main():

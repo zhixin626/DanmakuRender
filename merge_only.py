@@ -1,6 +1,6 @@
 from pathlib import Path
 from DMR.utils.utils import safe_filename
-from DMR.utils.merge_mp4 import merge_mp4,amplify_mp4
+from DMR.utils.video_merge import merge_mp4,amplify_mp4
 from upload_only import file_to_args,strip_quotes
 import os
 def parse_yn(prompt: str, default: bool) -> bool:

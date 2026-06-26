@@ -4,19 +4,19 @@
 
 # 第三方工具路径，设置为空将会自动选择
 executable_tools_path: 
-  ffmpeg: "C:/ffmpeg/bin/ffmpeg.exe"
-  ffprobe: "C:/ffmpeg/bin/ffprobe.exe"
-  biliup: "C:/biliup_rs/biliup.exe"
+  ffmpeg: ~
+  ffprobe: ~
+  biliup: ~
 
 # DMR引擎参数
 dmr_engine_args: 
   # 选择组件
-  # 可选组件： downloader（下载器）, render（渲染器）, uploader（上传器）, cleaner（清理器），webservice（WebUI服务，默认不启用）
-  enabled_plugins: ['downloader', 'render', 'uploader', 'cleaner','webservice']
+  # 可选组件： downloader（下载器）, render（渲染器）, uploader（上传器）, cleaner（清理器）, merger（合并器）, webservice（WebUI服务，默认不启用）
+  enabled_plugins: ['downloader', 'render', 'uploader', 'cleaner','webservice','merger']
   # 配置文件路径
+  dynamic_config: false
   # 可设置为文件/文件夹列表
   config_path: ./configs
-  dynamic_config: false
 
 # 默认下载参数
 download_args:
@@ -563,8 +563,7 @@ clean_args:
 
 # 录制分段合并参数（可选，按 group_id 把同场直播的多个分段合并成一个文件）
 merge_args:
-  # 是否开启合并，默认关闭（任务可在自己的 DMR-*.yml 顶层覆盖）
-  is_merge: False
+  # 开关在 common_event_args.auto_merge；这里只放合并的具体参数
   # 要合并的视频类型，可选 src_video / dm_video，可多选，例如 ['dm_video']
   merge_type: ~
   # 是否对合并后的音频做增益
@@ -573,6 +572,8 @@ merge_args:
   extra_gain_db: 0
   # 合并后输出文件名模板，可用 {stime} 占位
   file_name_template: "{stime.month}月{stime.day}日"
+  # 合并后是否由 merger 直接删除被合并的源文件（send2trash）。false=保留、交给 cleaner 清理
+  remove_source: True
 
 # Bark 推送通知参数（可选，一般全局设一次即可，所有任务共用）
 bark_args:

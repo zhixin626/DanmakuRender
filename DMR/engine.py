@@ -8,6 +8,7 @@ import subprocess
 
 from .Cleaner import Cleaner
 from .Downloader import Downloader
+from .Merger import Merger
 from .Render import Render
 from .Uploader import Uploader
 from .Task import ReplayTask
@@ -40,6 +41,8 @@ class DMREngine(): # 被上层__init__调用 先被init初始化，后add_plugin
             self.plugin_dict['uploader']['send_queue'].put(message)
         elif target == 'cleaner':
             self.plugin_dict['cleaner']['send_queue'].put(message)
+        elif target == 'merger':
+            self.plugin_dict['merger']['send_queue'].put(message)
         elif target == 'downloader':  # onReady 的信息会走这里（target=downloader）
             self.plugin_dict['downloader']['send_queue'].put(message)
         else:
@@ -91,6 +94,8 @@ class DMREngine(): # 被上层__init__调用 先被init初始化，后add_plugin
             plugin = Uploader((self.recv_queue, send_queue), **config)
         elif name == 'cleaner':
             plugin = Cleaner((self.recv_queue, send_queue), **config)
+        elif name == 'merger':
+            plugin = Merger((self.recv_queue, send_queue), **(config or {}))
         elif name == 'downloader':
             plugin = Downloader((self.recv_queue, send_queue), **config)
         elif name == 'webservice':
@@ -136,39 +141,33 @@ class DMREngine(): # 被上层__init__调用 先被init初始化，后add_plugin
             self.logger.debug(f'Task {taskname} not exists.')
 
     def is_task_idle(self, taskname: str) -> bool:
-        """检查指定任务是否空闲（无直播、无渲染/上传队列）。"""
+        """检查指定任务是否空闲（无直播、无渲染/上传/合并；已交给 cleaner 的清理可跨重启续做，不算）。"""
         task_info = self.task_dict.get(taskname)
         if not task_info:
             return True  # 任务不存在视为空闲
         event_class = task_info['class'].event_class
-        for group_status in event_class.live_status.values():
+        for group_status in event_class.session_data.values():
             if not group_status.get('is_live_end', True):
                 return False
-        if event_class.state_dict:
-            return False
-        if event_class.ended_dict:
-            return False
-        return True
+        return event_class.is_idle_for_restart()
 
     def is_idle(self) -> bool:
         """
         检查所有任务是否空闲：
-        1. 无活跃直播（live_status 里所有组 is_live_end=True）
-        2. 所有任务的 state_dict 和 ended_dict 均为空（渲染/上传已完成）
+        1. 无活跃直播（session_data 里所有组 is_live_end=True）
+        2. 无在途/待处理的渲染/上传/合并工作（已派给 cleaner 的清理能跨重启续删，不阻塞空闲）
         回放/下播中的监控任务不影响判断。
         """
         for task_info in self.task_dict.values():
             event_class = task_info['class'].event_class
 
             # 有正在直播的组（is_live_end=False）→ 不空闲
-            for group_status in event_class.live_status.values():
+            for group_status in event_class.session_data.values():
                 if not group_status.get('is_live_end', True):
                     return False
 
-            # 有未处理完的渲染/上传 → 不空闲
-            if event_class.state_dict:
-                return False
-            if event_class.ended_dict:
+            # 除「已交给 cleaner 的清理」外仍有在途/待处理工作 → 不空闲
+            if not event_class.is_idle_for_restart():
                 return False
 
         return True

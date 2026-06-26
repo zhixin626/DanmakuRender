@@ -9,6 +9,10 @@ common_event_args:
   auto_clean: True
   # 原视频自动转码
   auto_transcode: False
+  # 状态超时回收（小时），默认 72。某场直播下播后，若超过这个时长仍未处理完
+  # （例如某步失败被挂起等人工、但一直没人处理），则强制回收其内存状态、放弃这场。
+  # 注意：被挂起等人工处理的任务也受此限制，不豁免——超时同样会被清掉。
+  state_timeout_hours: 72
 
 # 下载参数
 download_args:
