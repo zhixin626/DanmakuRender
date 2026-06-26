@@ -167,25 +167,10 @@
             .catch(function (e) { alert('请求失败: ' + e); });
     }
 
-    function deferConfig(filename) {
-        fetch('/api/config/defer/' + encodeURIComponent(filename), { method: 'POST' })
-            .then(function (r) { return r.json(); })
-            .then(function () { refreshConfigList(); });
-    }
-
     function undeferConfig(filename) {
         fetch('/api/config/undefer/' + encodeURIComponent(filename), { method: 'POST' })
             .then(function (r) { return r.json(); })
             .then(function () { refreshConfigList(); });
-    }
-
-    function confirmDelete(filename) {
-        if (!confirm('确定要删除配置文件 ' + filename + ' 吗？此操作不可恢复。')) return;
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.action = '/config/delete/' + encodeURIComponent(filename);
-        document.body.appendChild(form);
-        form.submit();
     }
 
     function applyAll() {
