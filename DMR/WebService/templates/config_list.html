@@ -7,28 +7,66 @@
         <div>
             <button id="btn-apply-all" class="btn-secondary" style="display:none;" onclick="applyAll()">全部应用</button>
             <button id="btn-defer-all" class="btn-secondary" style="display:none;" onclick="deferAll()">全部推迟到重启</button>
-            <a href="{{ url_for('config_create') }}"><button class="btn-secondary">新增配置</button></a>
         </div>
     </div>
-
-    <p style="color:#888;font-size:13px;margin:4px 0 12px;">
-        改了配置不会自动生效 —— 点「应用更新」热重载（录制中会等空闲），或重启程序统一应用。
-    </p>
 
     <table>
         <thead>
             <tr>
                 <th>文件名</th>
-                <th>任务名</th>
                 <th>状态</th>
-                <th>操作</th>
+                <th id="th-ops">操作</th>
             </tr>
         </thead>
         <tbody id="config-tbody">
-            <tr><td colspan="4" style="color:#999;">加载中...</td></tr>
+            <tr><td colspan="3" style="color:#999;">加载中...</td></tr>
         </tbody>
     </table>
 </div>
+
+<div id="diff-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center;" onclick="if(event.target===this)closeDiff()">
+    <div style="background:#1b1b1b;border:1px solid #444;border-radius:8px;width:820px;max-width:94vw;max-height:86vh;display:flex;flex-direction:column;">
+        <div style="padding:10px 14px;border-bottom:1px solid #333;color:#ddd;">查看改动 - <span id="diff-title" style="color:#6f9"></span> <span style="color:#777;font-size:0.8rem;">（已应用 → 当前；<span style="color:#4caf50;">绿=新增</span> <span style="color:#e05555;">红=删除</span>）</span></div>
+        <pre id="diff-body" style="margin:0;padding:10px 14px;overflow:auto;font-family:Consolas,monospace;font-size:0.82rem;line-height:1.45;flex:1;background:#141414;"></pre>
+        <div style="padding:8px 14px;border-top:1px solid #333;display:flex;justify-content:space-between;">
+            <button onclick="revertFromDiff()" style="color:#fff;background:#c0392b;border-color:#c0392b;">撤销全部改动</button>
+            <button onclick="closeDiff()">关闭</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    var diffFile = null;
+    function openDiff(filename) {
+        diffFile = filename;
+        var box = document.getElementById('diff-body');
+        document.getElementById('diff-title').textContent = filename;
+        box.textContent = '加载中...';
+        document.getElementById('diff-overlay').style.display = 'flex';
+        fetch('/api/config/diff/' + encodeURIComponent(filename))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                var lines = d.diff || [];
+                if (!lines.length) { box.textContent = '无改动（或已应用）。'; return; }
+                box.innerHTML = lines.map(function (l) {
+                    var c = '#ccc', bg = 'transparent';
+                    if (l.indexOf('@@') === 0)              { c = '#4ea1ff'; }
+                    else if (l.indexOf('+++') === 0 || l.indexOf('---') === 0) { c = '#888'; }
+                    else if (l[0] === '+')                  { c = '#4caf50'; bg = 'rgba(76,175,80,0.12)'; }
+                    else if (l[0] === '-')                  { c = '#e05555'; bg = 'rgba(224,85,85,0.12)'; }
+                    return '<div style="color:' + c + ';background:' + bg + ';white-space:pre-wrap;word-break:break-all;">' + esc(l || ' ') + '</div>';
+                }).join('');
+            })
+            .catch(function () { box.textContent = '加载失败'; });
+    }
+    function closeDiff() { document.getElementById('diff-overlay').style.display = 'none'; }
+    function revertFromDiff() {
+        if (!diffFile) return;
+        var fn = diffFile;
+        closeDiff();
+        revertConfig(fn);   // 自带确认 + 刷新
+    }
+</script>
 
 <script>
     var STATUS_META = {
@@ -42,36 +80,48 @@
         return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
-    function buildRow(c) {
+    // 把完整路径渲染成「文件夹\文件」：文件夹点击开目录、文件点击用默认应用打开（风格同录制/任务页）
+    function pathCell(full, fallback) {
+        if (!full) return esc(fallback || '');
+        var norm = full.replace(/\//g, '\\');
+        var idx = norm.lastIndexOf('\\');
+        var fileName = idx >= 0 ? norm.slice(idx + 1) : norm;
+        var folderFull = idx >= 0 ? full.slice(0, idx) : full;
+        var parentPart = idx >= 0 ? norm.slice(0, idx) : '';
+        var pidx = parentPart.lastIndexOf('\\');
+        var folderName = pidx >= 0 ? parentPart.slice(pidx + 1) : parentPart;
+        var folderLink = '<a href="javascript:void(0)" title="打开文件夹" onclick=\'openPath(' + JSON.stringify(folderFull) + ',"folder")\' style="color:#4ea1ff;text-decoration:none;">' + esc(folderName || folderFull) + '</a>';
+        var fileLink = '<a href="javascript:void(0)" title="用默认应用打开" onclick=\'openPath(' + JSON.stringify(full) + ',"file")\' style="color:#7fd1ff;text-decoration:none;">' + esc(fileName) + '</a>';
+        return folderLink + '\\' + fileLink;
+    }
+
+    function buildRow(c, hasOps) {
         var meta = STATUS_META[c.status];
         var statusHtml = meta
             ? '<span style="color:' + meta.color + ';font-weight:bold;">● ' + meta.text + '</span>'
             : '<span style="color:#999;">已同步</span>';
 
-        var nameStyle = c.exists ? '' : 'text-decoration:line-through;color:#c00;';
+        var nameCell = c.exists
+            ? pathCell(c.path, c.filename)
+            : '<span style="text-decoration:line-through;color:#c00;">' + esc(c.filename) + '</span>';
         var fnAttr = esc(c.filename);
 
         var ops = [];
         var isPending = (c.status === 'new' || c.status === 'modified' || c.status === 'deleted');
-        if (c.exists) {
-            ops.push('<a href="/config/edit/' + encodeURIComponent(c.filename) + '">编辑</a>');
+        if (isPending || c.status === 'deferred') {
+            ops.push('<a href="javascript:void(0);" class="op-diff" data-fn="' + fnAttr + '" style="color:#6f42c1;">查看</a>');
         }
         if (isPending) {
-            ops.push('<a href="javascript:void(0);" class="op-apply" data-fn="' + fnAttr + '" style="color:#0066cc;font-weight:bold;">应用更新</a>');
-            ops.push('<a href="javascript:void(0);" class="op-defer" data-fn="' + fnAttr + '" style="color:#7a8aa0;">推迟到重启</a>');
+            ops.push('<a href="javascript:void(0);" class="op-apply" data-fn="' + fnAttr + '" style="color:#0066cc;font-weight:bold;">应用</a>');
         }
         if (c.status === 'deferred') {
             ops.push('<a href="javascript:void(0);" class="op-undefer" data-fn="' + fnAttr + '" style="color:#0066cc;">撤销推迟</a>');
         }
-        if (c.exists && !c.is_example) {
-            ops.push('<a href="javascript:void(0);" class="op-delete" data-fn="' + fnAttr + '" style="color:red;">删除</a>');
-        }
 
         return '<tr>' +
-            '<td style="' + nameStyle + '">' + esc(c.filename) + '</td>' +
-            '<td>' + esc(c.taskname) + '</td>' +
+            '<td>' + nameCell + '</td>' +
             '<td>' + statusHtml + '</td>' +
-            '<td>' + ops.join('&nbsp;&nbsp;') + '</td>' +
+            (hasOps ? '<td>' + ops.join('&nbsp;&nbsp;') + '</td>' : '') +
             '</tr>';
     }
 
@@ -81,10 +131,15 @@
             .then(function (data) {
                 var tbody = document.getElementById('config-tbody');
                 var configs = data.configs || [];
+                // 有任何可操作的行(待应用/已推迟)才显示「操作」列，否则整列隐藏
+                var hasOps = configs.some(function (c) {
+                    return c.status === 'new' || c.status === 'modified' || c.status === 'deleted' || c.status === 'deferred';
+                });
+                document.getElementById('th-ops').style.display = hasOps ? '' : 'none';
                 if (configs.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="4" style="color:#999;">暂无配置文件。</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="3" style="color:#999;">暂无配置文件。</td></tr>';
                 } else {
-                    tbody.innerHTML = configs.map(buildRow).join('');
+                    tbody.innerHTML = configs.map(function (c) { return buildRow(c, hasOps); }).join('');
                 }
                 var hasPending = configs.some(function (c) {
                     return c.status === 'new' || c.status === 'modified' || c.status === 'deleted';
@@ -101,6 +156,14 @@
         fetch('/api/config/apply/' + encodeURIComponent(filename), { method: 'POST' })
             .then(function (r) { return r.json(); })
             .then(function (d) { alert(d.message || (d.ok ? '已应用' : '应用失败')); refreshConfigList(); })
+            .catch(function (e) { alert('请求失败: ' + e); });
+    }
+
+    function revertConfig(filename) {
+        if (!confirm('确定撤销 ' + filename + ' 的未应用改动吗？\n将回到上次已应用的版本（新增的文件会被删除）。此操作直接改磁盘文件。')) return;
+        fetch('/api/config/revert/' + encodeURIComponent(filename), { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) { if (!d.ok) alert(d.message || '撤销失败'); refreshConfigList(); })
             .catch(function (e) { alert('请求失败: ' + e); });
     }
 
@@ -144,10 +207,9 @@
     document.getElementById('config-tbody').addEventListener('click', function (e) {
         var t = e.target;
         if (!t.dataset || !t.dataset.fn) return;
-        if (t.classList.contains('op-apply'))   applyConfig(t.dataset.fn);
-        else if (t.classList.contains('op-defer'))   deferConfig(t.dataset.fn);
+        if (t.classList.contains('op-diff'))    openDiff(t.dataset.fn);
+        else if (t.classList.contains('op-apply'))   applyConfig(t.dataset.fn);
         else if (t.classList.contains('op-undefer')) undeferConfig(t.dataset.fn);
-        else if (t.classList.contains('op-delete'))  confirmDelete(t.dataset.fn);
     });
 
     startPolling(refreshConfigList, 1000);

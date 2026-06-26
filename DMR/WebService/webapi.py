@@ -4,6 +4,7 @@ import queue
 import secrets
 import os
 import time
+import json
 import yaml
 import glob
 import subprocess
@@ -27,12 +28,13 @@ def _detect_ahk_exe():
         if os.path.isfile(p):
             return p
     return None
-from flask import Flask, request, render_template, redirect, url_for, flash, session
+from flask import Flask, request, render_template, redirect, url_for, flash, session, Response
 from functools import wraps
 from datetime import datetime
 
 from DMR.utils import *
-from DMR.utils.console_buffer import get_console_lines
+from DMR.utils.console_buffer import get_console_lines, subscribe as console_subscribe, unsubscribe as console_unsubscribe
+from DMR.utils.session_record import read_all_records
 
 class WebApi:
     def __init__(
@@ -131,6 +133,21 @@ class WebApi:
         def tasks_api():
             return self.get_tasks_data()
 
+        # 人工处理完挂起任务后回传结果：render/merge 传 mp4 路径，upload 传 'done'
+        @app.route('/api/resume', methods=['POST'])
+        @self.login_required
+        def resume_api():
+            req = request.get_json() or {}
+            taskname, hold_id = req.get('task'), req.get('hold_id')
+            result = req.get('result')
+            if not taskname or not hold_id:
+                return 'missing task/hold_id', 400
+            self.send_queue.put(PipeMessage(
+                source='webservice', target=f'replay/{taskname}', event='resume',
+                data={'hold_id': hold_id, 'result': result},
+            ))
+            return 'success', 200
+
         @app.route('/logs')
         @self.login_required
         def logs_page():
@@ -144,6 +161,31 @@ class WebApi:
             except ValueError:
                 lines = 500
             return {'lines': get_console_lines(lines), 'notifications': self.get_notifications()}
+
+        @app.route('/api/console/stream')
+        @self.login_required
+        def api_console_stream():
+            """SSE 实时日志：连上先发一段历史打底，之后每来一行推一行（来一行滚一行，不再轮询）。"""
+            def gen():
+                q = console_subscribe()
+                try:
+                    for line in get_console_lines(5000):   # 历史打底
+                        yield f'data: {json.dumps(line)}\n\n'
+                    while True:
+                        try:
+                            yield f'data: {json.dumps(q.get(timeout=15))}\n\n'
+                        except queue.Empty:
+                            yield ': ping\n\n'   # 心跳，防连接被中途判超时断开
+                finally:
+                    console_unsubscribe(q)
+            return Response(gen(), mimetype='text/event-stream',
+                            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+        @app.route('/api/notifications')
+        @self.login_required
+        def api_notifications():
+            """只取红点通知（日志页改用 SSE 后，徽标单独轻量轮询这个）。"""
+            return {'notifications': self.get_notifications()}
 
         @app.route('/api/open', methods=['POST'])
         @self.login_required
@@ -195,6 +237,25 @@ class WebApi:
                 return {'pending': []}
             return {'pending': dmr.config.get_pending_changes()}
 
+        @app.route('/api/config/diff/<filename>')
+        @self.login_required
+        def config_diff_api(filename):
+            """某配置文件改动的 git 风格 diff（已应用→当前磁盘）。"""
+            dmr = getattr(self.engine, 'dmr', None)
+            if dmr is None:
+                return {'diff': []}
+            return {'diff': dmr.config.get_diff(os.path.basename(filename))}
+
+        @app.route('/api/config/revert/<filename>', methods=['POST'])
+        @self.login_required
+        def config_revert_api(filename):
+            """撤销某配置文件未应用的改动，回到上次已应用的状态。"""
+            dmr = getattr(self.engine, 'dmr', None)
+            if dmr is None:
+                return {'ok': False, 'message': '引擎未就绪'}, 503
+            ok = dmr.config.revert(os.path.basename(filename))
+            return {'ok': ok, 'message': '已撤销改动' if ok else '撤销失败（无可回退的版本）'}
+
         @app.route('/api/config/apply/<filename>', methods=['POST'])
         @self.login_required
         def config_apply_api(filename):
@@ -234,6 +295,7 @@ class WebApi:
                     st = states.get(fn)
                     configs.append({
                         'filename': fn,
+                        'path': os.path.abspath(f),   # 完整路径，供前端显示「文件夹\文件」并点击打开
                         'taskname': st['taskname'] if st else taskname,
                         'status': st['status'] if st else None,
                         'exists': True,
@@ -241,7 +303,8 @@ class WebApi:
                     })
             for s in extra_deleted:
                 configs.append({
-                    'filename': s['filename'], 'taskname': s['taskname'],
+                    'filename': s['filename'], 'path': s.get('path', ''),
+                    'taskname': s['taskname'],
                     'status': s['status'], 'exists': False,
                     'is_example': s['filename'].startswith('example-'),
                 })
@@ -355,18 +418,6 @@ class WebApi:
                     flash(f'File {filename} not found.', 'error')
             return redirect(url_for('config_list'))
 
-        @app.route('/api/failed_uploads/retry/<uuid>', methods=['POST'])
-        @self.login_required
-        def failed_uploads_retry(uuid):
-            if self.engine and 'uploader' in self.engine.plugin_dict:
-                uploader = self.engine.plugin_dict['uploader']['class']
-                if uploader:
-                    if uploader.retry_task(uuid):
-                        return {'status': 'success', 'message': 'Task retry scheduled.'}
-                    else:
-                        return {'status': 'error', 'message': 'Task not found or failed to retry.'}
-            return {'status': 'error', 'message': 'Uploader not available.'}
-
         @app.route('/api/upload_tasks/<uuid>/stop', methods=['POST'])
         @self.login_required
         def upload_task_stop(uuid):
@@ -378,30 +429,6 @@ class WebApi:
                     else:
                         return {'status': 'error', 'message': '任务不存在或已结束'}
             return {'status': 'error', 'message': 'Uploader not available.'}
-
-        @app.route('/api/failed_uploads/delete/<uuid>', methods=['POST'])
-        @self.login_required
-        def failed_uploads_delete(uuid):
-            if self.engine and 'uploader' in self.engine.plugin_dict:
-                uploader = self.engine.plugin_dict['uploader']['class']
-                if uploader:
-                    if uploader.delete_failed_task(uuid):
-                        return {'status': 'success', 'message': 'Task deleted.'}
-                    else:
-                        return {'status': 'error', 'message': 'Task not found.'}
-            return {'status': 'error', 'message': 'Uploader not available.'}
-
-        @app.route('/api/failed_renders/retry/<uuid>', methods=['POST'])
-        @self.login_required
-        def failed_renders_retry(uuid):
-            if self.engine and 'render' in self.engine.plugin_dict:
-                render = self.engine.plugin_dict['render']['class']
-                if render:
-                    if render.retry_task(uuid):
-                        return {'status': 'success', 'message': 'Task retry scheduled.'}
-                    else:
-                        return {'status': 'error', 'message': 'Task not found or failed to retry.'}
-            return {'status': 'error', 'message': 'Render not available.'}
 
         def _get_downloader():
             if self.engine and 'downloader' in self.engine.plugin_dict:
@@ -446,6 +473,37 @@ class WebApi:
                 return {'status': 'success', 'message': f'{taskname} 已收到手动开播指令'}
             return {'status': 'error', 'message': 'Downloader not available'}, 500
 
+        @app.route('/api/tasks/<taskname>/pipeline')
+        @self.login_required
+        def api_task_pipeline(taskname):
+            """该任务所有未删除的会话记录（output_dir 下 .session_*.json，liveevents 内存的忠实镜像）。
+            读磁盘 json 而非内存：录制结束、甚至重启后，只要文件还在就能查看。"""
+            info = (getattr(self.engine, 'task_dict', {}) or {}).get(taskname) if self.engine else None
+            ev = getattr(info.get('class'), 'event_class', None) if info else None
+            groups = []
+            if ev is not None:
+                out_dir = str(getattr(ev, 'src_path', '') or '')
+                for rec in read_all_records(out_dir):
+                    sd = rec.get('session_data') or {}
+                    rows = []
+                    for i, seg in enumerate(rec.get('state') or []):
+                        row = {'seg': i + 1}
+                        for vt, slot in (seg or {}).items():
+                            f = slot.get('file') or {}
+                            row[vt] = {
+                                'status': slot.get('status'),
+                                'file': os.path.basename(f['path']) if f.get('path') else None,
+                            }
+                        rows.append(row)
+                    groups.append({
+                        'group_id':    rec.get('group_id'),
+                        'is_live_end': sd.get('is_live_end'),
+                        'updated_at':  rec.get('updated_at'),
+                        'session':     sd,
+                        'segments':    rows,
+                    })
+            return {'groups': groups}
+
         @app.route('/api/restart', methods=['POST'])
         @self.login_required
         def api_restart():
@@ -470,18 +528,6 @@ class WebApi:
                 os._exit(0)
             threading.Thread(target=_shutdown, daemon=True).start()
             return {'status': 'success', 'message': '程序正在退出...'}
-
-        @app.route('/api/failed_renders/delete/<uuid>', methods=['POST'])
-        @self.login_required
-        def failed_renders_delete(uuid):
-            if self.engine and 'render' in self.engine.plugin_dict:
-                render = self.engine.plugin_dict['render']['class']
-                if render:
-                    if render.delete_failed_task(uuid):
-                        return {'status': 'success', 'message': 'Task deleted.'}
-                    else:
-                        return {'status': 'error', 'message': 'Task not found.'}
-            return {'status': 'error', 'message': 'Render not available.'}
 
         return app
 
@@ -519,12 +565,6 @@ class WebApi:
                         if live_start:
                             live_duration = str(now - live_start).split('.')[0]
 
-                    record_windows_ranges = (task.advanced_video_args or {}).get('record_windows', {}).get('ranges')
-                    if record_windows_ranges:
-                        record_windows_str = ', '.join(f"{r['start']}-{r['end']}" for r in record_windows_ranges)
-                    else:
-                        record_windows_str = '全天'
-
                     recording_tasks.append({
                         'name': taskname,
                         'platform': task.plat,
@@ -533,17 +573,11 @@ class WebApi:
                         'duration': duration,
                         'live_duration': live_duration,
                         'force_offline_time': getattr(task, 'force_offline_time', '') or '',
-                        'record_windows': record_windows_str,
-                        'stop_wait_time': int(getattr(task, 'stop_wait_time', 0)),
-                        'start_check_interval': (task.advanced_video_args or {}).get('start_check_interval', 60),
-                        'stop_check_interval': (task.advanced_video_args or {}).get('stop_check_interval', 60),
-                        'trust_onair_at_startup': (task.advanced_video_args or {}).get('trust_onair_at_startup', True),
                         'output_dir': _abspath(getattr(task, 'output_dir', '')),
                     })
 
         # Get Upload Tasks
         upload_tasks_list = []
-        failed_tasks_list = []
         if self.engine and 'uploader' in self.engine.plugin_dict:
             uploader = self.engine.plugin_dict['uploader']['class']
             if uploader:
@@ -554,21 +588,12 @@ class WebApi:
                         'account': task.get('args', {}).get('account', 'Unknown'),
                         'engine': task.get('engine', 'Unknown'),
                         'is_sync': bool(task.get('stream_queue')),
-                        'status': task.get('status', 'waiting')
-                    })
-                
-                for uuid, task in uploader.failed_tasks.items():
-                    failed_tasks_list.append({
-                        'uuid': uuid,
-                        'files': [{'name': os.path.join(os.path.basename(os.path.dirname(f.path)), os.path.basename(f.path))} for f in task.get('files', [])],
-                        'account': task.get('args', {}).get('account', 'Unknown'),
-                        'engine': task.get('engine', 'Unknown'),
-                        'command': task.get('command'),
+                        'status': task.get('status', 'waiting'),
+                        'progress': task.get('progress'),   # biliwebapi 按块回报的上传百分比（其它引擎为 None）
                     })
 
         # Get Render Tasks
         render_tasks_list = []
-        failed_renders_list = []
         completed_renders_list = []
         if self.engine and 'render' in self.engine.plugin_dict:
             render = self.engine.plugin_dict['render']['class']
@@ -580,13 +605,14 @@ class WebApi:
                     rec_time = rec.get('time')
                     out_abs = _abspath(out_p)
                     vid_abs = _abspath(vid_p)
+                    # 渲染产物已不存在（被合并/清理删除）→ 不再展示这条
+                    if not (out_abs and os.path.exists(out_abs)):
+                        continue
                     completed_renders_list.append({
                         'video': os.path.join(os.path.basename(os.path.dirname(vid_p)), os.path.basename(vid_p)),
                         'output': os.path.join(os.path.basename(os.path.dirname(out_p)), os.path.basename(out_p)),
                         'video_path': vid_abs,
                         'output_path': out_abs,
-                        'video_exists': bool(vid_abs) and os.path.exists(vid_abs),
-                        'output_exists': bool(out_abs) and os.path.exists(out_abs),
                         'mode': rec.get('mode', 'Unknown'),
                         'time': rec_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(rec_time, 'strftime') else '',
                     })
@@ -601,18 +627,7 @@ class WebApi:
                         'mode': task.get('mode', 'Unknown'),
                         'status': task.get('status', 'waiting')
                     })
-                
-                for uuid, task in render.failed_tasks.items():
-                    video_path = task.get('video').path if task.get('video') else 'Unknown'
-                    failed_renders_list.append({
-                        'uuid': uuid,
-                        'video': os.path.join(os.path.basename(os.path.dirname(video_path)), os.path.basename(video_path)),
-                        'output': os.path.join(os.path.basename(os.path.dirname(task.get('output', 'Unknown'))), os.path.basename(task.get('output', 'Unknown'))),
-                        'video_path': _abspath(video_path),
-                        'output_path': _abspath(task.get('output', '')),
-                        'mode': task.get('mode', 'Unknown'),
-                    })
-        
+
         # Get Pending Cleanup Tasks
         pending_clean_list = []
         if self.engine and 'cleaner' in self.engine.plugin_dict:
@@ -620,7 +635,8 @@ class WebApi:
             for entry in list(cleaner._read_pending()):
                 pending_clean_list.append({
                     'method'    : entry.get('method', ''),
-                    'files'     : [os.path.join(os.path.basename(os.path.dirname(f)), os.path.basename(f)) for f in entry.get('files', [])],
+                    # 发完整路径，由前端 pathCell 切「文件夹\文件名」并拼可打开的链接（与渲染任务一致）
+                    'files'     : list(entry.get('files', [])),
                     'note'      : entry.get('note', ''),
                     'execute_at': entry.get('created_at', 0) + entry.get('delay', 0),
                 })
@@ -635,25 +651,42 @@ class WebApi:
                     out_p = rec.get('output')
                     out_abs = _abspath(out_p)
                     rec_time = rec.get('time')
+                    # 合并文件已不存在（上传后被清理删除）→ 不再展示这条
+                    if not (out_abs and os.path.exists(out_abs)):
+                        continue
                     completed_merges_list.append({
                         'task': taskname,
                         'output': os.path.join(os.path.basename(os.path.dirname(out_p)), os.path.basename(out_p)) if out_p else '',
                         'output_path': out_abs,
-                        'output_exists': bool(out_abs) and os.path.exists(out_abs),
                         'type': rec.get('type', ''),
                         'segments': rec.get('segments', 0),
                         'time': rec_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(rec_time, 'strftime') else '',
                     })
 
+        # Held tasks（需人工处理：某步重试用尽后被挂起的失败任务）
+        held_tasks_list = []
+        if self.engine:
+            for taskname, info in getattr(self.engine, 'task_dict', {}).items():
+                rt = info.get('class')
+                ev = getattr(rt, 'event_class', None)
+                for h in (getattr(ev, 'held_tasks', {}) or {}).values():
+                    t = h.get('time')
+                    held_tasks_list.append({
+                        'task'   : taskname,
+                        'hold_id': h.get('hold_id'),
+                        'stage'  : h.get('stage'),
+                        'info'   : h.get('info', {}),
+                        'time'   : t.strftime('%Y-%m-%d %H:%M:%S') if hasattr(t, 'strftime') else '',
+                    })
+
         return {
             'recording_tasks'   : recording_tasks,
             'upload_tasks'      : upload_tasks_list,
-            'failed_tasks'      : failed_tasks_list,
             'render_tasks'      : render_tasks_list,
-            'failed_renders'    : failed_renders_list,
             'completed_renders' : completed_renders_list,
             'completed_merges'  : completed_merges_list,
             'pending_clean_tasks': pending_clean_list,
+            'held_tasks'        : held_tasks_list,
             'notifications'     : self.get_notifications(),
         }
 
@@ -688,14 +721,10 @@ class WebApi:
             except Exception:
                 pass
         try:
-            if self.engine and 'uploader' in self.engine.plugin_dict:
-                up = self.engine.plugin_dict['uploader']['class']
-                if up:
-                    n['failed'] += len(getattr(up, 'failed_tasks', {}))
-            if self.engine and 'render' in self.engine.plugin_dict:
-                rd = self.engine.plugin_dict['render']['class']
-                if rd:
-                    n['failed'] += len(getattr(rd, 'failed_tasks', {}))
+            # 待办计数 = 各任务"需人工处理"的挂起任务数（失败重试用尽后转人工）
+            for info in (getattr(self.engine, 'task_dict', {}).values() if self.engine else []):
+                ev = getattr(info.get('class'), 'event_class', None)
+                n['failed'] += len(getattr(ev, 'held_tasks', {}) or {})
         except Exception:
             pass
         try:
@@ -707,7 +736,8 @@ class WebApi:
 
     def start_helper(self):
         self.webapp = self.create_app()
-        self.webapp.run(host=self.host, port=self.port, debug=False, use_reloader=False)
+        # threaded=True：SSE 实时日志会常开一条连接，必须多线程，否则单连接会阻塞其它请求
+        self.webapp.run(host=self.host, port=self.port, debug=False, use_reloader=False, threaded=True)
 
     def start(self):
         self.webapp_thread = threading.Thread(target=self.start_helper, daemon=True)

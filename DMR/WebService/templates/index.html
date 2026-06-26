@@ -30,7 +30,7 @@
                         <div style="display:flex;flex-wrap:wrap;gap:4px;">
                         {% if task.status == 1 %}
                         <button onclick="taskCmd('{{ task.name }}','segment')" style="padding:2px 8px;cursor:pointer;color:#000;">分段</button>
-                        <button onclick="taskCmd('{{ task.name }}','offline')" style="padding:2px 8px;cursor:pointer;color:#000;border-color:#ff6b6b;">下播</button>
+                        <button onclick="openOffline('{{ task.name }}')" style="padding:2px 8px;cursor:pointer;color:#000;border-color:#ff6b6b;">下播</button>
                         {% elif task.status == 2 %}
                         <button onclick="taskCmd('{{ task.name }}','force_live')" style="padding:2px 8px;cursor:pointer;color:#000;border-color:#4caf50;">开播</button>
                         {% endif %}
@@ -48,18 +48,33 @@
 </div>
 
 <div id="status-info-overlay" class="tp-overlay" style="display:none;" onclick="if(event.target===this)closeStatusInfo()">
-    <div class="tp-modal" style="width:320px;">
-        <h3>状态信息 - <span id="si-taskname"></span></h3>
-        <div id="si-content" style="display:grid;grid-template-columns:auto 1fr auto;column-gap:16px;row-gap:10px;font-size:0.9rem;align-items:start;"></div>
+    <div class="tp-modal" style="width:420px;max-width:92vw;">
+        <h3>处理状态 - <span id="si-taskname"></span></h3>
+        <div id="si-content" style="font-size:0.9rem;max-height:60vh;overflow:auto;"></div>
         <div class="tp-buttons">
             <button class="tp-btn-close" onclick="closeStatusInfo()">关闭</button>
         </div>
     </div>
 </div>
 
+<div id="offline-overlay" class="tp-overlay" style="display:none;" onclick="if(event.target===this)closeOffline()">
+    <div class="tp-modal">
+        <h3>下播 - <span id="ol-taskname"></span></h3>
+        <div style="display:flex;flex-direction:column;gap:10px;margin:6px 0;">
+            <button onclick="offlineNow()" style="padding:8px;cursor:pointer;color:#000;border-color:#ff6b6b;">直接下播</button>
+            <button onclick="offlineEditTime()" style="padding:8px;cursor:pointer;color:#000;">修改下播时间</button>
+        </div>
+        <div id="ol-current" style="font-size:0.82rem;color:#999;text-align:center;"></div>
+        <div class="tp-buttons">
+            <button class="tp-btn-close" onclick="closeOffline()">关闭</button>
+        </div>
+    </div>
+</div>
+
 <div id="time-picker-overlay" class="tp-overlay" style="display:none;" onclick="if(event.target===this)closeTimePicker()">
     <div class="tp-modal">
-        <h3>定时下播 - <span id="tp-taskname"></span></h3>
+        <h3>修改下播时间 - <span id="tp-taskname"></span></h3>
+        <div style="font-size:0.82rem;color:#999;text-align:center;margin-bottom:4px;">设置「定时下播」（到点自动下播）：</div>
         <div class="tp-wheels">
             <div class="tp-wheel" id="tp-hours"></div>
             <div class="tp-colon">:</div>
@@ -69,23 +84,16 @@
         <div class="tp-buttons">
             <button class="tp-btn-close" onclick="closeTimePicker()">关闭</button>
             <button class="tp-btn-clear" onclick="tpClear()">取消定时</button>
-            <button onclick="tpConfirm()">确定</button>
+            <button onclick="tpConfirm()">设为定时</button>
         </div>
     </div>
 </div>
 
 <script>
-    // 任务名 -> {force_offline_time, record_windows, ...}，用于弹窗显示当前状态
+    // 任务名 -> {force_offline_time}，用于「下播」弹窗显示当前定时
     let taskInfoMap = {};
     {% for task in recording_tasks %}
-    taskInfoMap[{{ task.name | tojson }}] = {{ {
-        'force_offline_time': task.force_offline_time,
-        'record_windows': task.record_windows,
-        'stop_wait_time': task.stop_wait_time,
-        'start_check_interval': task.start_check_interval,
-        'stop_check_interval': task.stop_check_interval,
-        'trust_onair_at_startup': task.trust_onair_at_startup,
-    } | tojson }};
+    taskInfoMap[{{ task.name | tojson }}] = { force_offline_time: {{ task.force_offline_time | tojson }} };
     {% endfor %}
 
     function taskCmd(taskname, action) {
@@ -164,6 +172,30 @@
         }
     }
 
+    // 下播选择弹窗：直接下播 / 修改下播时间
+    let olTask = null;
+    function openOffline(taskname) {
+        olTask = taskname;
+        document.getElementById('ol-taskname').textContent = taskname;
+        const cur = (taskInfoMap[taskname] || {}).force_offline_time;
+        document.getElementById('ol-current').textContent = cur ? `当前定时下播：${cur}` : '当前未设置定时下播';
+        document.getElementById('offline-overlay').style.display = 'flex';
+    }
+    function closeOffline() {
+        document.getElementById('offline-overlay').style.display = 'none';
+    }
+    function offlineNow() {
+        if (!confirm(`确定要对 ${olTask} 直接下播吗？`)) return;
+        const t = olTask;
+        closeOffline();
+        sendTaskCmd(t, 'offline', {});
+    }
+    function offlineEditTime() {
+        const t = olTask;
+        closeOffline();
+        openTimePicker(t);
+    }
+
     function openTimePicker(taskname) {
         tpTask = taskname;
         document.getElementById('tp-taskname').textContent = taskname;
@@ -181,25 +213,98 @@
         document.getElementById('time-picker-overlay').style.display = 'none';
     }
 
+    // 处理状态：各 status 的中文 + 颜色
+    const PIPE_STATUS = {
+        ready:'就绪', rendering:'渲染中', uploading:'上传中', uploaded:'已上传',
+        cleaning:'清理中', cleaned:'已清理', merging:'合并中', merged:'已合并',
+        holding:'挂起', render_failed:'渲染失败',
+    };
+    const PIPE_COLOR = {
+        rendering:'#4ea1ff', uploading:'#4ea1ff', merging:'#4ea1ff', cleaning:'#888',
+        ready:'#4caf50', uploaded:'#4caf50', merged:'#4caf50', cleaned:'#888',
+        holding:'#e90', render_failed:'#c00',
+    };
+    // 状态弹窗：打开后定时轮询 json 记录；内容签名没变就不重建 DOM，避免选不中文字
+    let _siTask = null, _siTimer = null, _siSig = '';
+
     function openStatusInfo(taskname) {
+        _siTask = taskname;
+        _siSig = '';
         document.getElementById('si-taskname').textContent = taskname;
-        const info = taskInfoMap[taskname] || {};
-        const tpIcon = `<button onclick="openTimePicker('${taskname}')" title="设置定时下播" style="background:none;border:none;padding:0;cursor:pointer;font-size:1rem;line-height:1;color:var(--accent-color);">⚙</button>`;
-        const rows = [
-            ['record_windows', '录制窗口', info.record_windows || '全天', ''],
-            ['force_offline_time', '强制下播时间', info.force_offline_time || '未设置', tpIcon],
-            ['stop_wait_time', '停止等待时间', `${info.stop_wait_time ?? 0} 秒`, ''],
-            ['stop_check_interval', '下播检查间隔', `${info.stop_check_interval ?? 60} 秒`, ''],
-        ];
-        document.getElementById('si-content').innerHTML = rows.map(([en, cn, val, icon]) => `
-            <div style="text-align:left;">${en}<br><span style="font-size:0.75rem;color:#999;">${cn}</span></div>
-            <div style="text-align:left;">${val}</div>
-            <div style="text-align:left;">${icon}</div>
-        `).join('');
+        document.getElementById('si-content').innerHTML = '<p style="color:#999;">加载中...</p>';
         document.getElementById('status-info-overlay').style.display = 'flex';
+        siRefresh();
+        if (_siTimer) clearInterval(_siTimer);
+        _siTimer = setInterval(siRefresh, 2000);
+    }
+
+    function siRefresh() {
+        if (!_siTask) return;
+        const task = _siTask;
+        fetch(`/api/tasks/${encodeURIComponent(task)}/pipeline`)
+            .then(r => r.json())
+            .then(data => { if (_siTask === task) renderPipeline(data); })
+            .catch(() => {
+                if (_siTask === task && _siSig !== '__err__') {
+                    _siSig = '__err__';
+                    document.getElementById('si-content').innerHTML = '<p style="color:#c00;">加载失败</p>';
+                }
+            });
+    }
+
+    // 一格 = 某分段某 dtype 的 {status, file}；状态着色，鼠标悬停看文件名
+    function pcell(c) {
+        if (!c || !c.status) return '<span style="color:#555;">-</span>';
+        const t = c.file ? ` title="${c.file.replace(/"/g, '&quot;')}"` : '';
+        return `<span style="color:${PIPE_COLOR[c.status] || '#ccc'};"${t}>${PIPE_STATUS[c.status] || c.status}</span>`;
+    }
+
+    function renderPipeline(data) {
+        const groups = (data && data.groups) || [];
+        // 只对“会变的内容”算签名（不含 updated_at），没变就不动 DOM
+        const sig = JSON.stringify(groups.map(g => [g.group_id, g.is_live_end, g.segments]));
+        if (sig === _siSig) return;
+        _siSig = sig;
+
+        if (!groups.length) {
+            document.getElementById('si-content').innerHTML = '<p style="color:#999;">当前没有未删除的会话记录（这场已处理完释放，或还没开录）。</p>';
+            return;
+        }
+        let html = '';
+        groups.forEach(g => {
+            const sd = g.session || {};
+            const meta = [];
+            if (sd.stime) meta.push(`开播 ${sd.stime}`);
+            if (sd.etime) meta.push(`下播 ${sd.etime}`);
+            if (sd.totaltime) meta.push(`时长 ${sd.totaltime}`);
+            if (sd.total_revenue) meta.push(`营收 ${sd.total_revenue}`);
+            const metaLine = meta.length ? `<div style="color:#777;font-size:0.75rem;margin-bottom:4px;">${meta.join('<br>')}</div>` : '';
+            html += `<div style="margin-bottom:12px;">
+                <div style="color:#888;font-size:0.8rem;margin-bottom:2px;">场次 ${g.group_id} ${g.is_live_end ? '（已下播，处理中）' : '（直播进行中）'}${g.updated_at ? `<br>· 更新于 ${g.updated_at.replace('T', ' ')}` : ''}</div>
+                ${metaLine}
+                <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                    <thead><tr style="color:#999;">
+                        <th style="text-align:left;padding:2px 6px;">段</th>
+                        <th style="text-align:left;padding:2px 6px;">录制</th>
+                        <th style="text-align:left;padding:2px 6px;">弹幕</th>
+                        <th style="text-align:left;padding:2px 6px;">转码</th>
+                    </tr></thead><tbody>`;
+            g.segments.forEach(s => {
+                html += `<tr>
+                    <td style="padding:2px 6px;">${s.seg}</td>
+                    <td style="padding:2px 6px;">${pcell(s.src_video_pre)}</td>
+                    <td style="padding:2px 6px;">${pcell(s.dm_video)}</td>
+                    <td style="padding:2px 6px;">${pcell(s.src_video)}</td>
+                </tr>`;
+            });
+            html += '</tbody></table></div>';
+        });
+        document.getElementById('si-content').innerHTML = html;
     }
 
     function closeStatusInfo() {
+        _siTask = null;
+        if (_siTimer) { clearInterval(_siTimer); _siTimer = null; }
         document.getElementById('status-info-overlay').style.display = 'none';
     }
 
@@ -218,13 +323,9 @@
         tpUpdateStatusInfo('');
     }
 
-    // 设置定时后，若状态弹窗正打开着同一任务，立即刷新其显示
+    // 设置/取消定时后，更新本地缓存，让下次打开「下播」弹窗显示最新定时
     function tpUpdateStatusInfo(t) {
         if (taskInfoMap[tpTask]) taskInfoMap[tpTask].force_offline_time = t;
-        const overlay = document.getElementById('status-info-overlay');
-        if (overlay.style.display === 'flex' && document.getElementById('si-taskname').textContent === tpTask) {
-            openStatusInfo(tpTask);
-        }
     }
 
     tpInitWheel(document.getElementById('tp-hours'), 24);
@@ -235,7 +336,7 @@
         if (status === 1) {
             html += `
                 <button onclick="taskCmd('${name}','segment')" style="padding:2px 8px;cursor:pointer;color:#000;">分段</button>
-                <button onclick="taskCmd('${name}','offline')" style="padding:2px 8px;cursor:pointer;color:#000;border-color:#ff6b6b;">下播</button>`;
+                <button onclick="openOffline('${name}')" style="padding:2px 8px;cursor:pointer;color:#000;border-color:#ff6b6b;">下播</button>`;
         } else if (status === 2) {
             html += `<button onclick="taskCmd('${name}','force_live')" style="padding:2px 8px;cursor:pointer;color:#000;border-color:#4caf50;">开播</button>`;
         }
@@ -249,32 +350,43 @@
             .then(response => response.json())
             .then(data => {
                 const recordingDiv = document.getElementById('recording-tasks');
+                data.recording_tasks.forEach(task => {
+                    taskInfoMap[task.name] = { force_offline_time: task.force_offline_time };
+                });
                 if (data.recording_tasks.length > 0) {
-                    let html = '<table><thead><tr><th>任务名</th><th>平台</th><th>直播间</th><th>状态</th><th>分段时长</th><th>本场时长</th><th>操作</th></tr></thead><tbody>';
-                    data.recording_tasks.forEach(task => {
-                        taskInfoMap[task.name] = {
-                            force_offline_time: task.force_offline_time,
-                            record_windows: task.record_windows,
-                            stop_wait_time: task.stop_wait_time,
-                            start_check_interval: task.start_check_interval,
-                            stop_check_interval: task.stop_check_interval,
-                            trust_onair_at_startup: task.trust_onair_at_startup,
-                        };
-                        const statusClass = task.status === 1 ? 'status-running' : (task.status === 2 ? 'status-replay' : (task.status === 3 ? 'status-stopping' : 'status-stopped'));
-                        const statusText = task.status === 1 ? '录制中' : (task.status === 2 ? '回放中' : (task.status === 3 ? '等待确认下播' : '未开播'));
-                        html += `<tr>
-                            <td>${task.output_dir ? `<button title="打开文件夹" onclick='openPath(${JSON.stringify(task.output_dir)},"folder")' style="background:none;border:none;cursor:pointer;font-size:16px;margin-right:6px;padding:0;vertical-align:middle;">📁</button>` : ''}${task.name}</td>
-                            <td>${task.platform}</td>
-                            <td><a href="${task.url}" target="_blank">链接</a></td>
-                            <td><span class="status-badge ${statusClass}">${statusText}</span></td>
-                            <td>${task.duration}</td>
-                            <td>${task.live_duration || '-'}</td>
-                            <td>${taskBtnsHTML(task.name, task.status)}</td>
-                        </tr>`;
+                    // 结构签名：排除每秒变化的时长，只有任务/状态/按钮变了才重建整张表
+                    const sig = JSON.stringify(data.recording_tasks.map(t =>
+                        [t.name, t.platform, t.url, t.status, t.output_dir]));
+                    if (sig !== window._recSig) {
+                        window._recSig = sig;
+                        let html = '<table><thead><tr><th>任务名</th><th>平台</th><th>直播间</th><th>状态</th><th>分段时长</th><th>本场时长</th><th>操作</th></tr></thead><tbody>';
+                        data.recording_tasks.forEach(task => {
+                            const statusClass = task.status === 1 ? 'status-running' : (task.status === 2 ? 'status-replay' : (task.status === 3 ? 'status-stopping' : 'status-stopped'));
+                            const statusText = task.status === 1 ? '录制中' : (task.status === 2 ? '回放中' : (task.status === 3 ? '等待确认下播' : '未开播'));
+                            html += `<tr>
+                                <td>${task.output_dir ? `<button title="打开文件夹" onclick='openPath(${JSON.stringify(task.output_dir)},"folder")' style="background:none;border:none;cursor:pointer;font-size:16px;margin-right:6px;padding:0;vertical-align:middle;">📁</button>` : ''}${task.name}</td>
+                                <td>${task.platform}</td>
+                                <td><a href="${task.url}" target="_blank">链接</a></td>
+                                <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                                <td class="rec-dur" data-task="${task.name}">${task.duration}</td>
+                                <td class="rec-livedur" data-task="${task.name}">${task.live_duration || '-'}</td>
+                                <td>${taskBtnsHTML(task.name, task.status)}</td>
+                            </tr>`;
+                        });
+                        html += '</tbody></table>';
+                        recordingDiv.innerHTML = html;
+                    }
+                    // 时长每秒原地更新（只改这两个单元格的文字，不重建行 → 不会清掉你的选区）
+                    const durMap = {};
+                    data.recording_tasks.forEach(t => { durMap[t.name] = t; });
+                    recordingDiv.querySelectorAll('.rec-dur').forEach(el => {
+                        const t = durMap[el.dataset.task]; if (t) el.textContent = t.duration;
                     });
-                    html += '</tbody></table>';
-                    recordingDiv.innerHTML = html;
-                } else {
+                    recordingDiv.querySelectorAll('.rec-livedur').forEach(el => {
+                        const t = durMap[el.dataset.task]; if (t) el.textContent = t.live_duration || '-';
+                    });
+                } else if (window._recSig !== 'empty') {
+                    window._recSig = 'empty';
                     recordingDiv.innerHTML = '<p>当前没有正在录制的任务。</p>';
                 }
                 if (window.updateNavBadges) updateNavBadges(data.notifications);

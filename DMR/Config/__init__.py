@@ -17,6 +17,8 @@ class Config():
         self.replay_config_path_raw = []
         self.replay_config_paths:List[str] = []
         self.file_hashes = {}
+        # 已应用版本的原文快照：path -> 文本。与 file_hashes 同步更新，供「查看改动」做 diff。
+        self.file_contents = {}
         # 用户选择“推迟到重启”的文件：path -> 当时磁盘hash（删除则为 'DELETED'）
         self.deferred = {}
         self.logger = logging.getLogger(__name__)
@@ -31,6 +33,13 @@ class Config():
         except Exception:
             return None
 
+    def _read_text(self, path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception:
+            return ''
+
     def _init_config(self):
         with open(self._base_config_path, 'r', encoding='utf-8') as f:
             self._base_config = yaml.safe_load(f)
@@ -41,7 +50,8 @@ class Config():
         with open(self.global_config_path, 'r', encoding='utf-8') as f:
             _global_config = yaml.safe_load(f)
         self.file_hashes[self.global_config_path] = self._get_file_hash(self.global_config_path)
-        
+        self.file_contents[self.global_config_path] = self._read_text(self.global_config_path)
+
         self.global_config = merge_dict(self.global_config, _global_config)
 
         for toolname, path in self.global_config.get('executable_tools_path',{}).items():
@@ -66,7 +76,8 @@ class Config():
             
             current_hash = self._get_file_hash(config_path)
             self.file_hashes[config_path] = current_hash
-            
+            self.file_contents[config_path] = self._read_text(config_path)
+
             taskname = filename_to_taskname(config_path)
             replay_config = {}
             
@@ -169,14 +180,14 @@ class Config():
                 status = 'modified'
             else:
                 status = None
-            # 命中“推迟到重启”且文件内容未再变化 → 标记 deferred（不再提醒）
-            if status in ('new', 'modified') and self.deferred.get(f) == h:
+            # 已“推迟到重启”的文件：之后再怎么改也保持 deferred、不再红点（反正重启统一应用最新版）
+            if status in ('new', 'modified') and f in self.deferred:
                 status = 'deferred'
             result.append({'path': f, 'filename': os.path.basename(f),
                            'taskname': filename_to_taskname(f),
                            'status': status, 'exists': True})
         for f in sorted(loaded_files - current_files):
-            status = 'deferred' if self.deferred.get(f) == 'DELETED' else 'deleted'
+            status = 'deferred' if f in self.deferred else 'deleted'
             result.append({'path': f, 'filename': os.path.basename(f),
                            'taskname': filename_to_taskname(f),
                            'status': status, 'exists': False})
@@ -187,18 +198,62 @@ class Config():
         return [s for s in self.get_all_states()
                 if s['status'] in ('new', 'modified', 'deleted')]
 
+    def get_diff(self, filename):
+        """某配置文件「已应用版本 → 当前磁盘版本」的统一 diff（git 风格 +/- 行列表，供 WebUI 查看改动）。
+        新增=全部 +；删除=全部 -；修改=逐行增删。"""
+        import difflib
+        fname = os.path.basename(filename)
+        # 当前磁盘路径：任务文件，或全局配置
+        disk_path = self.find_task_file(fname)
+        if disk_path is None and fname == os.path.basename(self.global_config_path):
+            disk_path = self.global_config_path
+        # 已应用版本的原文（按 basename 在快照里找）
+        loaded_path = next((p for p in self.file_contents if os.path.basename(p) == fname), None)
+        old_text = self.file_contents.get(loaded_path, '') if loaded_path else ''
+        new_text = self._read_text(disk_path) if (disk_path and os.path.exists(disk_path)) else ''
+        old_lines, new_lines = old_text.splitlines(), new_text.splitlines()
+        # n 设成全文长度 → 整份文件都展示（不只改动附近的几行），未改的行作为上下文一并带上
+        diff = difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile=f'{fname}（已应用）', tofile=f'{fname}（当前）',
+            lineterm='', n=max(len(old_lines), len(new_lines), 1))
+        return list(diff)
+
+    def revert(self, filename):
+        """撤销某文件的未应用改动，回到「上次已应用」的状态：
+        修改/删除 → 把已应用版本的原文写回磁盘；新增（无已应用快照）→ 删除该文件。
+        同时清掉它的「推迟」标记。返回是否成功。"""
+        fname = os.path.basename(filename)
+        self.deferred.pop(next((p for p in self.deferred if os.path.basename(p) == fname), None), None)
+        loaded_path = next((p for p in self.file_contents if os.path.basename(p) == fname), None)
+        disk_path = self.find_task_file(fname)
+        try:
+            if loaded_path is not None and self.file_contents.get(loaded_path) is not None:
+                target = disk_path or loaded_path   # 删除场景 disk_path 为空，用原路径恢复
+                with open(target, 'w', encoding='utf-8') as f:
+                    f.write(self.file_contents[loaded_path])
+                return True
+            # 没有已应用快照 = 新增文件的撤销 → 删除磁盘文件
+            if disk_path and os.path.exists(disk_path):
+                os.remove(disk_path)
+                return True
+        except Exception as e:
+            self.logger.warning(f'撤销配置改动失败 {fname}: {e}')
+        return False
+
     def defer(self, filename):
-        """把某文件标记为“推迟到重启”：记录当前磁盘hash（删除则记 'DELETED'）。"""
+        """把某文件标记为“推迟到重启”。一旦推迟就黏住：该文件之后再被修改也保持 deferred、不再红点，
+        直到重启时统一应用最新版（__init__ 应用后会 pop 掉）或用户撤销推迟。只记在不在名单，不记哈希。"""
         fname = os.path.basename(filename)
         disk_path = self.find_task_file(fname)
         if disk_path is not None:
-            self.deferred[disk_path] = self._get_file_hash(disk_path)
+            self.deferred[disk_path] = True
             return True
-        # 磁盘已删除：在已加载列表里找到原路径，记 DELETED
+        # 磁盘已删除：在已加载列表里找到原路径，同样标记为推迟
         loaded_path = next((p for p in self.replay_config_paths
                             if os.path.basename(p) == fname), None)
         if loaded_path is not None:
-            self.deferred[loaded_path] = 'DELETED'
+            self.deferred[loaded_path] = True
             return True
         return False
 
@@ -219,6 +274,7 @@ class Config():
             current_hash = self._get_file_hash(self.global_config_path)
             if current_hash != self.file_hashes.get(self.global_config_path):
                 self.file_hashes[self.global_config_path] = current_hash
+                self.file_contents[self.global_config_path] = self._read_text(self.global_config_path)
                 return 'global', None
         except Exception:
             pass
@@ -244,6 +300,7 @@ class Config():
             t = filename_to_taskname(f)
             self.replay_config.pop(t, None)
             self.file_hashes.pop(f, None)
+            self.file_contents.pop(f, None)
             
         for f in current_files & old_files:
             try:
