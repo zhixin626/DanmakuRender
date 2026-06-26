@@ -53,8 +53,7 @@ class DanmakuRender(): # 被 main.py直接 DanmakuRender(config, logger=logger, 
             self.engine.add_task(taskname, replay_config)  # 调用engine的add_task
 
         self._pending_restarts = {}
-        threading.Thread(target=self._monintor, daemon=True).start()
-        threading.Thread(target=self._pending_restart_watcher, daemon=True).start()
+        threading.Thread(target=self._scheduler, daemon=True, name='dmr-scheduler').start()
 
     def check_config_update(self):
         try:
@@ -92,28 +91,25 @@ class DanmakuRender(): # 被 main.py直接 DanmakuRender(config, logger=logger, 
             self.logger.error(f'动态载入配置文件错误:')
             self.logger.exception(e)
 
-    def _pending_restart_watcher(self):
-        """轮询 _pending_restarts，等任务空闲后执行延迟重启。"""
-        CHECK_INTERVAL = 30
-        while not self.stoped:
-            time.sleep(CHECK_INTERVAL)
-            if not self._pending_restarts:
-                continue
-            done = []
-            for taskname, config_path in list(self._pending_restarts.items()):
-                if self.engine.is_task_idle(taskname):
-                    try:
-                        self.logger.info(f'任务 {taskname} 已空闲，正在应用配置更新并重启...')
-                        self.engine.del_task(taskname)
-                        time.sleep(5)
-                        self.engine.add_task(taskname, self.config.get_replay_config(taskname))
-                        done.append(taskname)
-                    except Exception as e:
-                        self.logger.error(f'延迟重启任务 {taskname} 失败:')
-                        self.logger.exception(e)
-                        done.append(taskname)
-            for taskname in done:
-                self._pending_restarts.pop(taskname, None)
+    def _job_pending_restarts(self):
+        """定时任务：等忙碌任务空闲后，执行其排队中的延迟重启（由 _scheduler 每 30s 调一次）。"""
+        if not self._pending_restarts:
+            return
+        done = []
+        for taskname, config_path in list(self._pending_restarts.items()):
+            if self.engine.is_task_idle(taskname):
+                try:
+                    self.logger.info(f'任务 {taskname} 已空闲，正在应用配置更新并重启...')
+                    self.engine.del_task(taskname)
+                    time.sleep(5)
+                    self.engine.add_task(taskname, self.config.get_replay_config(taskname))
+                    done.append(taskname)
+                except Exception as e:
+                    self.logger.error(f'延迟重启任务 {taskname} 失败:')
+                    self.logger.exception(e)
+                    done.append(taskname)
+        for taskname in done:
+            self._pending_restarts.pop(taskname, None)
 
     def _swap_task(self, taskname):
         """删旧任务、等待后用最新配置重建（在后台线程执行，避免阻塞网页请求）。"""
@@ -181,35 +177,58 @@ class DanmakuRender(): # 被 main.py直接 DanmakuRender(config, logger=logger, 
             self.logger.exception(e)
             return {'ok': False, 'message': f'应用失败: {e}'}
 
-    def _monintor(self):
-        REFRESH_INTERVAL = 60
-        time.sleep(REFRESH_INTERVAL)
+    def _scheduler(self):
+        """统一的定时任务线程：取代原先各开一条 while+sleep 的 _monintor / _pending_restart_watcher。
+        每 TICK 秒醒一次，到点就跑对应的活；以后要加周期任务，只往 jobs 里加一行即可。
+        各 job 内部已自捕异常，单个出错不影响其它 job 与后续轮次。"""
+        TICK = 10
+        # [间隔秒, 函数, 上次运行时刻]；初始 last=now → 首轮在 now+间隔 触发（与旧行为一致：
+        # 配置检查/清临时首跑约 +60s，延迟重启首跑约 +30s）
+        now = time.time()
+        jobs = [
+            [60, self._job_dynamic_config, now],
+            [60, self._job_clean_temp,     now],
+            [30, self._job_pending_restarts, now],
+        ]
         while not self.stoped:
-            if self.config.get_config('dmr_engine_args')['dynamic_config']:
-                self.check_config_update()
-            # clean temp file
-            files = os.listdir('.temp')
-            for file in files:
-                try:
-                    basename = os.path.splitext(os.path.basename(file))[0]
-                    expired_time = basename.split('_')[-1]
-                    if expired_time.isdigit():
-                        expired_time = int(expired_time)
-                    else:
-                        expired_time = 0
-                    # 只清理2024.01.01之后的过期文件，过早的文件认为不是程序创建的不清理
-                    if expired_time > 1704038400 and expired_time < int(time.time()):
-                        file = os.path.join('.temp', file)
-                        if os.path.isfile(file):
-                            os.remove(file)
-                            self.logger.debug(f'已清理临时文件: {file}')
-                        elif os.path.isdir(file):
-                            shutil.rmtree(file)
-                            self.logger.debug(f'已清理临时文件夹: {file}')
-                except Exception as e:
-                    self.logger.debug(f'清理临时文件{file}失败: {e}')
-            
-            time.sleep(REFRESH_INTERVAL)
+            time.sleep(TICK)
+            now = time.time()
+            for job in jobs:
+                interval, fn, last = job
+                if now - last >= interval:
+                    job[2] = now
+                    try:
+                        fn()
+                    except Exception as e:
+                        self.logger.error(f'定时任务 {fn.__name__} 执行出错:')
+                        self.logger.exception(e)
+
+    def _job_dynamic_config(self):
+        """定时任务：开启 dynamic_config 时，检查配置文件增删改并热应用。"""
+        if self.config.get_config('dmr_engine_args')['dynamic_config']:
+            self.check_config_update()
+
+    def _job_clean_temp(self):
+        """定时任务：清理 .temp 下已过期的临时文件/文件夹（文件名末尾的时间戳为过期时刻）。"""
+        for file in os.listdir('.temp'):
+            try:
+                basename = os.path.splitext(os.path.basename(file))[0]
+                expired_time = basename.split('_')[-1]
+                if expired_time.isdigit():
+                    expired_time = int(expired_time)
+                else:
+                    expired_time = 0
+                # 只清理2024.01.01之后的过期文件，过早的文件认为不是程序创建的不清理
+                if expired_time > 1704038400 and expired_time < int(time.time()):
+                    file = os.path.join('.temp', file)
+                    if os.path.isfile(file):
+                        os.remove(file)
+                        self.logger.debug(f'已清理临时文件: {file}')
+                    elif os.path.isdir(file):
+                        shutil.rmtree(file)
+                        self.logger.debug(f'已清理临时文件夹: {file}')
+            except Exception as e:
+                self.logger.debug(f'清理临时文件{file}失败: {e}')
 
     def stop(self):
         self.stoped = True
