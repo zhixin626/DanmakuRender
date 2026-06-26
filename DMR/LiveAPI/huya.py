@@ -60,7 +60,7 @@ class huya(BaseAPI):
                 response = self._get_response()
                 selector = etree.HTML(response)
                 self.rid = selector.xpath('//*[@class="host-rid"]/em')[0].text
-            except:
+            except Exception:
                 pass
         
     def __del__(self):
@@ -179,19 +179,19 @@ class huya(BaseAPI):
         room_profile = self.get_room_profile()
         try:
             title = room_profile['room_title']
-        except:
+        except Exception:
             title = 'huya' + self.rid
         try:
             uname = room_profile['artist']
-        except:
+        except Exception:
             uname = 'huya' + self.rid
         try:
             face_url = room_profile['artist_img']
-        except:
+        except Exception:
             face_url = None
         try:
             cover_url = room_profile['room_cover']
-        except:
+        except Exception:
             cover_url = None
         return title, uname, face_url, cover_url
 

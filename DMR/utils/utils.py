@@ -211,7 +211,7 @@ def split_url(url: str):
     if platform == 'douyu':
         try:
             int(rid)
-        except:
+        except Exception:
             if 'rid=' in url:
                 rid = re.findall(r'rid=[0-9]*', url)[0][4:]
     if platform == "163":

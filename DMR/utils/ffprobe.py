@@ -36,11 +36,11 @@ class FFprobe():
             res = cls.run_ffprobe(fpath)
             try:
                 st = float(res['format']['start_time'])
-            except:
+            except Exception:
                 st = 0
             duration = float(res['format']['duration'])-st
             return max(duration, 0)
-        except:
+        except Exception:
             return -1
 
     @classmethod
@@ -76,7 +76,7 @@ class FFprobe():
                 res = cls.run_ffprobe(url)
             resolution = res['streams'][0]['width'],res['streams'][0]['height']
             return resolution
-        except:
+        except Exception:
             return 0,0
 
     @classmethod

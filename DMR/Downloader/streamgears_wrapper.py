@@ -17,7 +17,7 @@ if __name__ == '__main__':
     segment.time=args.segment; 
     try:
         header = json.loads(args.header)
-    except:
+    except Exception:
         header = {}
     try:
         stream_gears.download(

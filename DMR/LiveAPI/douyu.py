@@ -41,7 +41,7 @@ class douyu(BaseAPI):
 
         try:
             self.rid = re.findall(r'rid":(\d*),"vipId', res)[0]
-        except:
+        except Exception:
             raise Exception('房间号错误')
         
         self.__js_runable = True
@@ -91,19 +91,19 @@ class douyu(BaseAPI):
                 DouyuUtils.VipRoom.add(self.rid)
         try:
             title = resp['room']['room_name']
-        except:
+        except Exception:
             title = 'douyu'+self.rid
         try:
             uname = resp['room']['nickname']
-        except:
+        except Exception:
             uname = 'douyu'+self.rid
         try:
             face_url = resp['room']['owner_avatar']
-        except:
+        except Exception:
             face_url = None
         try:
             keyframe_url = resp['room']['room_pic']
-        except:
+        except Exception:
             keyframe_url = None
         return title,uname,face_url,keyframe_url
     
@@ -330,7 +330,7 @@ class douyu(BaseAPI):
                 is_tct = play_info['rtmp_cdn'] == 'tct-h5'
                 try:
                     fake_host, cname_url = self.build_hs_url(raw_stream_url, is_tct)
-                except:
+                except Exception:
                     logger.exception(f"{self.plugin_msg}: 构建 hs-h5 链接失败")
                 else:
                     raw_stream_url = cname_url

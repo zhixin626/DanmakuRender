@@ -130,7 +130,7 @@ class douyin(BaseAPI):
             try:
                 resp = self._get_response_douyin()
                 self.real_rid = resp['data'][0]['id_str']
-            except:
+            except Exception:
                 raise Exception(f'解析抖音房间号{rid}错误.')
     
     def __del__(self):

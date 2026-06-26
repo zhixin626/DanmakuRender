@@ -33,7 +33,7 @@ def parse_enter_msg(j):
                 s = s.strip('"\\' + "\x00\x01\x02\x12\x0c")
                 if len(s) > 1:
                     readable_list.append(s)
-            except:
+            except Exception:
                 continue
 
         face_url = "未知头像"
@@ -302,7 +302,7 @@ class Bilibili(DMAPI):
                         msg["raw"]=j
                         try:
                             msg['timestamp'] = j.get('data', {}).get('ts')
-                        except:
+                        except Exception:
                             msg['timestamp'] = datetime.now().timestamp()  # 如果没有时间戳，则使用当前时间
                         msg = SuperChatDanmaku(**msg)  # 转换为 SuperChatDanmaku 对象
 

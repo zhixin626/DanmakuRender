@@ -99,42 +99,42 @@ def GetStreamerInfo(plat,rid=None) -> tuple:
     api = LiveAPI(plat,rid)
     try:
         return api.GetStreamerInfo()
-    except:
+    except Exception:
         return None
     
 def GetRoomInfo(plat,rid=None) -> dict:
     api = LiveAPI(plat,rid)
     try:
         return api.GetRoomInfo()
-    except:
+    except Exception:
         return None
     
 def GetStreamURLs(plat,rid=None,**kwargs) -> list:
     api = LiveAPI(plat,rid)
     try:
         return api.get_stream_urls(**kwargs)
-    except:
+    except Exception:
         return None
 
 def GetStreamURL(plat, rid=None, **kwargs) -> dict:
     api = LiveAPI(plat,rid)
     try:
         return api.get_stream_url(**kwargs)
-    except:
+    except Exception:
         return None
 
 def Onair(plat, rid=None) -> bool:
     api = LiveAPI(plat,rid)
     try:
         return api.onair()
-    except:
+    except Exception:
         return None
 
 def UrlAvailable(plat,rid=None) -> bool:
     api = LiveAPI(plat,rid)
     try:
         return api.is_available()
-    except:
+    except Exception:
         return None
 
 # if __name__ == '__main__':

@@ -95,7 +95,7 @@ class DanmakuClient:
                     await self.__ws.send_str(self.__site_api.heartbeat)
                 else:
                     await self.__ws.send_bytes(self.__site_api.heartbeat)
-            except:
+            except Exception:
                 pass
 
     async def fetch_danmaku(self):

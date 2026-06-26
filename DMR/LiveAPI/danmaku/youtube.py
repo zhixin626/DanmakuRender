@@ -31,7 +31,7 @@ class Youtube:
                 await cls.get_room_info()
                 cls.ctn = liveparam.getparam(cls.vid, cls.cid, 1)
                 await cls.get_chat()
-            except:
+            except Exception:
                 traceback.print_exc()
                 await asyncio.sleep(1)
 
@@ -46,7 +46,7 @@ class Youtube:
             cid = a.group(1)
             cls.cid = cid
             cls.url = f"https://www.youtube.com/channel/{cid}/videos"
-        except:
+        except Exception:
             a = re.search(r"youtube.com/watch\?v=([^/?]+)", cls.url)
             async with cls.client.request(
                 "get", f"https://www.youtube.com/embed/{a.group(1)}"
@@ -118,7 +118,7 @@ class Youtube:
                     msg["content"] = message
                     msg["msg_type"] = "danmaku"
                     msgs.append(msg)
-                except:
+                except Exception:
                     pass
 
         return msgs

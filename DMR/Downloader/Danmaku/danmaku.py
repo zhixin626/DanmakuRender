@@ -293,7 +293,7 @@ class DanmakuDownloader():
                     self.logger.error(f'{self.url} 弹幕下载线程异常退出，正在重试...')
                     try:
                         self.logger.debug(task.result())
-                    except:
+                    except Exception:
                         self.logger.exception(task.exception())
                     task.cancel() # 这里估计是多余的
                     retry += 1

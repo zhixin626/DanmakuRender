@@ -39,11 +39,11 @@ class cc(BaseAPI):
         title = info['title']
         try:
             uname = info['nickname']
-        except:
+        except Exception:
             uname = info['live']['nickname']
         try:
             face_url = info['live']['purl']
-        except:
+        except Exception:
             face_url = None
         keyframe_url = None
         return title, uname, face_url, keyframe_url

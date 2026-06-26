@@ -29,7 +29,7 @@ def check_ffmpeg():
         if 'ffprobe version' in out:
             ToolsList.set('ffprobe', 'ffprobe')
         return True
-    except:
+    except Exception:
         pass
     
     if sys.platform == 'win32':
