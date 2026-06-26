@@ -99,11 +99,15 @@ def get_check_interval(default_interval: int, policy: dict, now=None) -> int:
     return default_interval
 
 if __name__ == '__main__':
+    import sys
     import yaml
-    file=R"D:\DanmakuRender\configs\DMR-不可一世杀手.yml"
-    with open(file,'r',encoding="UTF-8") as f:
-        config=yaml.safe_load(f)
-    adv_args=config.get("download_args").get("advanced_video_args")
-    check_policy=adv_args.get("check_policy")
-    print(get_check_interval(60,check_policy))
+    if len(sys.argv) < 2:
+        print('用法: python -m DMR.utils.seconds_until <任务配置.yml>')
+        sys.exit(1)
+    file = sys.argv[1]
+    with open(file, 'r', encoding="UTF-8") as f:
+        config = yaml.safe_load(f)
+    adv_args = config.get("download_args").get("advanced_video_args")
+    check_policy = adv_args.get("check_policy")
+    print(get_check_interval(60, check_policy))
 

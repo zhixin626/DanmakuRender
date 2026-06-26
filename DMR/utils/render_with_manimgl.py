@@ -34,14 +34,12 @@ def rendercover_with_manimgl(name,time,color,year,output_dir,image_path=None,is_
     return str(rendered_path)
 
 if __name__ == '__main__':
-    name="不可一世杀手"
-    time="6月11日"
-    color="#83C167"
-    year="2026"
-    output_dir=R"D:\DanmakuRender\Tasks文件\不可一世杀手"
-    # name="月亮3"
-    # time="6月11日"
-    # color="#FFFF00"
-    # year="2026"
-    # output_dir=R"D:\DanmakuRender\Tasks文件\月亮3"
-    rendercover_with_manimgl(name,time,color,year,output_dir)
+    import argparse
+    parser = argparse.ArgumentParser(description='用 manimgl 渲染封面（调试用）')
+    parser.add_argument('name')
+    parser.add_argument('output_dir')
+    parser.add_argument('--time', default='')
+    parser.add_argument('--color', default='#83C167')
+    parser.add_argument('--year', default='2026')
+    args = parser.parse_args()
+    rendercover_with_manimgl(args.name, args.time, args.color, args.year, args.output_dir)
