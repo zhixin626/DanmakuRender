@@ -4,7 +4,7 @@ import queue
 import threading
 
 from DMR.utils import *
-from DMR.utils.merge_mp4 import pad_disp
+from DMR.utils.console import pad_disp
 class Downloader(): # 被上层 class engine()初始化，在 add_plugin()里调用start()
     def __init__(self,
                  pipe:Tuple[queue.Queue, queue.Queue],

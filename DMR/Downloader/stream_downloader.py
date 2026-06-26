@@ -12,9 +12,8 @@ from DMR.Downloader.Danmaku import DanmakuDownloader
 from DMR.LiveAPI import *
 from DMR.utils import *
 from pathlib import Path
-from DMR.utils.merge_mp4 import COLORS, format_duration,pad_disp
+from DMR.utils.console import COLORS, pad_disp
 from DMR.utils.seconds_until import is_now_in_time_ranges,get_check_interval,is_passed_time_point
-from DMR.utils.gifts_utils import generate_gift_statistics,save_gift_to_jsonl
 
 from enum import Enum
 
@@ -71,10 +70,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.gift_dm_args=gift_dm_args
         self.sc_dm_args=sc_dm_args
         self.stoped = True
-
-        # if self.engine not in ['ffmpeg', 'streamlink', 'streamgears', 'pyrequests', 'auto']:
-        #     raise NotImplementedError(f'No Downloader Named {self.engine}.')
-
         os.makedirs(self.output_dir,exist_ok=True)
     @property
     def taskname_disp(self) -> str:
@@ -202,9 +197,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                     this_engine = 'ffmpeg'
                 else:
                     this_engine = 'streamgears'
-            # # 虎牙必须使用ffmpeg (https://github.com/SmallPeaches/DanmakuRender/issues/386)
-            # elif self.plat == 'huya':
-            #     this_engine = 'ffmpeg'
             # 其他原生支持的平台hls流使用ffmpeg，flv流使用streamgears
             elif self.plat in ['huya', 'douyu', 'douyin', 'cc']:
                 if '.m3u8' in stream_url:
@@ -250,10 +242,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                                      width=self.width,
                                      height=self.height,
                                      advanced_dm_args=self.advanced_dm_args,
-                                     gifts_file_path=self.gifts_file_path,           # zhixin新增
-                                     enable_gift_recorder=self.enable_gift_recorder, # zhixin新增
-                                     gift_minimum_cny=self.gift_minimum_cny,         # zhixin新增
-                                     gift_dm_args=self.gift_dm_args,         # zhixin新增
+                                     gift_dm_args=self.gift_dm_args,   # 礼物文件路径/是否录/门槛都由 DanmakuDownloader 自己从这里(及 output 目录)取
                                      sc_dm_args=self.sc_dm_args,             # SC 布局参数（如 anchor_y_ratio）
                                      **self.kwargs)
 
@@ -418,11 +407,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         stop_check_interval = self.advanced_video_args.get('stop_check_interval', 60)
         start_check_interval = self.advanced_video_args.get('start_check_interval', 60)
         check_policy = self.advanced_video_args.get('check_policy', {})
-        # ==============gift_dm_args=============
-        self.enable_gift_recorder=self.gift_dm_args.get("gift_recorder",False)
-        self.gift_minimum_cny= self.gift_dm_args.get("gift_min_cny",None)
-        self.gifts_file_path= self.output_dir + "/gifts.jsonl"
-        self.rank_top_n=self.gift_dm_args.get("rank_top_n",3)
         # ==============interactive====================
         self.force_offline_time = self.advanced_video_args.get("force_offline_time", "")
         self._cmd_segment = False           # 手动分段
@@ -430,7 +414,8 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self._cmd_force_live = False        # 回放状态下手动强制开始录制
         self.force_stop_trigger = False     # 人为强制下播触发标志
         self.forced_replay_pending = False  # 人为强制下播但主播实际未下播时，下一次开播应视为回放
-        self.live_start_time = None         # 本场直播开播时间，用于"开播到现在"录制时长统计
+        self.live_start_time = None         # 本场直播开播时间（LIVE_START 时赋值）。本文件内不读，
+                                            # 由 webapi.get_tasks_data 经 getattr 取走算"本场时长"，勿误删
         # =============================================
 
         restart_cnt = 0

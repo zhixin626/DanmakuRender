@@ -28,20 +28,19 @@ class DanmakuDownloader():
                  dm_template:dict=None,
                  dm_stream_option:dict={},
                  advanced_dm_args:dict={},
-                 gifts_file_path:Union[str,None]=None,
                  gift_dm_args:dict={},
                  sc_dm_args:dict={},
-                 enable_gift_recorder=False,
-                 gift_minimum_cny=None,
                  vip_lists=None,
                  uid_lists=None,   # 旧名，兼容保留（纯 uid 列表，无专属药丸色）
                  **kwargs) -> None:
 
-        self.gift_minimum_cny=gift_minimum_cny   # 来自 gift_dm_args.gift_min_cny，None=不过滤
-        self.enable_gift_recorder=enable_gift_recorder
         self.gift_dm_args = gift_dm_args
+        # 是否录礼物 / 礼物门槛：统一从 gift_dm_args 取（单一来源，不再单独传参）
+        self.enable_gift_recorder = (gift_dm_args or {}).get('gift_recorder', False)
+        self.gift_minimum_cny = (gift_dm_args or {}).get('gift_min_cny', None)   # None=不过滤
         self.sc_dm_args = sc_dm_args
-        self.gifts_file_path=gifts_file_path if gifts_file_path else os.path.join(os.path.dirname(output), "gifts.jsonl")
+        # 礼物落盘路径：与弹幕同目录的 gifts.jsonl（不再由外部传入）
+        self.gifts_file_path = os.path.join(os.path.dirname(output), "gifts.jsonl")
         self.stoped = False
 
         self.logger = logging.getLogger(__name__)
