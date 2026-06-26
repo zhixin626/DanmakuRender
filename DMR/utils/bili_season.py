@@ -4,6 +4,7 @@
 它走 .login_info/<account>.json 里的 cookie 自助鉴权（与 biliwebapi 引擎的登录态相互独立）。
 把稿件「加入合集 + 排序」的逻辑已迁到 DMR/Uploader/biliwebapi.py（用引擎自身登录态），勿混用。
 """
+import os
 import json
 import time
 import logging
@@ -12,9 +13,12 @@ from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 
+# 项目根目录：本文件在 DMR/utils/ 下，向上三级即仓库根（放着 .login_info/）
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def get_cookies(account):
-    login_json = f"D:/DanmakuRender/.login_info/{account}.json"
+    login_json = os.path.join(_PROJECT_ROOT, '.login_info', f'{account}.json')
     with open(login_json, 'r', encoding='utf-8') as f:
         data = json.load(f)
     cookies = {}
@@ -33,6 +37,36 @@ def build_headers():
         "Referer": "https://member.bilibili.com/platform/series/manager",
         "User-Agent": "Mozilla/5.0"
     }
+
+
+def list_seasons(account: str) -> List[Dict]:
+    """列出该账号下的全部合集(season)：[{'id':.., 'title':..}, ...]。
+    走 .login_info/<account>.json 的 cookie 自助鉴权（从 api.py 迁入，供 WebService 接口调用）。"""
+    cookies = get_cookies(account)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://member.bilibili.com/",
+    }
+    url = "https://member.bilibili.com/x2/creative/web/seasons"
+    season_list: List[Dict] = []
+    pn = 1
+    while True:
+        params = {"pn": pn, "ps": 30, "order": "", "sort": "", "draft": 1, "source": 0}
+        resp = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        seasons = data["data"]["seasons"]
+        if not seasons:
+            break
+        for item in seasons:
+            season_list.append({"id": item["season"]["id"], "title": item["season"]["title"]})
+        if len(season_list) >= data["data"]["total"]:
+            break
+        pn += 1
+    return season_list
 
 
 def get_section_id_from_season(account, season_id: int) -> int:

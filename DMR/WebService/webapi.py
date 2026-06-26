@@ -20,6 +20,35 @@ def _abspath(p):
         return ''
 
 
+def _format_synctitle_result(result: dict) -> str:
+    """把 sync_section_episode_titles 的结果格式化成纯文本（从原 api.py 迁入），方便快捷指令展示。"""
+    lines = []
+    if result.get("message"):
+        lines.append(result["message"])
+        lines.append("")
+    changed = result.get("changed") or []
+    errors = result.get("errors") or []
+    if changed:
+        lines.append(f"✅ 本次已成功同步 {len(changed)} 个分P 标题：")
+        lines.append("")
+        for idx, c in enumerate(changed, start=1):
+            lines.append(f"{idx}️⃣ {c.get('old_title','')}➜➜➜：\n{c.get('new_title','')}")
+            lines.append("")
+    if errors:
+        lines.append(f"❌ 以下 {len(errors)} 个分P 修改失败：")
+        lines.append("")
+        for idx, e in enumerate(errors, start=1):
+            block = [f"{idx}️⃣ {e.get('old_title','')}➜➜➜：", f"{e.get('new_title','')}",
+                     f" 错误：{e.get('error','未知错误')}"]
+            if e.get("aid"):
+                block.append(f"    aid：{e.get('aid')}")
+            lines.append("\n".join(block))
+            lines.append("")
+    if not lines:
+        lines.append("本次没有需要修改的分P。")
+    return "\n".join(lines).rstrip()
+
+
 def _detect_ahk_exe():
     """探测 AutoHotkey v2 可执行程序路径，找不到返回 None。"""
     for p in (r'C:\Program Files\AutoHotkey\v2\AutoHotkey.exe',
@@ -97,7 +126,7 @@ class WebApi:
                 password = request.form['password']
                 if username == self.username and password == self.password:
                     session['logged_in'] = True
-                    return redirect(url_for('index'))
+                    return redirect(url_for('record'))
                 else:
                     return render_template('login.html', error='Invalid credentials')
             return render_template('login.html')
@@ -109,10 +138,8 @@ class WebApi:
 
         @app.route('/')
         @self.login_required
-        def index():
-            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                return self.get_tasks_data()
-            return render_template('index.html', **self.get_tasks_data())
+        def record():   # 录制页(首页)：正在录制的任务
+            return render_template('record.html', **self.get_tasks_data())
 
         # 保留之前的兼容性
         @app.route('/api/put_message', methods=['POST'])
@@ -123,10 +150,10 @@ class WebApi:
             self.send_queue.put(message)
             return 'success', 200
 
-        @app.route('/tasks')
+        @app.route('/process')
         @self.login_required
-        def tasks_page():
-            return render_template('tasks.html', **self.get_tasks_data())
+        def process():   # 处理页：渲染/上传/清理/挂起 等录制后的处理队列
+            return render_template('process.html', **self.get_tasks_data())
 
         @app.route('/api/tasks')
         @self.login_required
@@ -210,16 +237,6 @@ class WebApi:
             except Exception as e:
                 self.logger.error(f'打开路径失败 ({mode}): {path}: {e}')
                 return {'ok': False, 'message': str(e)}, 500
-
-        @app.route('/api/check_config', methods=['POST'])
-        @self.login_required
-        def check_config_api():
-            try:
-                content = request.json.get('content')
-                yaml.safe_load(content)
-                return {'valid': True, 'message': '配置文件格式正确 (Valid YAML)'}
-            except Exception as e:
-                return {'valid': False, 'message': f'配置文件格式错误: {e}'}
 
         @app.route('/config')
         @self.login_required
@@ -340,84 +357,6 @@ class WebApi:
                     cnt += 1
             return {'ok': True, 'message': f'已推迟 {cnt} 个文件到重启'}
 
-        @app.route('/config/create', methods=['GET', 'POST'])
-        @self.login_required
-        def config_create():
-            return config_edit(filename=None)
-
-        @app.route('/config/edit/<filename>', methods=['GET', 'POST'])
-        @self.login_required
-        def config_edit(filename):
-            content = ""
-            check_result = None
-            
-            if filename:
-                filepath = os.path.join(self.config_dir, filename)
-                if not os.path.exists(filepath):
-                    flash(f'File {filename} not found.', 'error')
-                    return redirect(url_for('config_list'))
-                
-                if request.method == 'GET':
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        content = f.read()
-
-            if request.method == 'POST':
-                content = request.form['content']
-                # Normalize line endings to avoid triple spacing (CRLF -> LF)
-                content = content.replace('\r\n', '\n')
-                action = request.form['action']
-                new_filename = request.form.get('new_filename', filename)
-                
-                # Validation
-                try:
-                    yaml.safe_load(content)
-                    valid = True
-                    check_result = "YAML Format OK"
-                except Exception as e:
-                    valid = False
-                    check_result = f"YAML Error: {e}"
-                
-                if action == 'save':
-                    if filename and filename.startswith('example-'):
-                        flash('示例文件不支持修改。', 'error')
-                        return redirect(url_for('config_list'))
-                    
-                    if valid:
-                        if not new_filename.endswith('.yml'):
-                             new_filename += '.yml'
-                        
-                        save_path = os.path.join(self.config_dir, new_filename)
-                        try:
-                            with open(save_path, 'w', encoding='utf-8') as f:
-                                f.write(content)
-                            flash(f'Config {new_filename} saved successfully.', 'success')
-                            return redirect(url_for('config_list'))
-                        except Exception as e:
-                            flash(f'Error saving file: {e}', 'error')
-                    else:
-                        flash('Invalid YAML format. Please fix errors before saving.', 'error')
-
-            return render_template('config_edit.html', filename=filename, content=content, check_result=check_result)
-
-        @app.route('/config/delete/<filename>', methods=['POST'])
-        @self.login_required
-        def config_delete(filename):
-            if filename:
-                if filename.startswith('example-'):
-                    flash('示例文件不支持删除。', 'error')
-                    return redirect(url_for('config_list'))
-                
-                filepath = os.path.join(self.config_dir, filename)
-                if os.path.exists(filepath):
-                    try:
-                        os.remove(filepath)
-                        flash(f'Config {filename} deleted successfully.', 'success')
-                    except Exception as e:
-                        flash(f'Error deleting file: {e}', 'error')
-                else:
-                    flash(f'File {filename} not found.', 'error')
-            return redirect(url_for('config_list'))
-
         @app.route('/api/upload_tasks/<uuid>/stop', methods=['POST'])
         @self.login_required
         def upload_task_stop(uuid):
@@ -529,6 +468,46 @@ class WebApi:
             threading.Thread(target=_shutdown, daemon=True).start()
             return {'status': 'success', 'message': '程序正在退出...'}
 
+        # ---- B站合集(season)工具：从原独立的 api.py(FastAPI) 迁入，纯文本返回，方便 iPhone 快捷指令调用 ----
+        # 故意不加 @login_required：快捷指令直接请求即可。参数三种方式都支持：URL query、表单、JSON 请求体。
+        def _param(key):
+            """从 URL query / 表单 / JSON 请求体里取参数，统一转成去空白的字符串。"""
+            v = request.values.get(key)
+            if v is None:
+                v = (request.get_json(silent=True) or {}).get(key)
+            return str(v).strip() if v is not None else ''
+
+        @app.route('/api/seasons', methods=['GET', 'POST'])
+        def api_seasons():
+            """列出某账号的全部合集。account 可走 query / 表单 / JSON。"""
+            from DMR.utils.bili_season import list_seasons
+            account = _param('account')
+            if not account:
+                return Response('缺少参数 account', mimetype='text/plain', status=400)
+            try:
+                seasons = list_seasons(account)
+            except FileNotFoundError:
+                return Response(f'找不到账号 {account} 的登录信息(.login_info/{account}.json)',
+                                mimetype='text/plain', status=404)
+            except Exception as e:
+                return Response(f'获取合集失败: {e}', mimetype='text/plain', status=500)
+            text = "\n".join(f"{s['id']} - {s['title']}" for s in seasons) or '该账号下没有合集。'
+            return Response(text, mimetype='text/plain')
+
+        @app.route('/api/synctitle', methods=['GET', 'POST'])
+        def api_synctitle():
+            """把合集内各分P标题同步成与稿件一致。account/season_id 可走 query / 表单 / JSON。"""
+            from DMR.utils.bili_season import sync_section_episode_titles
+            account = _param('account')
+            season_id = _param('season_id')
+            if not account or not season_id.isdigit():
+                return Response('缺少参数 account 或 season_id(需为数字)', mimetype='text/plain', status=400)
+            try:
+                result = sync_section_episode_titles(account, int(season_id))
+            except Exception as e:
+                return Response(f'同步失败: {e}', mimetype='text/plain', status=500)
+            return Response(_format_synctitle_result(result), mimetype='text/plain')
+
         return app
 
     def get_tasks_data(self):
@@ -625,7 +604,8 @@ class WebApi:
                         'video_path': _abspath(video_path),
                         'output_path': _abspath(task.get('output', '')),
                         'mode': task.get('mode', 'Unknown'),
-                        'status': task.get('status', 'waiting')
+                        'status': task.get('status', 'waiting'),
+                        'progress': task.get('progress'),   # 渲染百分比（dmrender/emoji_dmrender 回报；transcode 为 None）
                     })
 
         # Get Pending Cleanup Tasks
@@ -713,7 +693,9 @@ class WebApi:
     def get_notifications(self):
         """导航红点汇总：搭便车塞进各页面已有的轮询响应，不新增请求。
         config/failed 为“待办型”(数量>0亮)；logs_err 为“新消息型”(前端用 localStorage 比对已读)。"""
-        n = {'config': 0, 'failed': 0, 'logs_err': 0}
+        n = {'config': 0, 'failed': 0, 'logs_err': 0, 'restart_pending': False}
+        # 是否已设置「空闲后重启」：供前端把重启按钮恢复成绿色「已设置」态（刷新后也保持）
+        n['restart_pending'] = bool(getattr(self.engine, '_restart_pending', False))
         dmr = getattr(self.engine, 'dmr', None)
         if dmr is not None:
             try:

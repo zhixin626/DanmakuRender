@@ -23,6 +23,8 @@
                     <td>
                         {% if task.status == 'waiting' %}
                             <span style="color: #666">等待中...</span>
+                        {% elif task.progress %}
+                            渲染中 {{ task.progress }}
                         {% else %}
                             渲染中...
                         {% endif %}
@@ -238,7 +240,7 @@
                         if (task.status === 'waiting') {
                             statusHtml = '<span style="color: #666">等待中...</span>';
                         } else {
-                            statusHtml = '渲染中...';
+                            statusHtml = task.progress ? `渲染中 ${task.progress}` : '渲染中...';
                         }
                         html += `<tr>
                             <td>${pathCell(task.video_path)}</td>
