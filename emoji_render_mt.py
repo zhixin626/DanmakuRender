@@ -723,6 +723,9 @@ def main():
                     dtot = max(total, done)   # 估算帧数偏少时动态抬高,避免显示超过100%/负剩余
                     pct = done / dtot * 100; eta = max(0.0, (dtot - done) / cur) if cur > 0 else 0; bn = int(pct / 100 * 20)
                     sys.stdout.write(f"\r[{'#'*bn}{'-'*(20-bn)}] {pct:5.1f}%  {done}/{dtot}帧  {cur:.0f}fps  已用{fmt(el)} 剩~{fmt(eta)}{fl}   ")
+                    # 被 DMR 以管道捕获时（非交互终端）额外打一行机读进度，供 WebUI 显示百分比
+                    if not sys.stdout.isatty():
+                        sys.stdout.write(f"\n[DMR_PROGRESS] {pct:.1f}\n")
                 else:
                     sys.stdout.write(f"\r{done}帧  {cur:.0f}fps  已用{fmt(el)}{fl}   ")
                 sys.stdout.flush()

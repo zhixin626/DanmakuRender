@@ -124,6 +124,7 @@ class Render():
                 'output': config.get('output'),
                 'config': config,
                 'status': 'waiting',
+                'progress': None,   # 渲染百分比（'45%'），由渲染引擎回调更新，供 WebUI 展示
             }
             self.render_tasks[task['uuid']] = task
             self.render_executors.submit(self._render_subprocess, task)
@@ -192,12 +193,17 @@ class Render():
 
             self._render_class[task['uuid']] = target_render
 
+            # 进度回调：渲染引擎按视频时长/帧数回报百分比，写到 task['progress'] 供 WebUI 轮询展示
+            def on_progress(pct, _task=task):
+                _task['progress'] = f'{int(pct)}%'
+
             # 重试：失败最多重试 retry 次（默认3），都失败才回 render/error → liveevents 挂起转人工
             retry = render_args.get('retry', 3)
             status, info = False, '未执行'
             for attempt in range(retry + 1):
+                task['progress'] = None   # 每次（重）试从头开始计进度
                 try:
-                    status, info = target_render.render_one(video=video, output=output)
+                    status, info = target_render.render_one(video=video, output=output, progress_cb=on_progress)
                 except Exception as e:
                     status, info = False, e
                     self.logger.exception(e)

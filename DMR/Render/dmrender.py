@@ -36,7 +36,8 @@ class DmRender(BaseRender):
         self.logger = logging.getLogger(__name__)
         self.raw_ffmpeg = RawFFmpegRender(debug=self.debug)
 
-    def render_helper(self, video: str, danmaku: str, output: str, to_stdout: bool = False, logfile=None):
+    def render_helper(self, video: str, danmaku: str, output: str, to_stdout: bool = False, logfile=None,
+                      duration=None, progress_cb=None):
         ffmpeg_args = [self.ffmpeg, '-y']
         ffmpeg_args += self.hwaccel_args
 
@@ -94,14 +95,14 @@ class DmRender(BaseRender):
         ]
 
         self.logger.info(f'开始渲染: {output}')   # 此处才真正开始 ffmpeg 渲染
-        result = self.raw_ffmpeg.call_ffmpeg(ffmpeg_args)
+        result = self.raw_ffmpeg.call_ffmpeg(ffmpeg_args, progress_cb=progress_cb, duration=duration)
         # 渲染成功后，ASR 字幕中间文件由本步自己清理（共用模块），不进主清理管线
         ok = result[0] if isinstance(result, (tuple, list)) else result
         if ok and self.subtitle.get('enable'):
             clean_subtitle_intermediates(video, sub_ass, self.subtitle.get('clean', True), self.logger)
         return result
 
-    def render_one(self, video: VideoInfo, output: str, **kwargs):
+    def render_one(self, video: VideoInfo, output: str, progress_cb=None, **kwargs):
         if not exists(video.path):
             raise RuntimeError(f'不存在视频文件 {video.path}，跳过渲染.')
         danmaku = kwargs.get('danmaku') or video.dm_file_id
@@ -111,10 +112,12 @@ class DmRender(BaseRender):
         valid_output = safe_filename(output)
         if valid_output != output:
             self.logger.warning(f'输出文件名 {output} 不合法或已存在，已更改为 {valid_output}.')
-            output = valid_output   
+            output = valid_output
 
         start_time = datetime.now()
-        status, info = self.render_helper(video.path, danmaku, output, **kwargs)
+        status, info = self.render_helper(video.path, danmaku, output,
+                                          duration=getattr(video, 'duration', None),
+                                          progress_cb=progress_cb)
         if status:
             output_info:VideoInfo = copy.deepcopy(video)
             output_info.dtype = 'dm_video'

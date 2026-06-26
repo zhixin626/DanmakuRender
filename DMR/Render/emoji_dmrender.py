@@ -68,7 +68,7 @@ class EmojiDmRender(BaseRender):
         except (ValueError, IndexError):
             return default
 
-    def render_one(self, video: VideoInfo, output: str, **kwargs):
+    def render_one(self, video: VideoInfo, output: str, progress_cb=None, **kwargs):
         if not exists(video.path):
             raise RuntimeError(f"不存在视频文件 {video.path}，跳过渲染.")
         danmaku = kwargs.get("danmaku") or video.dm_file_id
@@ -117,12 +117,21 @@ class EmojiDmRender(BaseRender):
         tail = []
         for line in self._proc.stdout:
             line = line.rstrip("\r\n")
-            if line:
-                tail.append(line)
-                if len(tail) > 30:
-                    tail.pop(0)
-                if self.debug:
-                    self.logger.debug("[emoji] %s", line)
+            if not line:
+                continue
+            # 机读进度行（emoji_render_mt 在被管道捕获时输出）→ 回调百分比，不计入日志 tail
+            if line.startswith("[DMR_PROGRESS]"):
+                if progress_cb:
+                    try:
+                        progress_cb(int(float(line.split()[1])))
+                    except Exception:
+                        pass
+                continue
+            tail.append(line)
+            if len(tail) > 30:
+                tail.pop(0)
+            if self.debug:
+                self.logger.debug("[emoji] %s", line)
         self._proc.wait()
         rc = self._proc.returncode
         self._proc = None
