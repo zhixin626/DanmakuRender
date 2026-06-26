@@ -2813,7 +2813,7 @@ class Editor(QMainWindow):
 
     def merge_videos(self):
         """视频合并：把列表里的多个视频按当前顺序首尾相接合并为一个。
-        以子进程方式调用 run_merge.py（内部走 DMR.utils.merge_mp4：分辨率/时间基归一 + 按需 NVENC 重编码）。"""
+        以子进程方式调用 run_merge.py（内部走 DMR.utils.video_merge：分辨率/时间基归一 + 按需 NVENC 重编码）。"""
         if self.task['running']:
             return
         paths = self.merge_list.paths()

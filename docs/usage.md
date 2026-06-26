@@ -146,6 +146,8 @@ common_event_args:
   auto_clean: False
   # 原视频自动转码（可以用于给原视频做伪4K）
   auto_transcode: False
+  # 启动自动合并（把同场直播的多个分段合并成一个，具体参数见 merge_args）
+  auto_merge: False
 
 
 # 下载参数

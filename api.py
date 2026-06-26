@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from DMR.utils.merge_mp4 import sync_section_episode_titles
+from DMR.utils.bili_season import sync_section_episode_titles
 from pydantic import BaseModel
 from fastapi.responses import PlainTextResponse
 from fastapi import HTTPException

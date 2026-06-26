@@ -121,15 +121,15 @@ class FileInfo(cpdict):
                 )
         
 class VideoInfo(FileInfo):
+    # 注意：会话级字段（stime/etime/totaltime/gifts_revenue/.../top_ranking）已不在 VideoInfo 里，
+    # 它们是“格式化标本”，由上传时单独的 session dict 携带（见 liveevents.SESSION_FIELDS）。
+    # VideoInfo 只保留“这个视频自身的信息”。
     def __init__(self,
                 path:str,
                 file_id:str=None,
                 dtype:str=None,
                 size:int=None,
                 ctime:datetime=None,
-                stime:datetime=None,
-                etime:datetime=None,
-                totaltime:str="",
                 duration:int=None,
                 resolution:Tuple[int, int]=None,
                 title:str=None,
@@ -140,18 +140,7 @@ class VideoInfo(FileInfo):
                 dm_video_id:str=None,
                 src_video_id:str=None,
                 dm_file_id:str=None,
-                gifts_revenue:str="",
-                num_of_gifters:str="",
-                sc_revenue:str="",
-                num_of_sc:str="",
-                member_revenue:str="",
-                member_info:str="",
-                total_revenue:str="",
-                top_ranking:str="",
                 **kwargs):
-        self.etime=etime
-        self.stime=stime
-        self.totaltime=totaltime
         self.streamer = streamer
         self.duration = duration
         self.resolution = resolution
@@ -162,14 +151,6 @@ class VideoInfo(FileInfo):
         self.dm_file_id = dm_file_id
         self.group_id = group_id
         self.segment_id = segment_id
-        self.gifts_revenue = gifts_revenue
-        self.num_of_gifters = num_of_gifters
-        self.top_ranking = top_ranking
-        self.sc_revenue = sc_revenue
-        self.num_of_sc = num_of_sc
-        self.member_revenue = member_revenue
-        self.member_info = member_info
-        self.total_revenue = total_revenue
         super().__init__(
                 file_id=file_id,
                 dtype=dtype,
@@ -186,13 +167,5 @@ class VideoInfo(FileInfo):
                 dm_file_id=dm_file_id,
                 group_id=group_id,
                 segment_id=segment_id,
-                gifts_revenue=gifts_revenue,
-                num_of_gifters=num_of_gifters,
-                sc_revenue=sc_revenue,
-                num_of_sc=num_of_sc,
-                member_revenue=member_revenue,
-                member_info=member_info,
-                total_revenue=total_revenue,
-                top_ranking=top_ranking,
                 **kwargs
                 )

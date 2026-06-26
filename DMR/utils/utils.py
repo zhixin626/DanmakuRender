@@ -10,8 +10,10 @@ from os.path import exists, abspath, splitext, join, basename
 from uuid import uuid1
 from typing import Union
 from pathlib import Path
+from datetime import datetime
 __all__ = [
     'rename_safe',
+    'format_duration',
     'isvideo',
     'concat_rid',
     'split_url',
@@ -288,6 +290,27 @@ def RGB2BGR(color):
 
 def uuid(len:int=None):
     struuid = uuid1().hex
-    if len is None: 
+    if len is None:
         return struuid
     return struuid[:len]
+
+
+def format_duration(start: datetime, end: datetime) -> str:
+    """把 (start, end) 时间段格式化成「X天X小时X分钟」之类的中文时长。"""
+    delta = end - start
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 0:
+        total_seconds = -total_seconds  # 允许反向计算
+
+    days, rem = divmod(total_seconds, 86400)   # 一天 = 86400 秒
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+
+    if days > 0:
+        return f"{days}天{hours}小时{minutes}分钟"
+    elif hours > 0:
+        return f"{hours}小时{minutes}分钟"
+    elif minutes > 0:
+        return f"{minutes}分钟"
+    else:
+        return f"{seconds}秒"
