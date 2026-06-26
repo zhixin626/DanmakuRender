@@ -2,11 +2,13 @@ import yaml
 from pathlib import Path
 import logging
 from datetime import datetime
-from DMR.utils.merge_mp4 import *
+from DMR.utils.video_merge import probe_media
+from DMR.utils.session_record import read_last_complete_session
 from DMR.utils import *
 from DMR.LiveAPI import LiveAPI
 from DMR.utils.dataclass import VideoInfo, StreamerInfo
-from DMR.Task.liveevents import LiveEvents, read_period_bvid, write_period_bvid
+from DMR.Task.liveevents import LiveEvents
+from DMR.Uploader.bvid_history import read_period_bvid, write_period_bvid
 
 import colorlog
 handler = colorlog.StreamHandler()
@@ -105,20 +107,18 @@ def file_to_args(file_path):
 
 def _make_live_events(file_path) -> tuple:
     """
-    加载 YAML 并创建 LiveEvents 实例，手动初始化路径和 live_status，
-    完全绕过 onLiveStart（从而避免触发 check_render_cover 和 bark_notify）。
+    加载 YAML 并创建 LiveEvents 实例，手动初始化路径和 session_data，
+    完全绕过 onLiveStart（从而避免触发 bark_notify 等）。
     返回 (live_events, download_args)。
     """
     taskname, vtype, data = load_config(file_path)
     download_args = data.get("download_args", {})
 
     live_events = LiveEvents(taskname, data)
-    live_events.src_path       = Path(str(download_args.get("output_dir")))
-    live_events.dmvideo_path   = Path(str(download_args.get("output_dir")) + "（弹幕版）")
-    live_events.transcode_path = Path(str(download_args.get("output_dir")) + "（转码后）")
+    # src_path/dmvideo_path/transcode_path 已在 LiveEvents.__init__ 里按 output_dir 算好，无需手动设置
 
-    # 手动初始化 live_status（结构与 onLiveStart 保持一致）
-    live_events.live_status[_MANUAL_GROUP_ID] = {
+    # 手动初始化 session_data（结构与 onLiveStart 保持一致）
+    live_events.session_data[_MANUAL_GROUP_ID] = {
         "rendered_cover_names": set(),
         "is_live_end"   : True,
         "gifts_revenue" : "",
@@ -131,7 +131,7 @@ def _make_live_events(file_path) -> tuple:
         "etime"         : None,
         "totaltime"     : "",
     }
-    # 从磁盘读取礼物统计和开播时间，写入 live_status
+    # 从磁盘读取礼物统计和开播时间，写入 session_data
     live_events._collect_session_data(_MANUAL_GROUP_ID)
     return live_events, download_args
 
@@ -226,7 +226,7 @@ def upload_process(video_infos: list, account_config: dict, live_events: LiveEve
     单账号上传：
     1. 若配置了 auto_append_period，注入 base_bvid（对齐 LiveEvents._check_for_upload）
     2. 调用 DMR 的 uploader
-    3. 上传成功后写入 bvid 历史，并通过 live_events.check_add_to_list 处理合集
+    3. 上传成功后写入 bvid 历史；合集/封面由 uploader 按 cfg 自行处理
     acfun 引擎支持传入多个 VideoInfo 实现分P上传，其他引擎仅使用第一个。
     """
     video_info = video_infos[0]
@@ -277,9 +277,7 @@ def upload_process(video_infos: list, account_config: dict, live_events: LiveEve
                     logger.info(f"已登记 {period_label} 账号 {account} bvid: {bvid}")
                 except Exception as e:
                     logger.error(f"登记 bvid 失败: {e}")
-
-            # --- 加入合集（通过 LiveEvents.check_add_to_list，不重复造轮子） ---
-            live_events.check_add_to_list(_MANUAL_GROUP_ID, bvid, cfg)
+            # 加入合集 / 封面：均由 uploader.upload(**cfg) 内部按 cfg 自行处理
     else:
         logger.error(f"账号 {account} 上传失败: {result}")
 
@@ -326,11 +324,6 @@ def main():
                 print(f"❌ 读取失败，跳过: {e}")
         if len(video_infos) > 1:
             logger.info(f"共 {len(video_infos)} P 将一起上传")
-
-    render_choice = input("是否重新渲染封面 [1=是, 2=否] (默认 2): ").strip()
-    if render_choice == "1":
-        logger.info("正在重新渲染封面...")
-        live_events.check_render_cover(_MANUAL_GROUP_ID, sync=True)
 
     for cfg in selected_configs:
         logger.info(f"开始处理账号: {cfg.get('account')}")

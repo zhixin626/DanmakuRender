@@ -30,14 +30,15 @@ class SubprocessUploader:
             self.procs.pop(proc.pid)
         return status, message
 
-    def upload(self, files:list[VideoInfo], **kwargs):
+    def upload(self, files:list[VideoInfo], session: dict=None, **kwargs):
         if not isinstance(files, list):
             files = [files]
 
         status, message = True, ''
         for file in files:
             try:
-                sts, msg = self.call_subprocess(file, **kwargs)
+                kw = {**file, **(session or {})}   # 合并会话级"格式化标本"，供命令里的关键字替换
+                sts, msg = self.call_subprocess(kw, **kwargs)
                 status = status and sts
                 if sts:
                     message += f'File {file.path} upload success.\n'

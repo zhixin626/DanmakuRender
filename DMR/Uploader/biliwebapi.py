@@ -21,6 +21,7 @@ from urllib import parse
 
 # import aiohttp
 from DMR.utils import VideoInfo, replace_keywords
+from DMR.utils.cover import generate_cover
 from concurrent.futures.thread import ThreadPoolExecutor
 import concurrent
 import requests.utils
@@ -28,6 +29,7 @@ import rsa
 from requests.adapters import HTTPAdapter, Retry
 
 from .biliuprs import biliuprs
+from .bvid_history import read_period_bvid, write_period_bvid
 
 
 logger = logging.getLogger(__name__)
@@ -142,7 +144,9 @@ class BiliWebApi:
         desc_v2[0]["raw_text"] = desc_v2[0]["raw_text"][1:]  # 开头空格会导致识别简介过长
         return desc, desc_v2
 
-    def videoinfo_to_videos(self, video_info, config):
+    def videoinfo_to_videos(self, video_info, config, session: dict=None):
+        # 合并会话级"格式化标本"（stime/etime/gifts_revenue/.../top_ranking），供 replace_keywords 解析
+        video_info = {**video_info, **(session or {})}
         video = Data(
             tid=config.get('tid', 21),
             copyright=config.get('copyright', 1),
@@ -182,18 +186,24 @@ class BiliWebApi:
             video.tag = replace_keywords(video.tag, video_info)
         if config.get('source'):
             video.source = replace_keywords(config['source'], video_info)
-        if config.get('cover'):
+        # 封面：优先按 cover_args 生成（抽帧+渲染，共享 util），否则用静态 config['cover']
+        cover_file = generate_cover(video_info.get('path'), config.get('cover_args'),
+                                    stime=video_info.get('stime'), account=config.get('account', ''))
+        # 记下"本次是动态生成的封面本地路径"（静态 config['cover'] 不归我管，不删）：
+        # 上传成功后删除，失败则把它留给 WebUI 人工处理用。
+        self._gen_cover = cover_file if cover_file else None
+        if not cover_file and config.get('cover'):
             cover_file = replace_keywords(config['cover'], video_info)
+        if cover_file:
             try:
-                if cover_file.startswith('http'):
+                if isinstance(cover_file, str) and cover_file.startswith('http'):
                     import requests
                     resp = requests.get(cover_file, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10.0)
                     resp.raise_for_status()
                     cover_file = BytesIO(resp.content)
                 video.cover = self.cover_up(cover_file)
-
             except Exception as e:
-                logger.error(f'视频 {config["title"]} 封面图片下载失败: {e}, 跳过设置.')
+                logger.error(f'视频 {config["title"]} 封面设置失败: {e}, 跳过设置.')
                 video.cover = ''
         return video
 
@@ -201,21 +211,42 @@ class BiliWebApi:
         self,
         files:list[VideoInfo],
         stream_queue: queue.SimpleQueue=None,
+        session: dict=None,
+        progress_cb=None,
         **kwargs,
     ):
         is_new = False
+        self._gen_cover = None   # 仅 is_new 时由 videoinfo_to_videos 写入；追加上传不生成新封面
+        if not self.videos:
+            # 周期追加：未显式指定稿件且开启 auto_append_period 时，查历史决定是否追加到已有稿件
+            period = kwargs.get('auto_append_period')
+            if period in ('monthly', 'daily') and kwargs.get('output_dir'):
+                existing = read_period_bvid(kwargs['output_dir'], (session or {}).get('stime'),
+                                            period=period, account=kwargs.get('account'))
+                if existing:
+                    self.videos = Data(bvid=existing)
+                    logger.info(f"[账号{kwargs.get('account')}] 追加模式({period})：检测到已有稿件 {existing}，将追加")
+                else:
+                    logger.info(f"[账号{kwargs.get('account')}] 追加模式({period})：暂无稿件，将创建新稿件")
         if not self.videos:
             is_new = True
-            self.videos = self.videoinfo_to_videos(files[0], kwargs)
+            self.videos = self.videoinfo_to_videos(files[0], kwargs, session)
         else:
             self.videos = self.get_remote_data(self.videos.bvid) # 刷新视频信息
+        # return False, '手动测试上传失败', {'cover': getattr(self, '_gen_cover', None)}
         if stream_queue is None:
-            for file in files:
+            n_files = len(files)
+            for fi, file in enumerate(files, 1):
+                # upos_stream 回调给的是 (已完成块, 总块)；这里换算成 pct 并带上文件序号交给上层
+                file_cb = (lambda done, total, _i=fi:
+                           progress_cb(int(done / total * 100) if total else 0, _i, n_files)) \
+                          if progress_cb else None
                 status, info = self.upload_file(
                     filepath=file.path,
                     lines=kwargs.get('line', 'AUTO'),
                     videos=self.videos,
-                    submit_api='web'
+                    submit_api='web',
+                    progress_cb=file_cb,
                     )
             # self.submit(submit_api='web', videos=self.videos)
                 
@@ -228,12 +259,31 @@ class BiliWebApi:
                 videos=self.videos,
                 submit_api='web'
             )
+        # 合集：add_episodes(epid，原作者，仅加入) 与 add_to_list(season_id，加入+排到最前) 二选一，
+        # 不要同时开启，否则同一稿件会被重复加入合集。
         if status and is_new and kwargs.get('epid'):
-            epid = kwargs['epid']
-            self.add_episodes(epid, self.videos.bvid, self.videos.title)
-        return status, info
-    
+            self.add_episodes(kwargs['epid'], self.videos.bvid, self.videos.title)
+        if status and is_new and kwargs.get('add_to_list') and kwargs.get('season_id'):
+            self.add_to_list(kwargs['season_id'], self.videos.bvid, self.videos.title)
+        # 周期追加：新建稿件成功后，把本周期 bvid 登记到历史，供下次同周期追加
+        if status and is_new and kwargs.get('auto_append_period') in ('monthly', 'daily') and kwargs.get('output_dir'):
+            write_period_bvid(kwargs['output_dir'], (session or {}).get('stime'),
+                              self.videos.bvid, period=kwargs['auto_append_period'], account=kwargs.get('account'))
+
+        # 动态生成的封面：上传成功就删本地文件；失败则把路径随返回值带回（留给 WebUI 人工处理）
+        gen_cover = getattr(self, '_gen_cover', None)
+        if status:
+            if gen_cover:
+                try:
+                    os.remove(gen_cover)
+                except Exception:
+                    pass
+                self._gen_cover = None
+            return status, info
+        return status, info, {'cover': gen_cover}
+
     def add_episodes(self, epid, bvid, title):
+        """原作者实现：把稿件加入合集（不排序）。与 add_to_list 二选一，勿同时开启。"""
         try:
             uri = f'https://member.bilibili.com/x2/creative/web/season?id={epid}'
             resp = self._session.get(uri, timeout=5).json()
@@ -260,6 +310,84 @@ class BiliWebApi:
         except Exception as e:
             logger.error(f'添加{bvid}到合集失败: {e}')
         return False
+
+    def add_to_list(self, season_id, bvid, title, reorder=True):
+        """把刚上传的稿件加入合集(season)的第一个分区，可选地把它排到最前。
+        全程用引擎自身登录态(self._session / csrf)，与 cover_up 一致，不另读 cookie 文件。"""
+        try:
+            uri = f'https://member.bilibili.com/x2/creative/web/season?id={season_id}'
+            resp = self._session.get(uri, timeout=5).json()
+            section_id = resp['data']['sections']['sections'][0]['id']
+        except Exception as e:
+            logger.error(f'获取合集信息失败: {e}')
+            return False
+
+        try:
+            time.sleep(3)   # 给 B站一点时间让新稿件可被加入合集
+            uri = f'https://member.bilibili.com/x2/creative/web/season/section/episodes/add?csrf={self.__bili_jct}'
+            data = {
+                "sectionId": section_id,
+                "episodes":[{
+                    "title": title,
+                    "bvid": bvid,
+                }]
+            }
+            resp = self._session.post(uri, json=data, timeout=5).json()
+            if resp.get('code') != 0:
+                logger.error(f'添加{bvid}到合集失败: {resp}')
+                return False
+            logger.info(f'添加合集成功: {bvid} -> {season_id}')
+        except Exception as e:
+            logger.error(f'添加{bvid}到合集失败: {e}')
+            return False
+
+        if reorder:
+            self.reorder_section(section_id, mode='last_to_first')
+        return True
+
+    def reorder_section(self, section_id, mode='last_to_first'):
+        """对合集分区做一次首尾互换排序（默认把最后加入的排到最前）。"""
+        url_section = 'https://member.bilibili.com/x2/creative/web/season/section'
+        url_sort = 'https://member.bilibili.com/x2/creative/web/season/section/edit'
+        try:
+            j = self._session.get(url_section, params={'id': section_id}, timeout=5).json()
+            if j.get('code') != 0:
+                logger.error(f'获取分区信息失败: {j}')
+                return j
+            data = j.get('data') or {}
+            episodes = data.get('episodes') or []
+            section = data.get('section') or {}
+            if not episodes:
+                logger.error('当前分区无可排序的视频（episodes 为空）')
+                return {'code': -1, 'message': 'no episodes'}
+
+            if mode == 'last_to_first':
+                reordered = [episodes[-1]] + episodes[:-1]
+            elif mode == 'first_to_last':
+                reordered = episodes[1:] + [episodes[0]]
+            else:
+                raise ValueError(f'未知排序模式: {mode}')
+            sorts = [{'id': e['id'], 'sort': i + 1} for i, e in enumerate(reordered)]
+
+            payload = {
+                'section': {
+                    'id': section.get('id', section_id),
+                    'seasonId': section.get('seasonId'),
+                    'title': section.get('title', '正片'),
+                    'type': section.get('type', 1),
+                },
+                'sorts': sorts,
+            }
+            rj = self._session.post(url_sort, params={'csrf': self.__bili_jct},
+                                    json=payload, timeout=5).json()
+            if rj.get('code') == 0:
+                logger.info(f'成功调整合集分区顺序: {mode}')
+            else:
+                logger.error(f'调整合集顺序失败: {rj}')
+            return rj
+        except Exception as e:
+            logger.error(f'调整合集顺序失败: {e}')
+            return {'code': -1, 'message': str(e)}
 
     def cover_up(self, img: str):
         """
@@ -299,6 +427,7 @@ class BiliWebApi:
         lines='AUTO',
         videos: 'Data'=None,
         submit_api: Callable[[str], None] = None,
+        progress_cb=None,
     ):
         status, message = self.upload_stream(
             stream_queue=filepath,
@@ -307,6 +436,7 @@ class BiliWebApi:
             lines=lines,
             videos=videos,
             submit_api=submit_api,
+            progress_cb=progress_cb,
         )
         return status, message
 
@@ -318,6 +448,7 @@ class BiliWebApi:
         lines='AUTO',
         videos: 'Data'=None,
         submit_api: Callable[[str], None] = None,
+        progress_cb=None,
     ):
 
         logger.info(f"{file_name} 开始上传")
@@ -370,7 +501,7 @@ class BiliWebApi:
                         break
                 else:
                     logger.warning(f"选择的线路 {self._auto_os['os']} 没有返回对应 endpoint，不做修改")
-        video_part = asyncio.run(upload(stream_queue, file_name, total_size, ret))
+        video_part = asyncio.run(upload(stream_queue, file_name, total_size, ret, progress_cb=progress_cb))
         if video_part is None:
             # stop_event.set()
             return False, '分P上传失败'
@@ -386,7 +517,7 @@ class BiliWebApi:
         videos.bvid = bvid
         return True, bvid
 
-    async def upos_stream(self, stream_queue, file_name, total_size, ret):
+    async def upos_stream(self, stream_queue, file_name, total_size, ret, progress_cb=None):
         # print("--------------, ", file_name)
         chunk_size = ret['chunk_size']
         auth = ret["auth"]
@@ -425,6 +556,19 @@ class BiliWebApi:
         st = time.perf_counter()
         max_workers = self.limit
         semaphore = threading.Semaphore(max_workers)
+        # 分块完成进度：每块传完计数 +1，回调 progress_cb(已完成块, 总块数)。块是并行乱序完成的，故计数加锁。
+        _done = [0]
+        _plock = threading.Lock()
+        def _chunk_done(fut):
+            semaphore.release()
+            if progress_cb:
+                with _plock:
+                    _done[0] += 1
+                    c = _done[0]
+                try:
+                    progress_cb(c, chunks)
+                except Exception:
+                    pass
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             sessions = [copy.deepcopy(self._session) for _ in range(max_workers)]
@@ -449,7 +593,7 @@ class BiliWebApi:
                 semaphore.acquire()
                 future = executor.submit(self.upload_chunk_thread, sessions[index % max_workers],
                                          url, chunk, params_clone, headers, file_name)
-                future.add_done_callback(lambda x: semaphore.release())
+                future.add_done_callback(_chunk_done)
                 futures.append(future)
                 st = time.perf_counter()
 

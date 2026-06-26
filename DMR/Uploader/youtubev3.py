@@ -112,8 +112,10 @@ class youtubev3():
         
         return False, 'Unknown error occurred.'
     
-    def format_config(self, config, video_info=None, replace_invalid=False):
+    def format_config(self, config, video_info=None, replace_invalid=False, session: dict=None):
         config = config.copy()
+        # 合并会话级"格式化标本"，供 replace_keywords 解析
+        video_info = {**(video_info or {}), **(session or {})}
 
         if config.get('raw_upload_body'):
             config['raw_upload_body'] = replace_keywords(config['raw_upload_body'], video_info, replace_invalid=replace_invalid)
@@ -169,7 +171,7 @@ class youtubev3():
 
         return self._resumable_upload(insert_request)
 
-    def upload(self, files:list, concat_video=False, **kwargs):
+    def upload(self, files:list, concat_video=False, session: dict=None, **kwargs):
         if isinstance(files, list) and concat_video:
             old_name, old_ext = os.path.splitext(os.path.basename(files[0].path))
             new_video_name = get_tempfile(expire=86400*2, prefix=old_name, suffix=old_ext)
@@ -184,7 +186,7 @@ class youtubev3():
         status, message = True, ''
         for file in files:
             try:
-                config = self.format_config(kwargs, file)
+                config = self.format_config(kwargs, file, session=session)
                 # sts, msg = True, f'skip {file}, config {config}'
                 sts, msg = self.upload_one(video=file, **config)
                 status = status and sts

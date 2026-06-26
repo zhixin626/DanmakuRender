@@ -7,6 +7,7 @@ from math import ceil
 from pathlib import Path
 
 from DMR.utils import replace_keywords
+from DMR.utils.cover import generate_cover
 
 try:
     from tqdm import tqdm
@@ -329,8 +330,10 @@ class acfun:
         self._client._cookie_file = cookie_file
         self.logger.info(f'AcFun 使用已保存的 cookie 登录 ({account})')
 
-    def format_config(self, config: dict, video_info=None) -> dict:
+    def format_config(self, config: dict, video_info=None, session: dict=None) -> dict:
         config = config.copy()
+        # 合并会话级"格式化标本"，供 replace_keywords 解析
+        video_info = {**(video_info or {}), **(session or {})}
         if config.get('title') and video_info:
             config['title'] = replace_keywords(config['title'], video_info, replace_invalid=True)
         if config.get('desc') and video_info:
@@ -339,11 +342,11 @@ class acfun:
             config['dynamic'] = replace_keywords(config['dynamic'], video_info)
         return config
 
-    def upload(self, files: list, **kwargs) -> tuple:
+    def upload(self, files: list, session: dict=None, **kwargs) -> tuple:
         if not isinstance(files, list):
             files = [files]
 
-        config        = self.format_config(kwargs, files[0] if files else None)
+        config        = self.format_config(kwargs, files[0] if files else None, session=session)
         file_paths    = [f.path for f in files]
         title         = config.get('title') or Path(file_paths[0]).stem
         channel_id    = int(config.get('channel_id', 218))
@@ -357,8 +360,11 @@ class acfun:
         original_declare = int(copyright) if copyright is not None else None
         watermark_position  = int(config.get('watermark_position', 3))
         watermark_signature = bool(config.get('watermark_signature', False))
-        cover         = config.get('cover', '')
-
+        # 封面：优先按 cover_args 生成（抽帧+渲染，共享 util）；否则用静态 config['cover']；再否则兜底自动抽帧
+        cover = generate_cover(file_paths[0], config.get('cover_args'),
+                               stime=(session or {}).get('stime'), account=config.get('account', ''))
+        if not cover:
+            cover = config.get('cover', '')
         if not cover:
             try:
                 cover = extract_best_frame(

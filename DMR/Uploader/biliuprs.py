@@ -175,8 +175,10 @@ class biliuprs():
         else:
             return False, log
 
-    def format_config(self, config, video_info=None, replace_invalid=False):
+    def format_config(self, config, video_info=None, replace_invalid=False, session: dict=None):
         config = config.copy()
+        # 合并会话级"格式化标本"，供 replace_keywords 解析
+        video_info = {**(video_info or {}), **(session or {})}
 
         if config.get('title'):
             config['title'] = replace_keywords(config['title'], video_info, replace_invalid=replace_invalid)
@@ -210,10 +212,10 @@ class biliuprs():
                     config['cover'] = ''
         return config
 
-    def upload(self, files:list[VideoInfo], **kwargs):
+    def upload(self, files:list[VideoInfo], session: dict=None, **kwargs):
         if not isinstance(files, list):
             files = [files]
-        config = self.format_config(kwargs, files[0])
+        config = self.format_config(kwargs, files[0], session=session)
 
         if self._upload_lock.locked():
             self.logger.warning('上传速度慢于录制速度，可能导致上传队列阻塞！')

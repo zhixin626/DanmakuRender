@@ -198,22 +198,17 @@ class Uploader():
                     data='manually stopped',
                 )
             elif status == 'error':
-                # Save to failed tasks
-                # ignore stream uploads
+                # 上传失败已交由 liveevents 挂起转人工（见 onUploadError），不再留存 failed_tasks
                 if task.get('stream_queue'):
                     task['stream_queue'] = None
-                    # task['config']['stream_queue'] = None
-                else:
-                    self.failed_tasks[task['uuid']] = task
-                    # self.save_failed_tasks()
-
                 self._pipeSend(
                     event='error',
                     msg=f"上传视频 {[f.path for f in task['files']]} 时出现错误:{desc}",
                     target=task['source'],
                     request_id=task['request_id'],
-                    dtype=str(type(desc)),
-                    data=desc,
+                    dtype='dict',
+                    # 带上 config（含 args/session）和 extra（如生成的封面路径），供 liveevents 挂起展示
+                    data={'config': task.get('config', {}), 'error': str(desc), 'extra': task.get('_extra')},
                 )
             else:
                 self._pipeSend(
@@ -277,6 +272,11 @@ class Uploader():
             if stream_queue:
                 retry = 0       # 流式上传无法重试
             status = info = None
+            extra = None        # 引擎失败时可能返回的第三元素（如 biliwebapi 带回生成的封面路径）
+
+            # 上传进度回调：引擎(目前仅 biliwebapi)按块回报，写进共享的 task 字典供 WebUI 读取展示
+            def on_progress(pct, file_idx, n_files):
+                task['progress'] = (f'{file_idx}/{n_files} {pct}%' if n_files > 1 else f'{pct}%')
 
             while retry >= 0:
                 try:
@@ -285,12 +285,17 @@ class Uploader():
                     else:
                         self.logger.info(f"正在上传 {[f.path for f in files]} 至 {upload_args.get('account')}")
                     # logging.debug(task)
-                    res = target_uploader.upload(files=files, stream_queue=stream_queue, **upload_args)
-                    
+                    res = target_uploader.upload(files=files, stream_queue=stream_queue,
+                                                 session=task['config'].get('session'),
+                                                 output_dir=task['config'].get('output_dir'),
+                                                 progress_cb=on_progress,
+                                                 **upload_args)
+
                     if len(res) == 3:
-                        status, info, _ = res
+                        status, info, extra = res
                     else:
                         status, info = res
+                        extra = None
 
                 except KeyboardInterrupt:
                     target_uploader.stop()
@@ -313,6 +318,7 @@ class Uploader():
                     self.logger.debug(info)
                     time.sleep(60)
             
+            task['_extra'] = extra   # 失败时随 error 消息发回（如生成的封面路径）
             if task.get('_cancelled'):
                 self._gather(task, 'cancelled')
             elif status:
