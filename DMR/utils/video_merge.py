@@ -3,7 +3,7 @@
 - merge_mp4 : 多段 mp4 合并（参数一致走无损 concat，不一致时以最长片段为基准最小化重编码）。
 - amplify_mp4 / detect : 音频峰值检测 + 响度增益。
 - probe_media : ffprobe 取时长/分辨率等基本信息。
-被 Merger 插件以及 merge_only / run_merge / upload_only 等工具调用。
+被 Merger 插件以及 run_merge / upload_only 等工具调用。
 """
 import os
 import re
