@@ -26,8 +26,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.state_dict = {}
         self.ended_dict = {}
         self.session_data = {}
-        self.merged_videos = []  # 合并产物记录（供 WebUI 展示，保留最近若干条）
         self.held_tasks = {}     # 挂起待人工处理的任务：hold_id -> 详情（仅内存，重启即失）
+        self._dispatched = {}    # 在途的派发消息：request_id -> PipeMessage（供失败后「重试」重发，成功/转挂即清）
         self.logger = logging.getLogger(__name__)
         # 任务级常量路径：output_dir 整个任务不变，构造时算一次（不随每场直播变化）
         out_dir = str(self.config['download_args']['output_dir'])
@@ -71,6 +71,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             'merger/end': self.onMergeEnd,
             'merger/error': self.onMergeError,
             'webservice/resume': self.onResume,   # 人工处理完，喂回结果让管线继续
+            'webservice/retry': self.onRetry,     # 人工处理「重试」：原样重发渲染/合并/上传
             'default': self.defaultEvent,
         }
 
@@ -148,6 +149,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         slot = self.state_dict[video.group_id][-1]['src_video']
         slot['status'] = 'rendering'
         slot['wait'].append(transcode_msg.request_id)
+        self._dispatched[transcode_msg.request_id] = transcode_msg
         ret_msgs.append(transcode_msg)
         return ret_msgs
 
@@ -174,6 +176,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         slot = self.state_dict[video.group_id][-1]['dm_video']
         slot['status'] = 'rendering'
         slot['wait'].append(render_msg.request_id)
+        self._dispatched[render_msg.request_id] = render_msg
         ret_msgs.append(render_msg)
         return ret_msgs
 
@@ -234,7 +237,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         ret_msgs = []
         for idx, video_state in enumerate(self.state_dict[group_id]):
             for vtype, info in video_state.items():
-                if info['status'] != 'ready':
+                if info['status'] not in ('ready', 'merged'):   # 渲染产物 + 合并产物都可实时上传
                     continue
                 for upload_file_types, upload_arg in upload_args.items():
                     if vtype not in upload_file_types.split('+'):
@@ -259,6 +262,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                             })
                         self.state_dict[group_id][idx][vtype]['status'] = 'uploading'
                         self.state_dict[group_id][idx][vtype]['wait'].append(upload_msg.request_id)
+                        self._dispatched[upload_msg.request_id] = upload_msg
                         ret_msgs.append(upload_msg)
         return ret_msgs
 
@@ -273,12 +277,12 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             videos = []
             for video_state in self.state_dict[group_id]:
                 st = video_state[vtype]['status']
-                if st == 'ready':
-                    videos.append(video_state[vtype]['file'])
-                elif st in ('merged', 'cleaned', 'cleaning', None):
-                    continue   # 已了结、不参与本次上传：合并源(merged/已删源 cleaned/清理中)、未参与(None)
+                if st in ('ready', 'merged'):
+                    videos.append(video_state[vtype]['file'])   # 渲染产物(ready)+合并产物(merged)都要上传
+                elif st in ('merge_src', 'cleaned', 'cleaning', None):
+                    continue   # 不参与本次上传：被合并的源(merge_src)、已删(cleaned)、清理中、未参与(None)
                 else:
-                    videos = []   # rendering/uploading 等真在途 → 还没都就绪，放弃这轮、等齐再传
+                    videos = []   # rendering/uploading/merging 真在途 → 还没都就绪，放弃这轮、等齐再传
                     break
             if not videos:
                 continue
@@ -313,13 +317,15 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         if slot['file'] is not None and id(slot['file']) in up_ids:
                             slot['status'] = 'uploading'
                             slot['wait'].append(upload_msg.request_id)
+                    self._dispatched[upload_msg.request_id] = upload_msg
                     ret_msgs.append(upload_msg)
         return ret_msgs
-    
+
     def onRenderEnd(self, message:PipeMessage):
         self.logger.info(f'{self.name}: {message.msg}.')
 
         request_id = message.request_id
+        self._dispatched.pop(request_id, None)
         video:VideoInfo = message.data.get('output')
         video_states = self.state_dict[video.group_id]
         # 按 request_id 移除对应的等待；wait 清空则该段标 ready 并挂上渲染产物
@@ -338,6 +344,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
         target_group_id = None
         request_id = message.request_id
+        self._dispatched.pop(request_id, None)
         # 按 request_id 移除等待；wait 清空则该段标 uploaded
         for group_id, video_states in self.state_dict.items():
             for idx, video_state in enumerate(video_states):
@@ -410,6 +417,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         'group_id'  : group_id, 'streamer': tail.streamer, 'title': tail.title,
                     },
                 })
+            self._dispatched[merge_msg.request_id] = merge_msg
             ret_msgs.append(merge_msg)
         return ret_msgs
 
@@ -420,6 +428,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         没删(remove_source False)→ 标 merged(留着，等 onMergeEnd 的 trigger 清，且 merged 不会被重合并)。
         合并产物(ready)与源段一样受 dm_video 的 trigger 清理，不做产物/源区分（见 _check_for_clean）。"""
         request_id = message.request_id
+        self._dispatched.pop(request_id, None)
         data = message.data or {}
         merged_video = data.get('output')
         vt = data.get('merge_type')
@@ -431,7 +440,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
         # 1. 被合并的段：移除 request_id；merger 已删源→cleaned，未删→merged（防重合并、待清理）
         remove_source = (self.config.get('merge_args') or {}).get('remove_source', True)
-        merged_status = 'cleaned' if remove_source else 'merged'
+        merged_status = 'cleaned' if remove_source else 'merge_src'   # 被合并的源段(删了=cleaned，留着=merge_src 待清理)
         n_merged = 0
         for vs in self.state_dict[group_id]:
             slot = vs.get(vt)
@@ -449,16 +458,11 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         }
         merged_video.segment_id = len(self.state_dict[group_id]) + 1
         new_state.setdefault(vt, {'status': None, 'file': None, 'wait': []})
-        new_state[vt] = {'status': 'ready', 'file': merged_video, 'wait': []}
+        # 合并产物状态用 'merged'（区别于渲染产物 'ready'、被合并源段 'merge_src'）
+        new_state[vt] = {'status': 'merged', 'file': merged_video, 'wait': []}
         self.state_dict[group_id].append(new_state)
 
-        # 3. 记录合并产物（供 WebUI「已合并的视频」展示）
-        self.merged_videos.append({'output': str(merged_video.path), 'type': vt,
-                                   'segments': n_merged, 'time': datetime.now()})
-        if len(self.merged_videos) > 200:
-            self.merged_videos = self.merged_videos[-200:]
-
-        # 4. 交给 reconcile：先看上传，再以 onMergeEnd trigger 清理（源段 + 合并产物一并）
+        # 3. 交给 reconcile：先看上传，再以 onMergeEnd trigger 清理（源段 + 合并产物一并）
         return self.reconcile(group_id, clean_trigger='onMergeEnd')
 
     # ---- 失败挂起：每步重试用尽后转人工。挂起的段标 'holding'，登记到 held_tasks 供 WebUI ----
@@ -481,12 +485,14 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         out.append((gid, idx, vt))
         return out
 
-    def _add_hold(self, stage, group_id, segs, vtype, info):
-        """登记一个挂起任务，返回 hold_id。info 是给人看的内容（各阶段不同）。"""
+    def _add_hold(self, stage, group_id, segs, vtype, info, retry_msg=None):
+        """登记一个挂起任务，返回 hold_id。info 是给人看的内容（各阶段不同）。
+        retry_msg 是原始派发消息，供 WebUI「重试」时原样重发。"""
         hid = uuid()
         self.held_tasks[hid] = {
             'hold_id': hid, 'stage': stage, 'group_id': group_id,
             'segs': list(segs), 'vtype': vtype, 'info': info, 'time': datetime.now(),
+            'retry_msg': retry_msg,
         }
         self.logger.warning(f'{self.name}: {stage} 失败，已挂起等待人工处理 (hold_id={hid})')
         return hid
@@ -519,7 +525,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             'vtype': vtype,
             'error': str(message.data if message.data is not None else message.msg),
         }
-        self._add_hold('render', group_id, [seg_idx], vtype, info)
+        self._add_hold('render', group_id, [seg_idx], vtype, info,
+                       retry_msg=self._dispatched.pop(message.request_id, None))
         return self.reconcile(group_id, clean_trigger=None)
 
     def onMergeError(self, message:PipeMessage):
@@ -543,16 +550,18 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             'inputs'    : inputs,
             'error'     : str((message.data or {}).get('error') if isinstance(message.data, dict) else message.msg),
         }
-        self._add_hold('merge', group_id, seg_idxs, vtype, info)
+        self._add_hold('merge', group_id, seg_idxs, vtype, info,
+                       retry_msg=self._dispatched.pop(message.request_id, None))
         return self.reconcile(group_id, clean_trigger=None)
 
     def onUploadError(self, message:PipeMessage):
-        """上传失败转人工：挂起此段，详情交 WebUI。"""
+        """上传失败（含手动停止）转人工：挂起此段，详情交 WebUI。"""
         self.logger.info(f'{self.name}: {message.msg}')
         locs = self._locate_all_by_request(message.request_id)
         if not locs:
             return []
         group_id, _, vtype = locs[0]
+
         seg_idxs, files = [], []
         for gid, idx, vt in locs:
             slot = self.state_dict[gid][idx][vt]
@@ -574,8 +583,36 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             'cover'  : (extra or {}).get('cover'),   # 生成的封面本地路径（失败时由 biliwebapi 带回）
             'error'  : str((message.data or {}).get('error') if isinstance(message.data, dict) else message.msg),
         }
-        self._add_hold('upload', group_id, seg_idxs, vtype, info)
+        self._add_hold('upload', group_id, seg_idxs, vtype, info,
+                       retry_msg=self._dispatched.pop(message.request_id, None))
         return self.reconcile(group_id, clean_trigger=None)
+
+    def onRetry(self, message:PipeMessage):
+        """人工处理「重试」：把挂起任务原来的渲染/合并/上传操作原样重发一次。"""
+        hold_id = (message.data or {}).get('hold_id')
+        hold = self.held_tasks.get(hold_id)
+        if not hold:
+            self.logger.warning(f'{self.name}: 重试失败，未找到挂起任务 {hold_id}')
+            return []
+        orig = hold.get('retry_msg')
+        stage, gid, vtype = hold['stage'], hold['group_id'], hold['vtype']
+        if orig is None or gid not in self.state_dict:
+            self.logger.warning(f'{self.name}: {hold_id}（{stage}）无法重试（缺原始任务或组已清理），请手动处理')
+            return []
+
+        new_req = uuid()
+        new_msg = PipeMessage(source=orig.source, target=orig.target, event=orig.event,
+                              request_id=new_req, data=orig.data)
+        status = {'render': 'rendering', 'merge': 'merging', 'upload': 'uploading'}.get(stage)
+        for idx in hold['segs']:
+            slot = self.state_dict[gid][idx].get(vtype)
+            if slot:
+                slot['status'] = status
+                slot['wait'] = [new_req]
+        self._dispatched[new_req] = new_msg
+        self.held_tasks.pop(hold_id, None)
+        self.logger.info(f'{self.name}: 重试挂起任务 {hold_id}（{stage}）')
+        return [new_msg]
 
     def onResume(self, message:PipeMessage):
         """人工回传结果：render/merge 给 mp4 路径、upload 给 'done' 走对应成功路径；
@@ -612,7 +649,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             tail_src = None
             for idx in hold['segs']:
                 slot = self.state_dict[group_id][idx][vtype]
-                slot['status'], slot['wait'] = 'merged', []
+                slot['status'], slot['wait'] = 'merge_src', []   # 被合并的源段
                 if slot.get('file'):
                     tail_src = slot['file']
             merged = self._build_videoinfo_from(tail_src, result, vtype)
@@ -622,10 +659,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 'src_video_pre': {'status': None, 'file': None, 'wait': []},
                 'dm_video':      {'status': None, 'file': None, 'wait': []},
             }
-            new_state[vtype] = {'status': 'ready', 'file': merged, 'wait': []}
+            new_state[vtype] = {'status': 'merged', 'file': merged, 'wait': []}   # 合并产物
             self.state_dict[group_id].append(new_state)
-            self.merged_videos.append({'output': str(merged.path), 'type': vtype,
-                                       'segments': len(hold['segs']), 'time': datetime.now()})
         elif stage == 'upload':
             for idx in hold['segs']:
                 slot = self.state_dict[group_id][idx][vtype]
@@ -648,14 +683,20 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def _collect_session_data(self, group_id: str):
         """onLiveEnd 时把礼物统计（读完即删 gifts.jsonl）和开播/下播/时长写进 session_data[group_id]，
         供上传格式化标题用。"""
-        # 礼物统计
-        gift_dm_args = self.config['download_args'].get('gift_dm_args', {})
-        if gift_dm_args.get('gift_recorder', False):
+        # 礼物统计：只要 礼物/SC/上舰 任一开启了记录(record.enable)就生成
+        da = self.config['download_args'].get('danmaku_args', {})
+        gift_record   = (da.get('gift')      or {}).get('record') or {}
+        sc_record     = (da.get('superchat') or {}).get('record') or {}
+        member_record = (da.get('member')    or {}).get('record') or {}
+        any_record = (gift_record.get('enable', False)
+                      or sc_record.get('enable', False)
+                      or member_record.get('enable', False))
+        if any_record:
             try:
                 raw_stat = generate_gift_statistics(
                     jsonl_paths=[str(self.src_path) + '/gifts.jsonl'],
                     stat_path=str(self.src_path) + '/gifts_statistics.jsonl',
-                    rank_top=gift_dm_args.get('rank_top_n', 3),
+                    rank_top=gift_record.get('rank_top_n', 3),
                     delete_after_process=True,
                 )
                 if raw_stat:
@@ -743,7 +784,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             return ret_msgs
 
         # 落地成型、磁盘上有真实文件、可被清理的状态（不分产物/源）；在途/无文件/已清理的不在此列
-        cleanable = ('ready', 'uploaded', 'merged')
+        cleanable = ('ready', 'uploaded', 'merged', 'merge_src')   # 渲染产物/已上传/合并产物/被合并源 都是真实文件，可清理
 
         for idx, video_state in enumerate(video_states):
             for vtype, info in video_state.items():
@@ -787,14 +828,14 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         video_states = self.state_dict.get(group_id)
         if not video_states:
             return True   # state_dict 已无此组 = 没有未完成的工作
-        final_status = ['ready']
+        final_status = ['ready', 'merged']   # ready=渲染产物、merged=合并产物，都是有效产物(无上传时即终态)
         if self.config['common_event_args'].get('auto_upload'):
             final_status.append('uploaded')
         if self.config['common_event_args'].get('auto_clean'):
             final_status.append('cleaned')
-        # None=未参与；merged=已被合并消费；cleaned=已清理（即便 auto_clean 关，merger remove_source
-        # 删源也会标它）：恒为终态。cleaning 默认不算终态，只有 ignore_cleaning(重启判断)时才放行。
-        terminal = ('merged', 'cleaned') + (('cleaning',) if ignore_cleaning else ())
+        # None=未参与；merge_src=被合并的源段(已消费)；cleaned=已清理（即便 auto_clean 关，merger
+        # remove_source 删源也会标它）：恒为终态。cleaning 默认不算终态，只有 ignore_cleaning(重启判断)时才放行。
+        terminal = ('merge_src', 'cleaned') + (('cleaning',) if ignore_cleaning else ())
         for video_state in video_states:
             for info in video_state.values():
                 st = info.get('status')
@@ -842,7 +883,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.ended_dict.clear()
         self.session_data.clear()
         self.held_tasks.clear()
-        self.merged_videos.clear()
         # liveevents 随程序退出而死，其内存镜像(.session_*.json)也一并删掉。
         delete_all_records(str(self.config['download_args']['output_dir']))
         return PipeMessage(

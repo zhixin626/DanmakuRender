@@ -1,171 +1,41 @@
 {% extends "base.html" %}
 
 {% block content %}
+<!-- 四个阶段队列：每个文件按「当前阶段」只出现一次（互斥）。
+     进行中(带%/倒计时) + 已完成子集；内容全部由 JS 轮询 /api/tasks 构建，空则不显示。 -->
 <div class="card">
     <h2>渲染队列</h2>
-    <div id="render-tasks">
-        {% if render_tasks %}
-        <table>
-            <thead>
-                <tr>
-                    <th>视频</th>
-                    <th>输出</th>
-                    <th>模式</th>
-                    <th>状态</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for task in render_tasks %}
-                <tr>
-                    <td>{{ task.video }}</td>
-                    <td>{{ task.output }}</td>
-                    <td>{{ task.mode }}</td>
-                    <td>
-                        {% if task.status == 'waiting' %}
-                            <span style="color: #666">等待中...</span>
-                        {% elif task.progress %}
-                            渲染中 {{ task.progress }}
-                        {% else %}
-                            渲染中...
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <p>当前没有正在渲染的任务。</p>
-        {% endif %}
-    </div>
+    <div id="render-queue"></div>
 </div>
 
 <div class="card">
-    <h2>需人工处理（挂起任务）</h2>
-    <div id="held-tasks">
-        <p>暂无需人工处理的任务。</p>
-    </div>
-</div>
-
-<div class="card">
-    <h2>已渲染成功的视频</h2>
-    <div id="completed-renders">
-        {% if completed_renders %}
-        <table>
-            <thead>
-                <tr>
-                    <th>视频</th>
-                    <th>输出</th>
-                    <th>模式</th>
-                    <th>完成时间</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for task in completed_renders %}
-                <tr>
-                    <td>{{ task.video }}</td>
-                    <td>{{ task.output }}</td>
-                    <td>{{ task.mode }}</td>
-                    <td>{{ task.time }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <p>暂无已渲染成功的视频。</p>
-        {% endif %}
-    </div>
-</div>
-
-<div class="card">
-    <h2>已合并的视频</h2>
-    <div id="completed-merges">
-        <p>暂无已合并的视频。</p>
-    </div>
+    <h2>合并队列</h2>
+    <div id="merge-queue"></div>
 </div>
 
 <div class="card">
     <h2>上传队列</h2>
-    <div id="upload-tasks">
-        {% if upload_tasks %}
-        <table>
-            <thead>
-                <tr>
-                    <th>文件</th>
-                    <th>上传至</th>
-                    <th>进度/信息</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for task in upload_tasks %}
-                <tr>
-                    <td>
-                        {% for f in task.files %}
-                            <div>{{ f.name }}</div>
-                        {% endfor %}
-                    </td>
-                    <td>{{ task.account }} ({{ task.engine }})</td>
-                    <td>
-                        {% if task.is_sync %}
-                            <span style="color: var(--secondary-color)">同步上传中...</span>
-                        {% elif task.status == 'waiting' %}
-                            <span style="color: #666">等待中...</span>
-                        {% else %}
-                            上传中...
-                        {% endif %}
-                    </td>
-                    <td>
-                        <button onclick="stopUploadTask('{{ task.uuid }}')" style="background-color: #dc3545;">停止</button>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <p>当前没有正在上传的任务。</p>
-        {% endif %}
-    </div>
+    <div id="upload-queue"></div>
 </div>
 
 <div class="card">
-    <h2>待清理任务</h2>
-    <div id="pending-clean-tasks">
-        {% if pending_clean_tasks %}
-        <table>
-            <thead>
-                <tr>
-                    <th>文件</th>
-                    <th>操作</th>
-                    <th>剩余时间</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for task in pending_clean_tasks %}
-                <tr>
-                    <td>{% for f in task.files %}<div>{{ f }}</div>{% endfor %}</td>
-                    <td>{{ task.method }}</td>
-                    <td class="remaining-time" data-execute-at="{{ task.execute_at }}" style="color:#888;font-size:0.85em;"></td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <p>没有待清理的任务。</p>
-        {% endif %}
-    </div>
+    <h2>清理队列</h2>
+    <div id="clean-queue"></div>
+</div>
+
+<div class="card">
+    <h2>人工处理队列</h2>
+    <div id="held-tasks"></div>
 </div>
 
 <script>
     function stopUploadTask(uuid) {
-        if (!confirm('确定要停止此上传任务吗？正在上传的进度将丢失。')) return;
+        if (!confirm('确定要停止此上传任务吗？停止后会进入「人工处理队列」，可重试或忽略。')) return;
         fetch(`/api/upload_tasks/${uuid}/stop`, { method: 'POST' })
             .then(response => response.json())
             .then(data => {
-                if (data.status === 'success') {
-                    refreshTasks();
-                } else {
-                    alert('停止失败: ' + data.message);
-                }
+                if (data.status === 'success') { refreshTasks(); }
+                else { alert('停止失败: ' + data.message); }
             })
             .catch(error => console.error('Error:', error));
     }
@@ -178,7 +48,6 @@
     function normPath(s) { return String(s == null ? '' : s).replace(/\//g, '\\'); }
 
     // 把完整路径渲染成 “文件夹\文件名”，文件夹点击打开目录、文件名点击用默认播放器打开。
-    // 已不存在的文件由后端直接过滤、不下发，故这里不再处理“已删除”状态。
     function pathCell(full) {
         if (!full) return '-';
         var norm = full.replace(/\//g, '\\');
@@ -193,7 +62,70 @@
         return folderLink + '\\' + fileLink;
     }
 
-    // 挂起任务：render/merge 需填 mp4 路径，upload 点"完成"
+    // —— 队列渲染小工具 ——
+    // 已完成子集统一表格：任务 + 文件
+    function rowsTaskFile(rows) {
+        if (!rows || !rows.length) return '';
+        let h = '<table><thead><tr><th>任务</th><th>文件</th></tr></thead><tbody>';
+        rows.forEach(r => { h += `<tr><td>${escHtml(r.task)}</td><td>${pathCell(r.path)}</td></tr>`; });
+        return h + '</tbody></table>';
+    }
+    // 子分组小标题：内容为空就不显示
+    function subBlock(title, inner) {
+        return inner ? `<div style="color:#9ab;font-size:0.82em;margin:8px 0 2px;">${title}</div>` + inner : '';
+    }
+
+    function renderQueueHtml(q) {
+        q = q || {}; let act = '';
+        const a = q.active || [];
+        if (a.length) {
+            act = '<table><thead><tr><th>任务</th><th>视频</th><th>输出</th><th>模式</th><th>状态</th></tr></thead><tbody>';
+            a.forEach(t => {
+                let s = t.status === 'waiting' ? '<span style="color:#666">等待中...</span>'
+                      : (t.progress ? `渲染中 ${t.progress}` : '渲染中...');
+                act += `<tr><td>${escHtml(t.task)}</td><td>${pathCell(t.video_path)}</td><td>${pathCell(t.output_path)}</td><td>${escHtml(t.mode)}</td><td>${s}</td></tr>`;
+            });
+            act += '</tbody></table>';
+        }
+        return subBlock('渲染中', act) + subBlock('已渲染（待合并/上传）', rowsTaskFile(q.done));
+    }
+
+    function mergeQueueHtml(q) {
+        q = q || {};
+        const act = (q.active && q.active.length) ? rowsTaskFile(q.active) : '';
+        return subBlock('合并中', act) + subBlock('已合并（待上传/清理）', rowsTaskFile(q.done));
+    }
+
+    function uploadQueueHtml(q) {
+        q = q || {}; let act = '';
+        const a = q.active || [];
+        if (a.length) {
+            act = '<table><thead><tr><th>任务</th><th>文件</th><th>上传至</th><th>进度/信息</th><th>操作</th></tr></thead><tbody>';
+            a.forEach(t => {
+                const files = (t.files || []).map(f => `<div>${escHtml(f.name)}</div>`).join('');
+                let info = t.is_sync ? '<span style="color:var(--secondary-color)">同步上传中...</span>'
+                    : (t.status === 'waiting' ? '<span style="color:#666">等待中...</span>'
+                    : (t.progress ? `上传中 ${t.progress}` : '上传中...'));
+                act += `<tr><td>${escHtml(t.task)}</td><td>${files}</td><td>${escHtml(t.account)} (${escHtml(t.engine)})</td><td>${info}</td>` +
+                       `<td><button onclick="stopUploadTask('${t.uuid}')" style="background-color:#dc3545;">停止</button></td></tr>`;
+            });
+            act += '</tbody></table>';
+        }
+        return subBlock('上传中', act) + subBlock('已上传（待清理或完成）', rowsTaskFile(q.done));
+    }
+
+    function cleanQueueHtml(rows) {
+        if (!rows || !rows.length) return '';
+        let h = '<table><thead><tr><th>文件</th><th>操作</th><th>剩余时间</th></tr></thead><tbody>';
+        rows.forEach(t => {
+            const files = (t.files || []).map(f => `<div>${pathCell(f)}</div>`).join('');
+            h += `<tr><td>${files}</td><td>${escHtml(t.method)}</td>` +
+                 `<td class="remaining-time" data-execute-at="${t.execute_at}" style="color:#888;font-size:0.85em;"></td></tr>`;
+        });
+        return h + '</tbody></table>';
+    }
+
+    // —— 人工处理（挂起）相关 ——
     function mp4Form(task, hid, ph) {
         var inputId = 'mp4_' + hid;
         return '<input id="' + inputId + '" type="text" placeholder="' + escHtml(ph) + '" style="width:55%;">' +
@@ -203,21 +135,61 @@
     function resumeHold(task, hid, result) {
         if (!result) { alert('请先填入结果（渲染/合并好的 mp4 路径）'); return; }
         fetch('/api/resume', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({task: task, hold_id: hid, result: result}),
-        }).then(function(r) {
-            if (r.ok) { refreshTasks(); } else { alert('提交失败'); }
-        });
+        }).then(function(r) { if (r.ok) { refreshTasks(); } else { alert('提交失败'); } });
     }
-    // 忽略：丢弃这条挂起，这段不再参与后续处理（不删硬盘文件），组照常走完
     function ignoreHold(task, hid) {
         if (!confirm('忽略后这段将从管线里摘除、不再参与后续合并/上传/清理（硬盘文件不动）。确定？')) return;
         resumeHold(task, hid, '__ignore__');
     }
+    function retryHold(task, hid) {
+        if (!confirm('重新跑一遍原来的操作（渲染/合并/上传）？')) return;
+        fetch('/api/retry', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({task: task, hold_id: hid}),
+        }).then(function(r) { if (r.ok) { refreshTasks(); } else { alert('重试失败'); } });
+    }
+    function heldHtml(held) {
+        if (!held || !held.length) return '';
+        let html = '';
+        held.forEach(h => {
+            const info = h.info || {}, hid = h.hold_id, tk = h.task, stage = h.stage;
+            let body = '', form = '';
+            if (stage === 'render') {
+                const isDm = !!info.ass;   // 转码任务没有弹幕文件，不显示「弹幕 ass」行，措辞改「转码」
+                body = '<div>源 flv：' + pathCell(info.flv) + '</div>' +
+                       (isDm ? '<div>弹幕 ass：' + escHtml(normPath(info.ass)) + '</div>' : '') +
+                       '<div style="color:#c00">错误：' + escHtml(info.error || '') + '</div>';
+                form = mp4Form(tk, hid, (isDm ? '渲染' : '转码') + '好后填入 mp4 路径');
+            } else if (stage === 'merge') {
+                const ins = (info.inputs || []).map(p => '<div>' + pathCell(p) + '</div>').join('');
+                body = '<div>合并类型：' + escHtml(info.merge_type || '') + '</div>' +
+                       '<div>待合并文件：</div>' + ins +
+                       '<div style="color:#c00">错误：' + escHtml(info.error || '') + '</div>';
+                form = mp4Form(tk, hid, '合并好后填入 mp4 路径');
+            } else if (stage === 'upload') {
+                const files = (info.files || []).map(p => '<div>' + pathCell(p) + '</div>').join('');
+                body = '<div>待上传：</div>' + files +
+                       '<div>账号：' + escHtml(info.account || '') + '</div>' +
+                       '<div>标题：' + escHtml(info.title || '') + '</div>' +
+                       '<div>简介：' + escHtml(info.desc || '') + '</div>' +
+                       '<div>动态：' + escHtml(info.dynamic || '') + '</div>' +
+                       '<div>封面：' + (info.cover ? pathCell(info.cover) : '-') + '</div>' +
+                       '<div style="color:#c00">错误：' + escHtml(info.error || '') + '</div>';
+                form = '<button onclick=\'resumeHold(' + JSON.stringify(tk) + ',' + JSON.stringify(hid) + ',"done")\'>上传完成，继续清理</button>';
+            }
+            const retryBtn = ' <button onclick=\'retryHold(' + JSON.stringify(tk) + ',' + JSON.stringify(hid) + ')\' style="background-color:#4caf50;color:#000;">重试</button>';
+            const ignoreBtn = ' <button onclick=\'ignoreHold(' + JSON.stringify(tk) + ',' + JSON.stringify(hid) + ')\' style="background-color:#777;">忽略</button>';
+            html += '<div style="border:1px solid #555;border-radius:6px;padding:10px;margin-bottom:10px;">' +
+                    '<div style="font-weight:bold;">[' + escHtml(stage) + '] 任务：' + escHtml(tk) +
+                    ' <span style="color:#888;font-size:0.85em;">' + escHtml(h.time) + '</span></div>' +
+                    body + '<div style="margin-top:8px;">' + form + retryBtn + ignoreBtn + '</div></div>';
+        });
+        return html;
+    }
 
-    // 区块级 diff：每块各自比对数据签名，没变就不重建那块 DOM（"哪里需要刷新刷新哪里"）。
-    // 这样静态区块（已完成/需人工处理等）不会每秒重建，选区/输入框/展开状态都不被清掉。
+    // 区块级 diff：每块各自比对数据签名，没变就不重建那块 DOM（保住输入框/选区）
     window._secSig = window._secSig || {};
     function sectionChanged(key, val) {
         var sig = JSON.stringify(val);
@@ -225,174 +197,21 @@
         window._secSig[key] = sig;
         return true;
     }
+    function setSection(id, key, val, builder) {
+        if (!sectionChanged(key, val)) return;
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = builder(val);
+    }
 
     function refreshTasks() {
         fetch('/api/tasks')
             .then(response => response.json())
             .then(data => {
-                // Refresh Render Tasks
-                if (sectionChanged('render', data.render_tasks)) {
-                const renderDiv = document.getElementById('render-tasks');
-                if (data.render_tasks && data.render_tasks.length > 0) {
-                    let html = '<table><thead><tr><th>视频</th><th>输出</th><th>模式</th><th>状态</th></tr></thead><tbody>';
-                    data.render_tasks.forEach(task => {
-                        let statusHtml = '';
-                        if (task.status === 'waiting') {
-                            statusHtml = '<span style="color: #666">等待中...</span>';
-                        } else {
-                            statusHtml = task.progress ? `渲染中 ${task.progress}` : '渲染中...';
-                        }
-                        html += `<tr>
-                            <td>${pathCell(task.video_path)}</td>
-                            <td>${pathCell(task.output_path)}</td>
-                            <td>${task.mode}</td>
-                            <td>${statusHtml}</td>
-                        </tr>`;
-                    });
-                    html += '</tbody></table>';
-                    renderDiv.innerHTML = html;
-                } else {
-                    renderDiv.innerHTML = '<p>当前没有正在渲染的任务。</p>';
-                }
-                }
-
-                // Refresh Completed Renders
-                const completedRenderDiv = document.getElementById('completed-renders');
-                if (completedRenderDiv && sectionChanged('completed_renders', data.completed_renders)) {
-                    if (data.completed_renders && data.completed_renders.length > 0) {
-                        let html = '<table><thead><tr><th>视频</th><th>输出</th><th>模式</th><th>完成时间</th></tr></thead><tbody>';
-                        data.completed_renders.forEach(task => {
-                            html += `<tr>
-                                <td>${pathCell(task.video_path)}</td>
-                                <td>${pathCell(task.output_path)}</td>
-                                <td>${task.mode}</td>
-                                <td>${task.time}</td>
-                            </tr>`;
-                        });
-                        html += '</tbody></table>';
-                        completedRenderDiv.innerHTML = html;
-                    } else {
-                        completedRenderDiv.innerHTML = '<p>暂无已渲染成功的视频。</p>';
-                    }
-                }
-
-                // Refresh Completed Merges（已合并的视频）
-                const completedMergeDiv = document.getElementById('completed-merges');
-                if (completedMergeDiv && sectionChanged('completed_merges', data.completed_merges)) {
-                    if (data.completed_merges && data.completed_merges.length > 0) {
-                        let html = '<table><thead><tr><th>合并文件</th><th>任务</th><th>类型</th><th>段数</th><th>完成时间</th></tr></thead><tbody>';
-                        data.completed_merges.forEach(m => {
-                            html += `<tr>
-                                <td>${pathCell(m.output_path)}</td>
-                                <td>${escHtml(m.task)}</td>
-                                <td>${escHtml(m.type)}</td>
-                                <td>${m.segments}</td>
-                                <td>${escHtml(m.time)}</td>
-                            </tr>`;
-                        });
-                        html += '</tbody></table>';
-                        completedMergeDiv.innerHTML = html;
-                    } else {
-                        completedMergeDiv.innerHTML = '<p>暂无已合并的视频。</p>';
-                    }
-                }
-
-                // Refresh Held Tasks（需人工处理）：数据没变就不重建，免得清掉正在输入的 mp4 路径框
-                const heldDiv = document.getElementById('held-tasks');
-                if (heldDiv && sectionChanged('held', data.held_tasks)) {
-                    {
-                        const held = data.held_tasks || [];
-                        if (held.length > 0) {
-                            let html = '';
-                            held.forEach(h => {
-                                const info = h.info || {}, hid = h.hold_id, tk = h.task, stage = h.stage;
-                                let body = '', form = '';
-                                if (stage === 'render') {
-                                    body = '<div>源 flv：' + pathCell(info.flv) + '</div>' +
-                                           '<div>弹幕 ass：' + escHtml(normPath(info.ass) || '-') + '</div>' +
-                                           '<div style="color:#c00">错误：' + escHtml(info.error || '') + '</div>';
-                                    form = mp4Form(tk, hid, '渲染好后填入 mp4 路径');
-                                } else if (stage === 'merge') {
-                                    const ins = (info.inputs || []).map(p => '<div>' + pathCell(p) + '</div>').join('');
-                                    body = '<div>合并类型：' + escHtml(info.merge_type || '') + '</div>' +
-                                           '<div>待合并文件：</div>' + ins +
-                                           '<div style="color:#c00">错误：' + escHtml(info.error || '') + '</div>';
-                                    form = mp4Form(tk, hid, '合并好后填入 mp4 路径');
-                                } else if (stage === 'upload') {
-                                    const files = (info.files || []).map(p => '<div>' + pathCell(p) + '</div>').join('');
-                                    body = '<div>待上传：</div>' + files +
-                                           '<div>账号：' + escHtml(info.account || '') + '</div>' +
-                                           '<div>标题：' + escHtml(info.title || '') + '</div>' +
-                                           '<div>简介：' + escHtml(info.desc || '') + '</div>' +
-                                           '<div>动态：' + escHtml(info.dynamic || '') + '</div>' +
-                                           '<div>封面：' + (info.cover ? pathCell(info.cover) : '-') + '</div>' +
-                                           '<div style="color:#c00">错误：' + escHtml(info.error || '') + '</div>';
-                                    form = '<button onclick=\'resumeHold(' + JSON.stringify(tk) + ',' + JSON.stringify(hid) + ',"done")\'>上传完成，继续清理</button>';
-                                }
-                                const ignoreBtn = ' <button onclick=\'ignoreHold(' + JSON.stringify(tk) + ',' + JSON.stringify(hid) + ')\' style="background-color:#777;">忽略</button>';
-                                html += '<div style="border:1px solid #555;border-radius:6px;padding:10px;margin-bottom:10px;">' +
-                                        '<div style="font-weight:bold;">[' + escHtml(stage) + '] 任务：' + escHtml(tk) +
-                                        ' <span style="color:#888;font-size:0.85em;">' + escHtml(h.time) + '</span></div>' +
-                                        body + '<div style="margin-top:8px;">' + form + ignoreBtn + '</div></div>';
-                            });
-                            heldDiv.innerHTML = html;
-                        } else {
-                            heldDiv.innerHTML = '<p>暂无需人工处理的任务。</p>';
-                        }
-                    }
-                }
-
-                // Refresh Upload Tasks
-                const uploadDiv = document.getElementById('upload-tasks');
-                if (uploadDiv && sectionChanged('upload', data.upload_tasks)) {
-                if (data.upload_tasks.length > 0) {
-                    let html = '<table><thead><tr><th>文件</th><th>上传至</th><th>进度/信息</th><th>操作</th></tr></thead><tbody>';
-                    data.upload_tasks.forEach(task => {
-                        let filesHtml = '';
-                        task.files.forEach(f => {
-                            filesHtml += `<div>${f.name}</div>`;
-                        });
-                        let infoHtml = '';
-                        if (task.is_sync) {
-                            infoHtml = '<span style="color: var(--secondary-color)">同步上传中...</span>';
-                        } else if (task.status === 'waiting') {
-                            infoHtml = '<span style="color: #666">等待中...</span>';
-                        } else {
-                            infoHtml = task.progress ? `上传中 ${task.progress}` : '上传中...';
-                        }
-                        html += `<tr>
-                            <td>${filesHtml}</td>
-                            <td>${task.account} (${task.engine})</td>
-                            <td>${infoHtml}</td>
-                            <td><button onclick="stopUploadTask('${task.uuid}')" style="background-color: #dc3545;">停止</button></td>
-                        </tr>`;
-                    });
-                    html += '</tbody></table>';
-                    uploadDiv.innerHTML = html;
-                } else {
-                    uploadDiv.innerHTML = '<p>当前没有正在上传的任务。</p>';
-                }
-                }
-
-                // Refresh Pending Cleanup Tasks（行结构变了才重建；倒计时文字由 updateRemainingTimes 原地更新）
-                const pendingCleanDiv = document.getElementById('pending-clean-tasks');
-                if (pendingCleanDiv && sectionChanged('pending_clean', data.pending_clean_tasks)) {
-                    if (data.pending_clean_tasks && data.pending_clean_tasks.length > 0) {
-                        let html = '<table><thead><tr><th>文件</th><th>操作</th><th>剩余时间</th></tr></thead><tbody>';
-                        data.pending_clean_tasks.forEach(task => {
-                            const filesHtml = task.files.map(f => `<div>${pathCell(f)}</div>`).join('');
-                            html += `<tr>
-                                <td>${filesHtml}</td>
-                                <td>${task.method}</td>
-                                <td class="remaining-time" data-execute-at="${task.execute_at}" style="color:#888;font-size:0.85em;"></td>
-                            </tr>`;
-                        });
-                        html += '</tbody></table>';
-                        pendingCleanDiv.innerHTML = html;
-                    } else {
-                        pendingCleanDiv.innerHTML = '<p>没有待清理的任务。</p>';
-                    }
-                }
+                setSection('render-queue', 'render', data.render_queue, renderQueueHtml);
+                setSection('merge-queue',  'merge',  data.merge_queue,  mergeQueueHtml);
+                setSection('upload-queue', 'upload', data.upload_queue, uploadQueueHtml);
+                setSection('clean-queue',  'clean',  data.clean_queue,  cleanQueueHtml);
+                setSection('held-tasks',   'held',   data.held_tasks,   heldHtml);
                 updateRemainingTimes();
                 if (window.updateNavBadges) updateNavBadges(data.notifications);
             })
@@ -410,7 +229,6 @@
         if (m) return `${m}分钟${s}秒`;
         return `${s}秒`;
     }
-
     function updateRemainingTimes() {
         const now = Date.now() / 1000;
         document.querySelectorAll('.remaining-time').forEach(el => {
@@ -419,7 +237,6 @@
         });
     }
 
-    // 倒计时（纯前端按绝对时间算，暂停不会算错）与任务刷新，均切到后台时暂停
     startPolling(updateRemainingTimes, 1000);
     startPolling(refreshTasks, 1000);
 </script>

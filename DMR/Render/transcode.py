@@ -38,7 +38,7 @@ class Transcoder(BaseRender):
         self.logger = logging.getLogger(__name__)
         self.raw_ffmpeg = RawFFmpegRender(debug=self.debug)
 
-    def render_helper(self, video: str, output: str):
+    def render_helper(self, video: str, output: str, duration=None, progress_cb=None):
         ffmpeg_args = [self.ffmpeg, '-y']
         ffmpeg_args += self.hwaccel_args
 
@@ -68,18 +68,20 @@ class Transcoder(BaseRender):
         ]
 
         self.logger.info(f'开始转码: {output}')
-        return self.raw_ffmpeg.call_ffmpeg(ffmpeg_args)
+        return self.raw_ffmpeg.call_ffmpeg(ffmpeg_args, progress_cb=progress_cb, duration=duration)
 
-    def render_one(self, video: VideoInfo, output: str, **kwargs):
+    def render_one(self, video: VideoInfo, output: str, progress_cb=None, **kwargs):
         if not exists(video.path):
             raise RuntimeError(f'不存在视频文件 {video}，跳过渲染.')
         valid_output = safe_filename(output)
         if valid_output != output:
             self.logger.warn(f'输出文件名 {output} 不合法或已存在，已更改为 {valid_output}.')
-            output = valid_output   
+            output = valid_output
 
         start_time = datetime.now()
-        status, info = self.render_helper(video.path, output, **kwargs)
+        status, info = self.render_helper(video.path, output,
+                                          duration=getattr(video, 'duration', None),
+                                          progress_cb=progress_cb)
         if status:
             output_info:VideoInfo = copy.deepcopy(video)
             output_info.path = output

@@ -227,7 +227,8 @@ class _AcFunClient:
                      cover: str = '', desc: str = '', dynamic: str = '',
                      tags: list = None, creation_type: int = 1,
                      original_link_url: str = '', original_declare=None,
-                     watermark_position: int = 3, watermark_signature: bool = False) -> str:
+                     watermark_position: int = 3, watermark_signature: bool = False,
+                     progress_cb=None) -> str:
         if tags is None:
             tags = []
         if isinstance(file_paths, str):
@@ -254,6 +255,12 @@ class _AcFunClient:
                         if not chunk_data:
                             break
                         self.upload_chunk(chunk_data, fragment_id, token, pbar)
+                        if progress_cb:   # 回报百分比给 WebUI（按已传分块数算）
+                            try:
+                                progress_cb(int((fragment_id + 1) / fragment_count * 100),
+                                            idx + 1, len(file_paths))
+                            except Exception:
+                                pass
             finally:
                 if pbar:
                     pbar.close()
@@ -346,6 +353,7 @@ class acfun:
         if not isinstance(files, list):
             files = [files]
 
+        progress_cb   = kwargs.get('progress_cb')
         config        = self.format_config(kwargs, files[0] if files else None, session=session)
         file_paths    = [f.path for f in files]
         title         = config.get('title') or Path(file_paths[0]).stem
@@ -387,6 +395,7 @@ class acfun:
                 tags=tags,
                 creation_type=creation_type,
                 original_declare=original_declare,
+                progress_cb=progress_cb,
                 watermark_position=watermark_position,
                 watermark_signature=watermark_signature,
             )

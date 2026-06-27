@@ -237,6 +237,8 @@ class BiliWebApi:
         if stream_queue is None:
             n_files = len(files)
             for fi, file in enumerate(files, 1):
+                if self.stoped:                     # 手动停止：立即中断，不再传后续文件
+                    raise RuntimeError('上传已被手动停止')
                 # upos_stream 回调给的是 (已完成块, 总块)；这里换算成 pct 并带上文件序号交给上层
                 file_cb = (lambda done, total, _i=fi:
                            progress_cb(int(done / total * 100) if total else 0, _i, n_files)) \
@@ -573,6 +575,8 @@ class BiliWebApi:
             futures = []
             sessions = [copy.deepcopy(self._session) for _ in range(max_workers)]
             for index, chunk in enumerate(chunk_generator):
+                if self.stoped:                     # 手动停止：不再提交新分块，立即中断
+                    raise RuntimeError('上传已被手动停止')
                 if not chunk:
                     break
                 const_time = time.perf_counter() - st
@@ -640,6 +644,8 @@ class BiliWebApi:
         st = time.perf_counter()
         retries = 0
         while retries < max_retries:
+            if self.stoped:                          # 手动停止：在途分块不再重试，直接退出
+                return None
             try:
                 r = session.put(url=url, params=params_clone, data=chunk, headers=headers, timeout=20)
 

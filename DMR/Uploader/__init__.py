@@ -186,7 +186,7 @@ class Uploader():
         with self._lock:
             self.upload_tasks.pop(task['uuid'], None)
             if status == 'cancelled':
-                # 手动停止：不计入失败任务，仅通知来源方释放等待状态
+                # 手动停止：和失败一样挂到人工处理队列（可重试），故带上 config/extra 让 WebUI 填充标题简介
                 if task.get('stream_queue'):
                     task['stream_queue'] = None
                 self._pipeSend(
@@ -194,8 +194,8 @@ class Uploader():
                     msg=f"上传已被手动停止: {[f.path for f in task['files']]}",
                     target=task['source'],
                     request_id=task['request_id'],
-                    dtype='str',
-                    data='manually stopped',
+                    dtype='dict',
+                    data={'config': task.get('config', {}), 'error': '已手动停止', 'extra': task.get('_extra')},
                 )
             elif status == 'error':
                 # 上传失败已交由 liveevents 挂起转人工（见 onUploadError），不再留存 failed_tasks

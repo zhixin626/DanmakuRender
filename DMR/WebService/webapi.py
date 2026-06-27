@@ -167,11 +167,29 @@ class WebApi:
             req = request.get_json() or {}
             taskname, hold_id = req.get('task'), req.get('hold_id')
             result = req.get('result')
+            # 清洗用户填的路径：去掉首尾空格和引号（Windows「复制为路径」会带 "..."），
+            # 否则带引号的路径会让后续 rename/合并报 WinError 123。'done'/'__ignore__' 不受影响。
+            if isinstance(result, str):
+                result = result.strip().strip('"\'').strip()
             if not taskname or not hold_id:
                 return 'missing task/hold_id', 400
             self.send_queue.put(PipeMessage(
                 source='webservice', target=f'replay/{taskname}', event='resume',
                 data={'hold_id': hold_id, 'result': result},
+            ))
+            return 'success', 200
+
+        # 人工处理「重试」：把挂起任务原来的渲染/合并/上传操作重新跑一遍
+        @app.route('/api/retry', methods=['POST'])
+        @self.login_required
+        def retry_api():
+            req = request.get_json() or {}
+            taskname, hold_id = req.get('task'), req.get('hold_id')
+            if not taskname or not hold_id:
+                return 'missing task/hold_id', 400
+            self.send_queue.put(PipeMessage(
+                source='webservice', target=f'replay/{taskname}', event='retry',
+                data={'hold_id': hold_id},
             ))
             return 'success', 200
 
@@ -246,116 +264,42 @@ class WebApi:
                 os.makedirs(self.config_dir)
             return render_template('config_list.html')
 
-        @app.route('/api/config/pending')
-        @self.login_required
-        def config_pending_api():
-            dmr = getattr(self.engine, 'dmr', None)
-            if dmr is None:
-                return {'pending': []}
-            return {'pending': dmr.config.get_pending_changes()}
-
-        @app.route('/api/config/diff/<filename>')
-        @self.login_required
-        def config_diff_api(filename):
-            """某配置文件改动的 git 风格 diff（已应用→当前磁盘）。"""
-            dmr = getattr(self.engine, 'dmr', None)
-            if dmr is None:
-                return {'diff': []}
-            return {'diff': dmr.config.get_diff(os.path.basename(filename))}
-
-        @app.route('/api/config/revert/<filename>', methods=['POST'])
-        @self.login_required
-        def config_revert_api(filename):
-            """撤销某配置文件未应用的改动，回到上次已应用的状态。"""
-            dmr = getattr(self.engine, 'dmr', None)
-            if dmr is None:
-                return {'ok': False, 'message': '引擎未就绪'}, 503
-            ok = dmr.config.revert(os.path.basename(filename))
-            return {'ok': ok, 'message': '已撤销改动' if ok else '撤销失败（无可回退的版本）'}
-
-        @app.route('/api/config/apply/<filename>', methods=['POST'])
-        @self.login_required
-        def config_apply_api(filename):
-            dmr = getattr(self.engine, 'dmr', None)
-            if dmr is None:
-                return {'ok': False, 'message': '引擎未就绪'}, 503
-            # 安全：只允许 config_dir 内的文件名，去掉任何路径成分
-            safe = os.path.basename(filename)
-            result = dmr.apply_config_change(safe)
-            return result
-
         @app.route('/api/config/list')
         @self.login_required
         def config_list_api():
-            """配置文件实时状态（供配置页轮询重建表格）+ 红点汇总。
-            列出目录下所有可编辑 yml；其中 DMR 任务文件叠加“待应用/推迟”等真实状态。"""
+            """配置文件列表（供配置页/录制页构建），含每个任务是否启用。"""
             dmr = getattr(self.engine, 'dmr', None)
-            states = {}          # filename -> 状态（仅磁盘上存在的任务文件）
-            extra_deleted = []   # 已加载但磁盘已删的任务文件
-            if dmr is not None:
-                try:
-                    for s in dmr.config.get_all_states():
-                        if s['exists']:
-                            states[s['filename']] = s
-                        else:
-                            extra_deleted.append(s)
-                except Exception as e:
-                    self.logger.debug(f'读取配置状态失败: {e}')
-
             configs = []
             if os.path.isdir(self.config_dir):
                 for f in sorted(glob.glob(os.path.join(self.config_dir, '*.yml'))):
                     fn = os.path.basename(f)
                     if fn.lower() == 'global.yml':
                         continue
-                    taskname = fn[4:-4] if fn.startswith('DMR-') else fn[:-4]
-                    st = states.get(fn)
+                    enabled = True
+                    if dmr is not None:
+                        try:
+                            enabled = dmr.config.is_task_enabled(f)
+                        except Exception:
+                            pass
                     configs.append({
                         'filename': fn,
                         'path': os.path.abspath(f),   # 完整路径，供前端显示「文件夹\文件」并点击打开
-                        'taskname': st['taskname'] if st else taskname,
-                        'status': st['status'] if st else None,
-                        'exists': True,
+                        'taskname': os.path.splitext(fn)[0].split('-', 1)[-1],
+                        'enabled': enabled,
                         'is_example': fn.startswith('example-'),
                     })
-            for s in extra_deleted:
-                configs.append({
-                    'filename': s['filename'], 'path': s.get('path', ''),
-                    'taskname': s['taskname'],
-                    'status': s['status'], 'exists': False,
-                    'is_example': s['filename'].startswith('example-'),
-                })
             return {'configs': configs, 'notifications': self.get_notifications()}
 
-        @app.route('/api/config/defer/<filename>', methods=['POST'])
+        @app.route('/api/config/toggle/<filename>', methods=['POST'])
         @self.login_required
-        def config_defer_api(filename):
+        def config_toggle_api(filename):
+            """启用/停用某任务：写回配置文件的 enable 字段并即时增删任务。
+            body: {"enabled": true/false}"""
             dmr = getattr(self.engine, 'dmr', None)
             if dmr is None:
                 return {'ok': False, 'message': '引擎未就绪'}, 503
-            ok = dmr.config.defer(os.path.basename(filename))
-            return {'ok': ok, 'message': '已推迟到重启时生效' if ok else '未找到该文件'}
-
-        @app.route('/api/config/undefer/<filename>', methods=['POST'])
-        @self.login_required
-        def config_undefer_api(filename):
-            dmr = getattr(self.engine, 'dmr', None)
-            if dmr is None:
-                return {'ok': False, 'message': '引擎未就绪'}, 503
-            dmr.config.undefer(os.path.basename(filename))
-            return {'ok': True, 'message': '已撤销推迟'}
-
-        @app.route('/api/config/defer_all', methods=['POST'])
-        @self.login_required
-        def config_defer_all_api():
-            dmr = getattr(self.engine, 'dmr', None)
-            if dmr is None:
-                return {'ok': False, 'message': '引擎未就绪'}, 503
-            cnt = 0
-            for s in dmr.config.get_pending_changes():
-                if dmr.config.defer(s['filename']):
-                    cnt += 1
-            return {'ok': True, 'message': f'已推迟 {cnt} 个文件到重启'}
+            enabled = bool((request.get_json(silent=True) or {}).get('enabled', True))
+            return dmr.toggle_task(os.path.basename(filename), enabled)
 
         @app.route('/api/upload_tasks/<uuid>/stop', methods=['POST'])
         @self.login_required
@@ -555,57 +499,67 @@ class WebApi:
                         'output_dir': _abspath(getattr(task, 'output_dir', '')),
                     })
 
-        # Get Upload Tasks
-        upload_tasks_list = []
+        # ===== 队列改为 state_dict 派生：每个文件按「当前阶段」只出现一次（互斥）=====
+        # 进行中(带进度%/倒计时)取自插件活动字典；已完成子集(已渲染/已合并/已上传)取自各任务
+        # event_class.state_dict 的状态。组完成被回收后自然消失（符合预期）。
+        def _row(taskname, f):
+            p = getattr(f, 'path', '') or ''
+            return {'task': taskname,
+                    'file': os.path.join(os.path.basename(os.path.dirname(p)), os.path.basename(p)) if p else '',
+                    'path': _abspath(p)}
+
+        rendered_done, merged_done, uploaded_done, merging_active = [], [], [], []
+        if self.engine:
+            for taskname, info in getattr(self.engine, 'task_dict', {}).items():
+                ev = getattr(info.get('class'), 'event_class', None)
+                for segs in (getattr(ev, 'state_dict', None) or {}).values():
+                    for vs in segs:
+                        for vtype, slot in vs.items():
+                            f = slot.get('file')
+                            if not f or not getattr(f, 'path', None):
+                                continue
+                            st = slot.get('status')
+                            if st == 'ready' and vtype != 'src_video_pre':          # 渲染产物(原始录制源不算)
+                                rendered_done.append(_row(taskname, f))             # 已渲染(待合并/上传)
+                            elif st == 'merged':
+                                merged_done.append(_row(taskname, f))               # 已合并(产物待上传/清理)
+                            elif st == 'merging':
+                                merging_active.append(_row(taskname, f))            # 合并中
+                            elif st == 'uploaded':
+                                uploaded_done.append(_row(taskname, f))            # 已上传(待清理或终态)
+
+        # 渲染中（插件活动字典，带渲染%）
+        render_active = []
+        if self.engine and 'render' in self.engine.plugin_dict:
+            render = self.engine.plugin_dict['render']['class']
+            if render:
+                for _u, task in render.render_tasks.items():
+                    vp = task.get('video').path if task.get('video') else ''
+                    outp = task.get('output', '') or ''
+                    render_active.append({
+                        'task': task.get('source', ''),
+                        'video': os.path.join(os.path.basename(os.path.dirname(vp)), os.path.basename(vp)) if vp else '',
+                        'output': os.path.join(os.path.basename(os.path.dirname(outp)), os.path.basename(outp)) if outp else '',
+                        'video_path': _abspath(vp), 'output_path': _abspath(outp),
+                        'mode': task.get('mode', 'Unknown'),
+                        'status': task.get('status', 'waiting'),
+                        'progress': task.get('progress'),   # 渲染百分比（dmrender/emoji 回报；transcode 现在也有）
+                    })
+
+        # 上传中（插件活动字典，带上传%）
+        upload_active = []
         if self.engine and 'uploader' in self.engine.plugin_dict:
             uploader = self.engine.plugin_dict['uploader']['class']
             if uploader:
-                for uuid, task in uploader.upload_tasks.items():
-                    upload_tasks_list.append({
-                        'uuid': uuid,
+                for u, task in uploader.upload_tasks.items():
+                    upload_active.append({
+                        'uuid': u, 'task': task.get('source', ''),
                         'files': [{'name': os.path.join(os.path.basename(os.path.dirname(f.path)), os.path.basename(f.path))} for f in task.get('files', [])],
                         'account': task.get('args', {}).get('account', 'Unknown'),
                         'engine': task.get('engine', 'Unknown'),
                         'is_sync': bool(task.get('stream_queue')),
                         'status': task.get('status', 'waiting'),
-                        'progress': task.get('progress'),   # biliwebapi 按块回报的上传百分比（其它引擎为 None）
-                    })
-
-        # Get Render Tasks
-        render_tasks_list = []
-        completed_renders_list = []
-        if self.engine and 'render' in self.engine.plugin_dict:
-            render = self.engine.plugin_dict['render']['class']
-            if render:
-                # 已渲染成功的视频（最新在前，最多展示 100 条）
-                for rec in list(getattr(render, 'completed_tasks', []))[::-1][:100]:
-                    out_p = rec.get('output') or 'Unknown'
-                    vid_p = rec.get('video') or 'Unknown'
-                    rec_time = rec.get('time')
-                    out_abs = _abspath(out_p)
-                    vid_abs = _abspath(vid_p)
-                    # 渲染产物已不存在（被合并/清理删除）→ 不再展示这条
-                    if not (out_abs and os.path.exists(out_abs)):
-                        continue
-                    completed_renders_list.append({
-                        'video': os.path.join(os.path.basename(os.path.dirname(vid_p)), os.path.basename(vid_p)),
-                        'output': os.path.join(os.path.basename(os.path.dirname(out_p)), os.path.basename(out_p)),
-                        'video_path': vid_abs,
-                        'output_path': out_abs,
-                        'mode': rec.get('mode', 'Unknown'),
-                        'time': rec_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(rec_time, 'strftime') else '',
-                    })
-
-                for uuid, task in render.render_tasks.items():
-                    video_path = task.get('video').path if task.get('video') else 'Unknown'
-                    render_tasks_list.append({
-                        'video': os.path.join(os.path.basename(os.path.dirname(video_path)), os.path.basename(video_path)),
-                        'output': os.path.join(os.path.basename(os.path.dirname(task.get('output', 'Unknown'))), os.path.basename(task.get('output', 'Unknown'))),
-                        'video_path': _abspath(video_path),
-                        'output_path': _abspath(task.get('output', '')),
-                        'mode': task.get('mode', 'Unknown'),
-                        'status': task.get('status', 'waiting'),
-                        'progress': task.get('progress'),   # 渲染百分比（dmrender/emoji_dmrender 回报；transcode 为 None）
+                        'progress': task.get('progress'),
                     })
 
         # Get Pending Cleanup Tasks
@@ -620,28 +574,6 @@ class WebApi:
                     'note'      : entry.get('note', ''),
                     'execute_at': entry.get('created_at', 0) + entry.get('delay', 0),
                 })
-
-        # Get Merged Videos（合并产物记录在各任务的 LiveEvents 实例上）
-        completed_merges_list = []
-        if self.engine:
-            for taskname, info in getattr(self.engine, 'task_dict', {}).items():
-                rt = info.get('class')
-                ev = getattr(rt, 'event_class', None)
-                for rec in list(getattr(ev, 'merged_videos', []))[::-1][:100]:
-                    out_p = rec.get('output')
-                    out_abs = _abspath(out_p)
-                    rec_time = rec.get('time')
-                    # 合并文件已不存在（上传后被清理删除）→ 不再展示这条
-                    if not (out_abs and os.path.exists(out_abs)):
-                        continue
-                    completed_merges_list.append({
-                        'task': taskname,
-                        'output': os.path.join(os.path.basename(os.path.dirname(out_p)), os.path.basename(out_p)) if out_p else '',
-                        'output_path': out_abs,
-                        'type': rec.get('type', ''),
-                        'segments': rec.get('segments', 0),
-                        'time': rec_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(rec_time, 'strftime') else '',
-                    })
 
         # Held tasks（需人工处理：某步重试用尽后被挂起的失败任务）
         held_tasks_list = []
@@ -661,11 +593,11 @@ class WebApi:
 
         return {
             'recording_tasks'   : recording_tasks,
-            'upload_tasks'      : upload_tasks_list,
-            'render_tasks'      : render_tasks_list,
-            'completed_renders' : completed_renders_list,
-            'completed_merges'  : completed_merges_list,
-            'pending_clean_tasks': pending_clean_list,
+            # 四个阶段队列：每个含 active(进行中,带%/倒计时) + done(已完成子集)
+            'render_queue'      : {'active': render_active, 'done': rendered_done},
+            'merge_queue'       : {'active': merging_active, 'done': merged_done},
+            'upload_queue'      : {'active': upload_active, 'done': uploaded_done},
+            'clean_queue'       : pending_clean_list,
             'held_tasks'        : held_tasks_list,
             'notifications'     : self.get_notifications(),
         }
@@ -693,15 +625,9 @@ class WebApi:
     def get_notifications(self):
         """导航红点汇总：搭便车塞进各页面已有的轮询响应，不新增请求。
         config/failed 为“待办型”(数量>0亮)；logs_err 为“新消息型”(前端用 localStorage 比对已读)。"""
-        n = {'config': 0, 'failed': 0, 'logs_err': 0, 'restart_pending': False}
+        n = {'failed': 0, 'logs_err': 0, 'restart_pending': False}
         # 是否已设置「空闲后重启」：供前端把重启按钮恢复成绿色「已设置」态（刷新后也保持）
         n['restart_pending'] = bool(getattr(self.engine, '_restart_pending', False))
-        dmr = getattr(self.engine, 'dmr', None)
-        if dmr is not None:
-            try:
-                n['config'] = len(dmr.config.get_pending_changes())
-            except Exception:
-                pass
         try:
             # 待办计数 = 各任务"需人工处理"的挂起任务数（失败重试用尽后转人工）
             for info in (getattr(self.engine, 'task_dict', {}).values() if self.engine else []):
