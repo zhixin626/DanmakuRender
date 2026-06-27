@@ -200,11 +200,11 @@ class Bilibili(DMAPI):
                 j = json.loads(dm.get('body'))
             except Exception:
                 continue
-            cmd = j.get('cmd', '')
+            msg_type = j.get('cmd', '')
             data = j.get('data', {}) or {}
             # 每个分支只做一件事：把原始 j 解析成 DMR 的弹幕类型；理解不了的统一塞 BaseDanmaku.raw
             try:
-                if cmd == 'DANMU_MSG':                         # 普通弹幕
+                if msg_type == 'DANMU_MSG':                    # 普通弹幕
                     info = j['info']
                     color = f"{info[0][3]:06x}"
                     dtype, content, text = 'danmaku', info[1], info[1]
@@ -217,7 +217,7 @@ class Bilibili(DMAPI):
                         content=content, text=text, color=color,
                         timestamp=info[0][4] / 1000, raw=j))
 
-                elif cmd == 'SUPER_CHAT_MESSAGE':              # 醒目留言 SC
+                elif msg_type == 'SUPER_CHAT_MESSAGE':         # 醒目留言 SC
                     base = data.get('uinfo', {}).get('base', {})
                     text = data.get('message', '')
                     price_cny = data.get('price', 0)           # 真实元价格
@@ -232,7 +232,7 @@ class Bilibili(DMAPI):
                         face_url=base.get('face', ''),
                         timestamp=data.get('ts') or now, raw=j))
 
-                elif cmd == 'GUARD_BUY':                       # 开通大航海(舰长/提督/总督)
+                elif msg_type == 'GUARD_BUY':                  # 开通大航海(舰长/提督/总督)
                     uname = data.get('username', '未知用户')
                     price = data.get('price', 0) / 1000        # 金瓜子 → 元
                     member_name = data.get('gift_name', '舰长')
@@ -244,7 +244,7 @@ class Bilibili(DMAPI):
                         member_unit='月', price_cny=price,
                         timestamp=data.get('start_time') or now, raw=j))
 
-                elif cmd == 'SEND_GIFT':                       # 礼物
+                elif msg_type == 'SEND_GIFT':                  # 礼物
                     uname = data.get('sender_uinfo', {}).get('base', {}).get('name') or data.get('uname', '未知用户')
                     gift_name = data.get('giftName', '未知礼物')
                     num = data.get('num', 0)
@@ -258,7 +258,7 @@ class Bilibili(DMAPI):
                         color='d9a6c4',
                         timestamp=data.get('timestamp') or data.get('ts') or now, raw=j))
 
-                elif cmd == 'INTERACT_WORD_V2':                # 进场(正文藏在 data.pb base64 里)
+                elif msg_type == 'INTERACT_WORD_V2':           # 进场(正文藏在 data.pb base64 里)
                     name, face = parse_enter_msg(j)
                     ts = data.get('timestamp') or data.get('trigger_time')
                     if ts:
@@ -269,9 +269,9 @@ class Bilibili(DMAPI):
                         face_url=face, timestamp=ts or now, raw=j))
 
                 else:                                          # 理解不了的：原样塞进 BaseDanmaku.raw
-                    # dtype 用 cmd 小写、content 放 data，--all 下可直接看结构(大航海toast/盲盒/rank/notice…)
+                    # dtype 用 msg_type 小写、content 放 data，--all 下可直接看结构(大航海toast/盲盒/rank/notice…)
                     msgs.append(BaseDanmaku(
-                        dtype=(cmd or 'other').lower(), raw=j,
+                        dtype=(msg_type or 'other').lower(), raw=j,
                         timestamp=now, content=data or j))
 
             except Exception:
