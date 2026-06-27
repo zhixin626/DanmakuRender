@@ -201,7 +201,7 @@ class Bilibili(DMAPI):
             except Exception:
                 continue
             msg_type = j.get('cmd', '')
-            data = j.get('data', {}) or {}
+            payload = j.get('data', {}) or {}   # 这条消息的关键字段块(礼物/SC/大航海/进场都在 data 里)
             # 每个分支只做一件事：把原始 j 解析成 DMR 的弹幕类型；理解不了的统一塞 BaseDanmaku.raw
             try:
                 if msg_type == 'DANMU_MSG':                    # 普通弹幕
@@ -218,61 +218,61 @@ class Bilibili(DMAPI):
                         timestamp=info[0][4] / 1000, raw=j))
 
                 elif msg_type == 'SUPER_CHAT_MESSAGE':         # 醒目留言 SC
-                    base = data.get('uinfo', {}).get('base', {})
-                    text = data.get('message', '')
-                    price_cny = data.get('price', 0)           # 真实元价格
+                    base = payload.get('uinfo', {}).get('base', {})
+                    text = payload.get('message', '')
+                    price_cny = payload.get('price', 0)           # 真实元价格
                     msgs.append(SuperChatDanmaku(
-                        uname=base.get('name', ''), uid=data.get('uid', ''),
+                        uname=base.get('name', ''), uid=payload.get('uid', ''),
                         content=text, text=text,
                         price=price_cny * 10, price_unit='电池', price_cny=price_cny,
-                        sc_duration=max(30, min(180, data.get('time', 60))),
-                        background_color=data.get('background_color', 'FFF5ED'),
-                        background_bottom_color=data.get('background_bottom_color', 'B2602A'),
+                        sc_duration=max(30, min(180, payload.get('time', 60))),
+                        background_color=payload.get('background_color', 'FFF5ED'),
+                        background_bottom_color=payload.get('background_bottom_color', 'B2602A'),
                         name_color='666666', content_color='FFFFFF',
                         face_url=base.get('face', ''),
-                        timestamp=data.get('ts') or now, raw=j))
+                        timestamp=payload.get('ts') or now, raw=j))
 
                 elif msg_type == 'GUARD_BUY':                  # 开通大航海(舰长/提督/总督)
-                    uname = data.get('username', '未知用户')
-                    price = data.get('price', 0) / 1000        # 金瓜子 → 元
-                    member_name = data.get('gift_name', '舰长')
-                    num = data.get('num', 1)
+                    uname = payload.get('username', '未知用户')
+                    price = payload.get('price', 0) / 1000        # 金瓜子 → 元
+                    member_name = payload.get('gift_name', '舰长')
+                    num = payload.get('num', 1)
                     text = f"{uname} 开通了{num}个月的{member_name}价值{price}元"
                     msgs.append(MemberDanmaku(
-                        uname=uname, uid=data.get('uid', ''), content=text, text=text,
+                        uname=uname, uid=payload.get('uid', ''), content=text, text=text,
                         member_name=member_name, member_price=price, member_count=num,
                         member_unit='月', price_cny=price,
-                        timestamp=data.get('start_time') or now, raw=j))
+                        timestamp=payload.get('start_time') or now, raw=j))
 
                 elif msg_type == 'SEND_GIFT':                  # 礼物
-                    uname = data.get('sender_uinfo', {}).get('base', {}).get('name') or data.get('uname', '未知用户')
-                    gift_name = data.get('giftName', '未知礼物')
-                    num = data.get('num', 0)
-                    battery = data.get('price', 0) / 100       # 金瓜子单价 → 电池(1电池=100金瓜子)
-                    total_coin = data.get('total_coin') or (data.get('price', 0) * num) or 0
+                    uname = payload.get('sender_uinfo', {}).get('base', {}).get('name') or payload.get('uname', '未知用户')
+                    gift_name = payload.get('giftName', '未知礼物')
+                    num = payload.get('num', 0)
+                    battery = payload.get('price', 0) / 100       # 金瓜子单价 → 电池(1电池=100金瓜子)
+                    total_coin = payload.get('total_coin') or (payload.get('price', 0) * num) or 0
                     text = f"<{uname}>送给主播价值{battery:.0f}电池的{gift_name}x{num}"
                     msgs.append(GiftDanmaku(
-                        uname=uname, uid=data.get('sender_uinfo', {}).get('uid') or data.get('uid', ''),
+                        uname=uname, uid=payload.get('sender_uinfo', {}).get('uid') or payload.get('uid', ''),
                         content=text, text=text, gift_name=gift_name, gift_count=num,
                         gift_price=f"{battery:.0f}", price_unit='电池', price_cny=total_coin / 1000,
                         color='d9a6c4',
-                        timestamp=data.get('timestamp') or data.get('ts') or now, raw=j))
+                        timestamp=payload.get('timestamp') or payload.get('ts') or now, raw=j))
 
                 elif msg_type == 'INTERACT_WORD_V2':           # 进场(正文藏在 data.pb base64 里)
                     name, face = parse_enter_msg(j)
-                    ts = data.get('timestamp') or data.get('trigger_time')
+                    ts = payload.get('timestamp') or payload.get('trigger_time')
                     if ts:
                         ts = float(ts)
                         ts = ts / 1e9 if ts > 1e15 else (ts / 1e3 if ts > 1e12 else ts)
                     msgs.append(EntryDanmaku(
-                        uname=name, uid=data.get('uid', '') or '',
+                        uname=name, uid=payload.get('uid', '') or '',
                         face_url=face, timestamp=ts or now, raw=j))
 
                 else:                                          # 理解不了的：原样塞进 BaseDanmaku.raw
                     # dtype 用 msg_type 小写、content 放 data，--all 下可直接看结构(大航海toast/盲盒/rank/notice…)
                     msgs.append(BaseDanmaku(
                         dtype=(msg_type or 'other').lower(), raw=j,
-                        timestamp=now, content=data or j))
+                        timestamp=now, content=payload or j))
 
             except Exception:
                 continue

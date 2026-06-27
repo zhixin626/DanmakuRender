@@ -276,11 +276,11 @@ class Douyin:
             if msg.method == 'WebcastChatMessage':
                 chatMessage = ChatMessage()
                 chatMessage.ParseFromString(msg.payload)
-                data        = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
-                user_info = data.get('user', {})
+                payload   = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
+                user_info = payload.get('user', {})
                 name     = user_info.get('nickName') or "未知用户"
                 uid      = user_info.get('shortId',None)
-                content  = data['content']
+                content  = payload['content']
                 msg = UserDanmaku(
                     timestamp=now,
                     uname=name,
@@ -289,14 +289,14 @@ class Douyin:
                     dtype='danmaku',
                     color='ffffff',
                     uid=uid,
-                    raw=data,
+                    raw=payload,
                 )
 
             elif msg.method == 'WebcastMemberMessage':
                 memberMessage = MemberMessage()
                 memberMessage.ParseFromString(msg.payload)
-                data = json_format.MessageToDict(memberMessage, preserving_proto_field_name=True)
-                user_info = data.get('user', {})
+                payload   = json_format.MessageToDict(memberMessage, preserving_proto_field_name=True)
+                user_info = payload.get('user', {})
                 name      = user_info.get('nickName') or "未知用户"
                 uid       = user_info.get('id',None)
                 msg = EntryDanmaku(
@@ -306,21 +306,21 @@ class Douyin:
                     text      = f"{name}来了",
                     color     = 'ffffff',
                     uid       = uid,
-                    raw       = data,
+                    raw       = payload,
                 )
 
             elif msg.method == 'WebcastGiftMessage':
                 giftMessage = GiftMessage()
                 giftMessage.ParseFromString(msg.payload)
-                data        = json_format.MessageToDict(giftMessage, preserving_proto_field_name=True)
-                if 'combo' in data['gift'] and not 'repeatEnd' in data:
+                payload     = json_format.MessageToDict(giftMessage, preserving_proto_field_name=True)
+                if 'combo' in payload['gift'] and not 'repeatEnd' in payload:
                   continue
-                user_info   = data.get('user', {})
+                user_info   = payload.get('user', {})
                 name        = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
                 uid         = user_info.get('shortId', None)
-                gift_price      = int(data['gift']['diamondCount'])
-                gift_count      = int(data.get('repeatCount', 1))
-                gift_name       = data['gift']['name']
+                gift_price      = int(payload['gift']['diamondCount'])
+                gift_count      = int(payload.get('repeatCount', 1))
+                gift_name       = payload['gift']['name']
                 price_cny = (gift_price * gift_count) / 10   # 10抖币=1元
                 _gtext = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}"
                 msg = GiftDanmaku(
@@ -335,7 +335,7 @@ class Douyin:
                     price_unit      = '抖币',
                     color           = 'ffffff',
                     price_cny       = price_cny,
-                    raw             = data,
+                    raw             = payload,
                 )
 
             else:

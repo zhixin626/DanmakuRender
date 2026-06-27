@@ -117,41 +117,41 @@ class Douyu(DMAPI):
 
     def decode_msg(data):
         msgs = []
-        for msg in re.findall(b"(type@=.*?)\x00", data):
+        for seg in re.findall(b"(type@=.*?)\x00", data):
             try:
-                msg = msg.replace(b"@=", b'":"').replace(b"/", b'","')
-                msg = msg.replace(b"@A", b"@").replace(b"@S", b"/")
-                msg = json.loads((b'{"' + msg[:-2] + b"}").decode("utf8", "ignore"))
-                # print(msg)
+                # 斗鱼是 STT(键@=值/) 文本协议，先转成 json 解析成 payload(关键字段块)
+                seg = seg.replace(b"@=", b'":"').replace(b"/", b'","')
+                seg = seg.replace(b"@A", b"@").replace(b"@S", b"/")
+                payload = json.loads((b'{"' + seg[:-2] + b"}").decode("utf8", "ignore"))
 
                 msg_type = {
                     "chatmsg": "danmaku",
                     "dgb": "gift",
                     "uenter": "enter",
-                    "dfobc":"member"
-                }.get(msg["type"], "other")
+                    "dfobc": "member",
+                }.get(payload["type"], "other")
 
                 if msg_type == "danmaku":
-                    msg = UserDanmaku(
+                    msgs.append(UserDanmaku(
                         dtype="danmaku",
-                        uname=msg.get("nn", ""),
-                        content=msg.get("txt", ""),
-                        text=msg.get("txt", ""),
+                        uname=payload.get("nn", ""),
+                        content=payload.get("txt", ""),
+                        text=payload.get("txt", ""),
                         timestamp=datetime.now().timestamp(),
-                        color=color_tab.get(msg.get("col", "-1"), "ffffff"),
-                        uid=msg.get("uid", 0),
-                        raw=msg,
-                    )
+                        color=color_tab.get(payload.get("col", "-1"), "ffffff"),
+                        uid=payload.get("uid", 0),
+                        raw=payload,
+                    ))
 
                 elif msg_type == "gift":
-                    uname      = msg.get("nn", "")
-                    uid        = msg.get("uid", "")
-                    gift_name  = msg.get("gfn", "未知礼物")
-                    gift_count = int(msg.get("gfcnt") or 1)
-                    gfid       = int(msg.get("gfid") or 0)   # 礼物 id
-                    pid        = msg.get("pid")              # 道具 id
+                    uname      = payload.get("nn", "")
+                    uid        = payload.get("uid", "")
+                    gift_name  = payload.get("gfn", "未知礼物")
+                    gift_count = int(payload.get("gfcnt") or 1)
+                    gfid       = int(payload.get("gfid") or 0)   # 礼物 id
+                    pid        = payload.get("pid")              # 道具 id
                     price_unit = "鱼翅"
-                    streamer   = msg.get("receive_nn", "主播")
+                    streamer   = payload.get("receive_nn", "主播")
 
                     # 查价格：先按礼物 id，再按道具 id
                     gift_price, price_src, res = None, None, None
@@ -171,7 +171,7 @@ class Douyu(DMAPI):
                         total_price_cny, extra = gift_price * gift_count, f"价值{gift_price}{price_unit}的"
 
                     text = f"{uname} 送给{streamer}{extra}{gift_name}×{gift_count}"
-                    msg = GiftDanmaku(
+                    msgs.append(GiftDanmaku(
                         timestamp=datetime.now().timestamp(),
                         uname=uname,
                         uid=uid,
@@ -186,32 +186,28 @@ class Douyu(DMAPI):
                         price_cny=total_price_cny,
                         gfid=gfid,
                         pid=pid,
-                        raw=msg,
+                        raw=payload,
                         extra=extra,
-                    )
+                    ))
 
                 elif msg_type == "member":
-                    # 字段含义尚未确认完整，暂不解析；先采样原始消息反推协议，跳过不入列
-                    if sample_raw_message("member", msg):
+                    # 字段含义尚未确认完整，暂不解析；先采样原始消息反推协议(不入列)
+                    if sample_raw_message("member", payload):
                         print(f"{RED}【SAMPLE】{RESET}已采样开通会员原始消息 -> {_sample_dir}/member.jsonl")
-                    continue
 
                 elif msg_type == "enter":
-                    continue   # 进场暂不入列（与原行为一致；如需显示可仿 b站做成 EntryDanmaku）
+                    pass   # 进场暂不入列
 
-                else:  # 未识别类型(无发送者)：采样 + 用 BaseDanmaku 入列，content 放 kwargs 袋供 --all 查看
-                    raw_type = msg.get("type", "unknown")
-                    sample_raw_message(raw_type, msg)
-                    msg = BaseDanmaku(
+                else:  # 理解不了的：采样 + 原样塞进 BaseDanmaku.raw，content 放 payload 便于 --all 查看
+                    raw_type = payload.get("type", "unknown")
+                    sample_raw_message(raw_type, payload)
+                    msgs.append(BaseDanmaku(
                         dtype=raw_type,
-                        raw=msg,
+                        raw=payload,
                         timestamp=datetime.now().timestamp(),
-                        content=msg,        # 原始 dict 作内容，便于 --all 查看
-                    )
-
-                msgs.append(msg)
+                        content=payload,
+                    ))
 
             except Exception as e:
                 logger.debug(f"错误信息:{e}")
-                pass
         return msgs
