@@ -13,10 +13,8 @@ dmr_engine_args:
   # 选择组件
   # 可选：downloader（下载）, render（渲染）, uploader（上传）, cleaner（清理）, merger（合并）, webservice（WebUI）
   enabled_plugins: ['downloader', 'render', 'uploader', 'cleaner', 'merger']
-  # 是否动态更新配置文件
-  dynamic_config: false
-  # 动态更新的配置文件路径
-  dynamic_config_path: ./configs
+  # 任务配置文件所在目录（目录下每个 *.yml 即一个任务，global.yml 除外；是否启用看文件内 enable 字段）
+  config_path: ./configs
 
 # 下载器核心参数
 downloader_kernel_args:
@@ -28,14 +26,7 @@ download_args:
   live:
     # 直播间链接
     # 请填写标准格式链接，例如：https://live.bilibili.com/123456
-    url: 
-    # 录制程序引擎，可选ffmpeg, streamgears, pyrequests 或者 streamlink
-    # 在使用streamgears作为录制引擎时不支持录制B站hls流
-    # 建议PC推流的直播使用ffmpeg录制，手机推流的直播使用streamgears录制
-    # 录制twitch等特殊平台建议使用streamlink
-    # streamlink可用平台请参考 https://streamlink.github.io/plugins.html
-    # 默认为auto，由程序自动选择
-    engine: auto
+    url:
     # 录制输出文件夹，设置为空则使用主播名称作为文件夹
     output_dir: ./直播回放
     # 录制文件名称模板
@@ -43,127 +34,189 @@ download_args:
     output_name: '{STREAMER.NAME}-{CTIME.YEAR}年{CTIME.MONTH:02d}月{CTIME.DAY:02d}日{CTIME.HOUR:02d}点{CTIME.MINUTE:02d}分'
     # 录播分段时间（秒），默认一个小时
     segment: 3600
-    # 录制视频的格式，默认flv
-    output_format: flv
-    # 是否录制弹幕
-    danmaku: True
-    # 是否录制直播流
-    video: True
-    # 延迟下播计时（秒）
-    # 使用这个功能可以把主播短暂下播又开播认定为同一场直播
-    stop_wait_time: 7200
-    # 直播流选项
-    # 使用streamlink录制时不生效
-    stream_option:
-      # 直播流CDN
-      # 对于虎牙直播，此项可选al, tx, hw等cdn服务器的缩写
-      # 对于B站，可选特定的CDN域名前缀，例如：c1--cn-gotcha208
-      # 或者正则匹配特定CDN，例如：.*cn-gotcha.*
-      # 默认为空，由程序随机选择可用cdn
-      stream_cdn: ~
-      # 直播流类型（暂时只对B站生效）可选flv，hls，avc，hevc，av1
-      # 注意hls流无法使用streamgears录制
-      # 如果需要同时指定codec类型，请使用'type-codec'的格式，例如：flv-avc
-      # 默认为空，由程序自动选择
-      stream_type: ~
-      # B站观看cookies，用于获取直播流，如果不填写则使用登录B站上传视频的cookies
-      # 如果希望不登录录制最低画质，请设置为'None'
-      bili_watch_cookies: .login_info/bili_watch_cookies.json
-    # 高级视频录制参数
-    # 请确保你明白这些参数的含义后再修改
-    advanced_video_args: 
-      # 默认分辨率，此选项用于在程序无法获取流分辨率时指定默认分辨率用于弹幕录制
-      default_resolution: [1920, 1080]
-      # 开播检测间隔，每隔这段时间检测一次是否开播
-      start_check_interval: 60
-      # 下播检测间隔，在主播下播但是未超过延迟下播时间时使用
-      stop_check_interval: 60
-      # 录制组编号，可用于多任务协同，详情请参考文档
-      group_id: ~
-      # ffmpeg取流参数(仅ffmpeg下载引擎生效)
-      ffmpeg_stream_args: [ '-rw_timeout','10000000',
-                            '-analyzeduration','15000000',
-                            '-probesize','50000000',
-                            '-thread_queue_size', '16']
-      # ffmpeg输出参数(仅ffmpeg下载引擎生效)
-      ffmpeg_output_args: [ '-movflags','faststart+frag_keyframe+empty_moov']
-      # 禁用下载速度慢时自动重启(仅ffmpeg下载引擎生效)
-      disable_lowspeed_interrupt: false
-      # streamlink 额外输入参数
-      # 可用参数列表请参考 https://streamlink.github.io/cli.html
-      # 一个典型的使用方法是添加一个--twitch-api-header参数，用于取消twitch直播流的广告
-      # 特别提醒，使用此方法传入参数会在日志文件中明文显示，如果需要共享日志文件请确保删除了敏感信息！
-      streamlink_extra_args: [
-        "--twitch-disable-ads",     # 去广告，去掉、跳过嵌入的广告流
-        "--twitch-disable-reruns",  # 如果该频道正在重放回放，不打开流
-      ]
 
-    # 以下是弹幕录制参数
-    # 弹幕录制格式，只能选择ass
-    dm_format: ass 
-    # 弹幕上下间距（行距），设置为0-1的表示为视频宽度的倍数，设置为大于1的数表示像素，默认6
-    margin_h: 6
-    # 弹幕左右间距，设置为-1表示允许弹幕叠加，设置为0-1的表示间距为视频宽度的倍数，设置为大于1的数表示像素，默认0.05
-    # 实际上这个东西就是弹幕密度，弹幕左右间距越大密度越小
-    margin_w: 0.05
-    # 指定弹幕占屏幕的最大比例（即屏幕上半部分有多少可以用来显示弹幕），默认为0.4
-    dmrate: 0.4
-    # 指定弹幕字体，默认为微软雅黑字体(Microsoft YaHei)
-    font: Microsoft YaHei
-    # 指定弹幕字体大小，默认为36
-    fontsize: 36
-    # Distance from Screen Top 弹幕距离屏幕顶端的距离（像素，例如20，表示距离屏幕顶端20px）
-    dst: 20
-    # 指定单条弹幕持续时间（秒），默认为16
-    dmduration: 16
-    # 指定弹幕不透明度，默认为0.8
-    opacity: 0.8
-    # 使用自适应弹幕大小（会让把设置的弹幕大小按1080P标准缩放）
-    auto_fontsize: True
-    # 弹幕描边颜色(6位十六进制)
-    outlinecolor: 000000
-    # 弹幕描边宽度
-    outlinesize: 1.0
-    # 弹幕流选项
-    dm_stream_option:
-      # 用于获取抖音弹幕流的cookies，用于特殊情况下录制抖音弹幕(https://github.com/SmallPeaches/DanmakuRender/issues/258)
-      # 格式：'__ac_nonce=xxx; __ac_signature=xxx; sessionid=xxx'
-      # 特别提醒，使用此方法传入参数会在日志文件中明文显示，如果需要共享日志文件请确保删除了敏感信息！
-      # 推荐设置为cookies所在的json文件，这样cookies就不会明文显示，json文件应该为cookies字典：{'__ac_nonce': xxx, ...}
-      douyin_dm_cookies: ~
-    # 弹幕过滤规则，满足其中任意条件的弹幕将被过滤
-    dm_filter:
-      # 关键字过滤，只要有关键字的弹幕都会被过滤
-      # 例如：[菜, fw]
-      keywords: ~
-      # 用户名称过滤，只有用户名称完全与发弹幕的用户名相同才会过滤
-      # 例如：[虎牙小助手, TwitchBot]
-      username: ~
-      # 最长弹幕长度，超过此长度的弹幕将被过滤，0表示不限制
-      max_length: 0
-    # 弹幕模板
-    dm_template:
-      # ASS文本模板，使用方法请参考文档
-      ass_text: ~
-    # 高级弹幕录制参数
-    # 请确保你明白这些参数的含义后再修改
-    advanced_dm_args:
-      # 弹幕延迟补偿(秒)，将弹幕强行提前
-      dm_delay_fixed: 6
-      # 弹幕超时自动重启（秒），超过一段时间无弹幕会自动重启弹幕录制，0表示关闭
-      dm_auto_restart: 300
-      # 额外弹幕流输入
-      # 部分主播可能同时在平台同时开播，可以用这个同时录制多个直播间的弹幕到一个视频
-      # 应该设置为一个列表（不包括原来录制的房间），例如：['https://live.bilibili.com/123456', 'https://live.bilibili.com/654321']
-      dm_extra_inputs: []
-      # 弹幕文件最小录制时间（秒），小于此录制时间的弹幕文件将被删除
-      # 此功能可用于删除因为录制错误导致的许多空弹幕文件
-      dm_file_min_time: 30
-    # SuperChat（醒目留言）渲染参数
-    sc_dm_args:
-      # 最新一条 SC 的底边所在位置（屏幕高度比例，0~1），旧 SC 向上堆叠，默认 0.93
-      # 与礼物框 gift_dm_args.anchor_y_ratio（默认 0.88）分开，避免上下重叠
-      anchor_y_ratio: 0.93
+    # ============ 视频流录制参数 ============
+    stream_args:
+      # 是否录制直播流
+      enable: True
+      # 录制程序引擎，可选ffmpeg, streamgears, pyrequests 或者 streamlink
+      # 在使用streamgears作为录制引擎时不支持录制B站hls流
+      # 建议PC推流的直播使用ffmpeg录制，手机推流的直播使用streamgears录制
+      # 录制twitch等特殊平台建议使用streamlink
+      # streamlink可用平台请参考 https://streamlink.github.io/plugins.html
+      # 默认为auto，由程序自动选择
+      engine: auto
+      # 录制视频的格式，默认flv
+      output_format: flv
+      # 延迟下播计时（秒）
+      # 使用这个功能可以把主播短暂下播又开播认定为同一场直播
+      stop_wait_time: 7200
+      # 直播流选项（使用streamlink录制时不生效）
+      stream_option:
+        # 直播流CDN
+        # 对于虎牙直播，此项可选al, tx, hw等cdn服务器的缩写
+        # 对于B站，可选特定的CDN域名前缀，例如：c1--cn-gotcha208
+        # 或者正则匹配特定CDN，例如：.*cn-gotcha.*
+        # 默认为空，由程序随机选择可用cdn
+        stream_cdn: ~
+        # 直播流类型（暂时只对B站生效）可选flv，hls，avc，hevc，av1
+        # 注意hls流无法使用streamgears录制
+        # 如果需要同时指定codec类型，请使用'type-codec'的格式，例如：flv-avc
+        # 默认为空，由程序自动选择
+        stream_type: ~
+        # B站观看cookies，用于获取直播流，如果不填写则使用登录B站上传视频的cookies
+        # 如果希望不登录录制最低画质，请设置为'None'
+        bili_watch_cookies: .login_info/bili_watch_cookies.json
+      # 高级视频录制参数（请确保你明白这些参数的含义后再修改）
+      advanced_args:
+        # 默认分辨率，此选项用于在程序无法获取流分辨率时指定默认分辨率用于弹幕录制
+        default_resolution: [1920, 1080]
+        # 开播检测间隔，每隔这段时间检测一次是否开播
+        start_check_interval: 60
+        # 下播检测间隔，在主播下播但是未超过延迟下播时间时使用
+        stop_check_interval: 60
+        # 录制组编号，可用于多任务协同，详情请参考文档
+        group_id: ~
+        # ffmpeg取流参数(仅ffmpeg下载引擎生效)
+        ffmpeg_stream_args: [ '-rw_timeout','10000000',
+                              '-analyzeduration','15000000',
+                              '-probesize','50000000',
+                              '-thread_queue_size', '16']
+        # ffmpeg输出参数(仅ffmpeg下载引擎生效)
+        ffmpeg_output_args: [ '-movflags','faststart+frag_keyframe+empty_moov']
+        # 禁用下载速度慢时自动重启(仅ffmpeg下载引擎生效)
+        disable_lowspeed_interrupt: false
+        # streamlink 额外输入参数
+        # 可用参数列表请参考 https://streamlink.github.io/cli.html
+        # 一个典型的使用方法是添加一个--twitch-api-header参数，用于取消twitch直播流的广告
+        # 特别提醒，使用此方法传入参数会在日志文件中明文显示，如果需要共享日志文件请确保删除了敏感信息！
+        streamlink_extra_args: [
+          "--twitch-disable-ads",     # 去广告，去掉、跳过嵌入的广告流
+          "--twitch-disable-reruns",  # 如果该频道正在重放回放，不打开流
+        ]
+
+    # ============ 弹幕参数 ============
+    danmaku_args:
+      # 是否录制弹幕
+      enable: True
+      # 弹幕录制格式，只能选择ass
+      format: ass
+      # 弹幕流选项
+      stream_option:
+        # 用于获取抖音弹幕流的cookies，用于特殊情况下录制抖音弹幕(https://github.com/SmallPeaches/DanmakuRender/issues/258)
+        # 格式：'__ac_nonce=xxx; __ac_signature=xxx; sessionid=xxx'
+        # 特别提醒，使用此方法传入参数会在日志文件中明文显示，如果需要共享日志文件请确保删除了敏感信息！
+        # 推荐设置为cookies所在的json文件，这样cookies就不会明文显示，json文件应该为cookies字典：{'__ac_nonce': xxx, ...}
+        douyin_dm_cookies: ~
+      # 高级弹幕录制参数（请确保你明白这些参数的含义后再修改）
+      advanced_args:
+        # 弹幕延迟补偿(秒)，将弹幕强行提前
+        dm_delay_fixed: 6
+        # 弹幕超时自动重启（秒），超过一段时间无弹幕会自动重启弹幕录制，0表示关闭
+        dm_auto_restart: 300
+        # 额外弹幕流输入
+        # 部分主播可能同时在平台同时开播，可以用这个同时录制多个直播间的弹幕到一个视频
+        # 应该设置为一个列表（不包括原来录制的房间），例如：['https://live.bilibili.com/123456', 'https://live.bilibili.com/654321']
+        dm_extra_inputs: []
+        # 弹幕文件最小录制时间（秒），小于此录制时间的弹幕文件将被删除
+        # 此功能可用于删除因为录制错误导致的许多空弹幕文件
+        dm_file_min_time: 30
+
+      # —— 普通弹幕 ——
+      danmaku:
+        render:
+          # 是否渲染普通弹幕
+          enable: True
+          # 弹幕上下间距（行距），0-1表示视频高度的倍数，大于1表示像素
+          margin_h: 6
+          # 弹幕左右间距（即弹幕密度，越大越稀），-1表示允许叠加，0-1表示视频宽度的倍数，大于1表示像素
+          margin_w: 0.05
+          # 弹幕占屏幕高度的最大比例（屏幕上半部分有多少用来显示弹幕）
+          dmrate: 0.4
+          # 弹幕字体
+          font: Microsoft YaHei
+          # 弹幕字体大小
+          fontsize: 36
+          # 弹幕距离屏幕顶端的距离（像素）
+          dst: 20
+          # 单条弹幕持续时间（秒）
+          dmduration: 16
+          # 弹幕不透明度
+          opacity: 0.8
+          # 自适应弹幕大小（把设置的弹幕大小按1080P标准缩放）
+          auto_fontsize: True
+          # 弹幕描边颜色(6位十六进制)
+          outlinecolor: '000000'
+          # 弹幕描边宽度
+          outlinesize: 1.0
+          # 文本模板，使用方法请参考文档，留空(~)按原文显示
+          template: ~
+          # VIP 名单：可写 [uid,...] 或 {uid: 药丸色} 或 [[uid,色],...]，留空不启用
+          vip_lists: ~
+        filter:
+          # 关键字过滤，含任一关键字的弹幕被过滤，例如：[菜, fw]
+          keywords: ~
+          # 用户名过滤，用户名完全相同才过滤，例如：[虎牙小助手, TwitchBot]
+          username: ~
+          # 最大弹幕宽度，超过则过滤。带单位：'100%'=屏幕宽度的百分比(可>100%)、'1920px'=像素、'30char'=字符数；0或~=不限制
+          max_length: 0
+
+      # —— 礼物 ——
+      gift:
+        filter:
+          # 最小礼物价格（人民币元），低于此价格的礼物不渲染；~表示不按价格过滤
+          min_cny: ~
+        render:
+          # 是否渲染礼物框
+          enable: True
+          # 礼物框停留时长（秒）
+          duration: 10
+          # 最新一条礼物框的底边位置（屏幕高度比例，0~1），旧的向上堆叠
+          anchor_y_ratio: 0.88
+          # 礼物框第二行文案模板（第一行固定为用户名）
+          template: '送出{gift_name}({gift_price}{price_unit})x{gift_count}'
+          # 礼物框外观（颜色 #RRGGBB / 不透明度 0~1）
+          box:
+            top_bg: '#F0A8D4'
+            top_opacity: 0.7
+            bot_bg: '#F8C8E8'
+            bot_opacity: 0.7
+            name_color: '#000000'
+            cont_color: '#000000'
+            text_border_color: '#FFFFFF'
+        record:
+          # 是否把礼物记入营收统计(gifts.jsonl)
+          enable: False
+          # 营收榜统计前几名
+          rank_top_n: 3
+
+      # —— 醒目留言 SC ——
+      superchat:
+        render:
+          # 是否渲染 SC
+          enable: True
+          # 最新一条 SC 的底边位置（屏幕高度比例，0~1），旧 SC 向上堆叠
+          # 与礼物框 gift.render.anchor_y_ratio 分开，避免上下重叠
+          anchor_y_ratio: 0.93
+          # SC 框外观（背景/名字色由平台按价格档位决定，这里只控不透明度与描边）
+          top_opacity: 0.7
+          bottom_opacity: 0.3
+          name_border_width: 0
+          content_border_width: 1
+        record:
+          # 是否把 SC 记入营收统计
+          enable: False
+
+      # —— 上舰 / 开通会员 ——（与礼物共用右侧框样式）
+      member:
+        render:
+          # 是否渲染上舰框
+          enable: True
+          # 上舰框第二行文案模板（第一行固定为用户名）
+          template: '开通{member_name}({member_price}元)x{member_count}{member_unit}'
+        record:
+          # 是否把上舰记入营收统计
+          enable: False
 
   # 视频下载
   videos:

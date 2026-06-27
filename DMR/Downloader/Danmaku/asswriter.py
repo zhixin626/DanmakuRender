@@ -64,37 +64,35 @@ class AssWriter():
                  description:str,
                  width:int,
                  height:int,
-                 dst:int,
-                 dmrate:float,
-                 font:str,
-                 fontsize:int,
-                 margin_h:int,
-                 margin_w:int,
-                 dmduration:float,
-                 opacity:float,
-                 auto_fontsize:bool,
-                 outlinecolor:str,
-                 outlinesize:int,
-                 gift_dm_args:dict={},
+                 danmaku_render:dict=None,   # 普通弹幕渲染参数(margin/font/fontsize/...)
+                 gift_render:dict=None,      # 礼物 render(含 template)
+                 sc_render:dict=None,        # SC render(框不透明度/描边)
+                 member_render:dict=None,    # 上舰 render(含 template)
                  **kwargs) -> None:
-        self.gift_dm_args=gift_dm_args
+        r = danmaku_render or {}
+        self.sc_render = sc_render or {}   # add_slide_L 用（SC 框不透明度/描边）
+        # 礼物/上舰框的第二行文案不再用模板，直接取 decoder 写好的 gift.text（见 add_slide_R）
+
         self.description = description
         self.height = height
         self.width = width
-        self.dmrate = dmrate
-        if auto_fontsize:
+        self.dmrate = r.get('dmrate', 0.4)
+        fontsize = r.get('fontsize', 36)
+        if r.get('auto_fontsize', True):
             self.fontsize = int(height / 1080 * fontsize)
         else:
             self.fontsize = int(fontsize)
-        self.font = font
+        self.font = r.get('font', 'Microsoft YaHei')
 
+        margin_h = r.get('margin_h', 6)
+        margin_w = r.get('margin_w', 0.05)
         self.margin_h = margin_h if margin_h > 1 else margin_h * self.height
         self.margin_w = margin_w if margin_w > 1 else margin_w * self.width
-        self.dst = dst
-        self.dmduration = dmduration
-        self.opacity = hex_opacity(opacity)
-        self.outlinecolor = str(outlinecolor).zfill(6)
-        self.outlinesize = outlinesize
+        self.dst = r.get('dst', 20)
+        self.dmduration = r.get('dmduration', 16)
+        self.opacity = hex_opacity(r.get('opacity', 0.8))
+        self.outlinecolor = str(r.get('outlinecolor', '000000')).zfill(6)
+        self.outlinesize = r.get('outlinesize', 1.0)
         self.kwargs = kwargs
 
         self._lock = threading.Lock()
@@ -163,16 +161,13 @@ class AssWriter():
     def add_slide_R(self, gift):
         """礼物/大航海 → 右滑入·停留·离开。这里只写一条 GIFT_DATA 注释行，
         直播结束后由 GiftConverter 转成实际的右滑入停留动画。
-        格式: ; GIFT_DATA|时间|用户名|第二行内容（第二行内容在此按类型生成，弹幕类只存原始字段）"""
+        第二行文案直接用各平台 decoder 写好的 gift.text（上框是用户名，下框是这段 text）。
+        格式: ; GIFT_DATA|时间|用户名|第二行内容"""
         with self._lock:
             if not self._filename:
                 raise RuntimeError("ASS file is not open.")
-            if getattr(gift, 'dtype', 'gift') == 'member':
-                content = f"开通{gift.member_name}({gift.member_price}元)x{gift.member_count}{gift.member_unit}"
-            else:  # gift
-                content = f"送出{gift.gift_name}({gift.gift_price}{gift.price_unit})x{gift.gift_count}"
             uname = str(gift.uname or '').replace('|', '/')
-            content = str(content or '').replace('|', '/')
+            content = str(getattr(gift, 'text', '') or '').replace('|', '/')
             line = f'; GIFT_DATA|{gift.time}|{uname}|{content}\n'
             with open(self._filename, 'a', encoding='utf-8') as f:
                 f.write(line)
@@ -282,14 +277,14 @@ class AssWriter():
 
             # ===== 以下参数写入 SC_DATA，由 SCConverter 逐条读取，可自由修改 =====
             sc_duration          = super_chat.sc_duration
-            top_opacity          = 0.7              # 上框不透明度（0=全透明，1=不透明）
-            bottom_opacity       = 0.3              # 下框不透明度
-            name_border_width    = 0                # 名字描边宽度（0=不描边）
+            top_opacity          = self.sc_render.get('top_opacity', 0.7)        # 上框不透明度（0=全透明，1=不透明）
+            bottom_opacity       = self.sc_render.get('bottom_opacity', 0.3)     # 下框不透明度
+            name_border_width    = self.sc_render.get('name_border_width', 0)    # 名字描边宽度（0=不描边）
             name_border_color    = darken_for_border(super_chat.background_color)
-            content_border_width = 1                # 内容描边宽度（0=不描边）
+            content_border_width = self.sc_render.get('content_border_width', 1) # 内容描边宽度（0=不描边）
             content_border_color = darken_for_border(super_chat.background_bottom_color)
             # ===================================================================
-            content = super_chat.content or ''
+            content = super_chat.text or ''   # 统一：text 才是最终显示文本
             current_time = super_chat.time
             bg_color        = RGB2BGR(super_chat.background_color.lstrip('#'))
             bg_bottom_color = RGB2BGR(super_chat.background_bottom_color.lstrip('#'))

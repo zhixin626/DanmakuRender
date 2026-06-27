@@ -35,17 +35,9 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                  segment:int,
                  output_name=None,
                  taskname=None,
-                 danmaku=True,
-                 video=True,
-                 stop_wait_time=0,
-                 output_format='flv',
-                 stream_option=None,
-                 advanced_video_args:dict=None,
-                 advanced_dm_args:dict=None,
-                 engine='ffmpeg',
+                 stream_args:dict=None,
+                 danmaku_args:dict=None,
                  debug=False,
-                 gift_dm_args={},
-                 sc_dm_args={},
                  **kwargs
         ) -> None:
         self.taskname = taskname
@@ -53,22 +45,29 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.plat, self.rid = split_url(url)
         self.liveapi = LiveAPI(url)
         self.output_dir = output_dir or './' + self.taskname
-        self.output_format = output_format
         self.output_name = output_name
         self.send_queue = send_queue
         self.logger = logging.getLogger(__name__)
         self.kwargs = kwargs
         self.debug = debug
         self.segment = segment
-        self.danmaku = danmaku
-        self.video = video
-        self.stream_option = stream_option
-        self.stop_wait_time = stop_wait_time
-        self.engine = engine or 'auto'
-        self.advanced_video_args = advanced_video_args if advanced_video_args else {}
-        self.advanced_dm_args = advanced_dm_args if advanced_dm_args else {}
-        self.gift_dm_args=gift_dm_args
-        self.sc_dm_args=sc_dm_args
+
+        # —— 视频流录制参数（stream_args）——
+        stream_args = stream_args if stream_args else {}
+        self.stream_args = stream_args
+        self.video = stream_args.get('enable', True)
+        self.engine = stream_args.get('engine') or 'auto'
+        self.output_format = stream_args.get('output_format', 'flv')
+        self.stop_wait_time = stream_args.get('stop_wait_time', 0)
+        self.stream_option = stream_args.get('stream_option') or {}
+        self.advanced_video_args = stream_args.get('advanced_args') or {}
+
+        # —— 弹幕参数（danmaku_args）整体交给 DanmakuDownloader，这里只取本类要用的几项 ——
+        danmaku_args = danmaku_args if danmaku_args else {}
+        self.danmaku_args = danmaku_args
+        self.danmaku = danmaku_args.get('enable', True)
+        self.dm_format = danmaku_args.get('format', 'ass')
+
         self.stoped = True
         os.makedirs(self.output_dir,exist_ok=True)
     @property
@@ -135,7 +134,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             self.logger.error(f'视频 {newfile} 分段失败，将使用默认名称 {filename}.')
 
         if self.danmaku:
-            newdmfile = splitext(newfile)[0]+'.'+self.kwargs.get('dm_format', 'ass')
+            newdmfile = splitext(newfile)[0]+'.'+self.dm_format
             self.dmw.split(newdmfile)
         else:
             newdmfile = None
@@ -241,10 +240,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                                      description=description,
                                      width=self.width,
                                      height=self.height,
-                                     advanced_dm_args=self.advanced_dm_args,
-                                     gift_dm_args=self.gift_dm_args,   # 礼物文件路径/是否录/门槛都由 DanmakuDownloader 自己从这里(及 output 目录)取
-                                     sc_dm_args=self.sc_dm_args,             # SC 布局参数（如 anchor_y_ratio）
-                                     **self.kwargs)
+                                     danmaku_args=self.danmaku_args)   # 弹幕全部参数(格式/连接/高级/四类型)都在这里
 
             self.dmw.start(self_segment=not self.video)
 
@@ -372,6 +368,9 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
             if now_onair:
                 if state in (StreamState.OFFLINE, StreamState.STOPPING):
+                    if self.forced_live_pending:
+                        self.forced_live_pending = False
+                        return StreamState.LIVE_START      # 手动开播：无视录制时段，强制开录
                     if self.forced_replay_pending:
                         self.forced_replay_pending = False
                         return StreamState.REPLAY_START
@@ -414,6 +413,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self._cmd_force_live = False        # 回放状态下手动强制开始录制
         self.force_stop_trigger = False     # 人为强制下播触发标志
         self.forced_replay_pending = False  # 人为强制下播但主播实际未下播时，下一次开播应视为回放
+        self.forced_live_pending = False    # 回放状态下手动开播：下一次状态流转应无视录制时段，强制开录
         self.live_start_time = None         # 本场直播开播时间（LIVE_START 时赋值）。本文件内不读，
                                             # 由 webapi.get_tasks_data 经 getattr 取走算"本场时长"，勿误删
         # =============================================
@@ -453,6 +453,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 if sleep_or_force_live(stop_check_interval):
                     self._cmd_force_live = False
                     self.forced_replay_pending = False
+                    self.forced_live_pending = True   # 让下一轮 OFFLINE->LIVE_START 无视录制时段
                     self.logger.info(f"{self.taskname_disp}🔔收到指令：手动开始录制")
                     state = StreamState.OFFLINE  # 借助OFFLINE->LIVE_START的正常路径走一次livestart
                 continue

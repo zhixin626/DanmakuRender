@@ -10,7 +10,7 @@ from datetime import datetime
 from os.path import *
 from DMR.LiveAPI.danmaku import DanmakuClient
 from DMR.utils import replace_keywords
-from DMR.utils.danmaku import GiftDanmaku, BaseDanmaku, UserDanmaku
+from DMR.utils.danmaku import GiftDanmaku, BaseDanmaku
 from DMR.utils.gifts_utils import save_gift_to_jsonl
 from typing import Union
 from .sc_converter import SCConverter
@@ -23,52 +23,126 @@ class DanmakuDownloader():
                  url:str,
                  output:str,
                  segment:float,
-                 dm_format:str,
-                 dm_filter:dict=None,
-                 dm_template:dict=None,
-                 dm_stream_option:dict={},
-                 advanced_dm_args:dict={},
-                 gift_dm_args:dict={},
-                 sc_dm_args:dict={},
-                 vip_lists=None,
-                 uid_lists=None,   # 旧名，兼容保留（纯 uid 列表，无专属药丸色）
+                 danmaku_args:dict=None,   # 弹幕全部参数（格式/连接/高级/四类型 render·filter·record）
+                 description:str='',
+                 width:int=1920,
+                 height:int=1080,
                  **kwargs) -> None:
-
-        self.gift_dm_args = gift_dm_args
-        # 是否录礼物 / 礼物门槛：统一从 gift_dm_args 取（单一来源，不再单独传参）
-        self.enable_gift_recorder = (gift_dm_args or {}).get('gift_recorder', False)
-        self.gift_minimum_cny = (gift_dm_args or {}).get('gift_min_cny', None)   # None=不过滤
-        self.sc_dm_args = sc_dm_args
-        # 礼物落盘路径：与弹幕同目录的 gifts.jsonl（不再由外部传入）
-        self.gifts_file_path = os.path.join(os.path.dirname(output), "gifts.jsonl")
+        da = danmaku_args or {}
+        self.danmaku_args = da
         self.stoped = False
-
         self.logger = logging.getLogger(__name__)
         self.url = url
         self.output = output
         self.segment = segment
-        self.dm_format = dm_format
-        self.dm_stream_option = dm_stream_option
-        self.advanced_dm_args = advanced_dm_args
-        self.dm_template = dm_template if dm_template else {}
-        self.dm_delay_fixed = self.advanced_dm_args.get('dm_delay_fixed', 6)
-        self.dm_auto_restart = self.advanced_dm_args.get('dm_auto_restart', 300)
-        self.dm_extra_inputs = self.advanced_dm_args.get('dm_extra_inputs', []) # dm_extra_inputs是个list！
-        self.dm_file_min_time = self.advanced_dm_args.get('dm_file_min_time', 10)
+        self.dm_format = da.get('format', 'ass')
+        self.dm_stream_option = da.get('stream_option') or {}
 
-        self.dm_filter = dm_filter.copy() if dm_filter else {}
-        # vip_lists 归一为 {uid(str): pill_color(str或None)}。
-        # 支持三种写法：dict{uid:color} / [uid,...] / [{uid:..,pill_color:..}, [uid,color], ...]
-        # pill_color 为 None 表示该 VIP 的药丸用弹幕自身颜色。uid_lists（旧）并入，颜色一律 None。
+        adv = da.get('advanced_args') or {}
+        self.dm_delay_fixed   = adv.get('dm_delay_fixed', 6)
+        self.dm_auto_restart  = adv.get('dm_auto_restart', 300)
+        self.dm_extra_inputs  = adv.get('dm_extra_inputs', [])   # 是个 list！
+        self.dm_file_min_time = adv.get('dm_file_min_time', 10)
+
+        # —— 四类型配置（普通弹幕 / 礼物 / SC / 上舰）——
+        dan    = da.get('danmaku') or {}
+        gift   = da.get('gift') or {}
+        sc     = da.get('superchat') or {}
+        member = da.get('member') or {}
+        self._dan_render = dan.get('render') or {}
+        self._dan_filter = dan.get('filter') or {}
+        self._gift   = gift
+        self._sc     = sc
+        self._member = member
+
+        # 渲染开关（dtype -> 是否渲染）。未配置的类型(如 entry/other)一律不渲染。
+        self.render_enable = {
+            'danmaku':   self._dan_render.get('enable', True),
+            'gift':      (gift.get('render')   or {}).get('enable', True),
+            'superchat': (sc.get('render')     or {}).get('enable', True),
+            'member':    (member.get('render') or {}).get('enable', True),
+        }
+        # 记录开关（只有 gift/superchat/member 进营收统计）
+        self.record_enable = {
+            'gift':      (gift.get('record')   or {}).get('enable', False),
+            'superchat': (sc.get('record')     or {}).get('enable', False),
+            'member':    (member.get('record') or {}).get('enable', False),
+        }
+        # 礼物价格门槛（None=不按价格过滤）
+        self.gift_min_cny = (gift.get('filter') or {}).get('min_cny', None)
+        # 礼物落盘路径：与弹幕同目录的 gifts.jsonl
+        self.gifts_file_path = os.path.join(os.path.dirname(output), "gifts.jsonl")
+
+        # 普通弹幕过滤：关键词/用户名 编译为正则；最大宽度解析为 (模式, 值)
+        self.dm_keywords    = self._compile_patterns(self._dan_filter.get('keywords'), '弹幕屏蔽词')
+        self.dm_usernames   = self._compile_patterns(self._dan_filter.get('username'), '用户屏蔽')
+        self.max_length_spec = self._parse_max_length(self._dan_filter.get('max_length'))
+        # 普通弹幕文本模板（礼物/上舰的模板在 AssWriter.add_slide_R 内处理）
+        self.dm_template = self._dan_render.get('template') or None
+        # VIP 名单 -> {uid(str): 药丸色(str或None)}
+        self.vip_map = self._build_vip_map(self._dan_render.get('vip_lists'))
+
+        self.kwargs = kwargs
+        self.part = 0
+
+        if platform.system() == 'Windows':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+        if self.dm_format == 'ass':
+            from .asswriter import AssWriter
+            self.dmwriter = AssWriter(
+                description=description, width=width, height=height,
+                danmaku_render = self._dan_render,
+                gift_render    = gift.get('render')   or {},
+                sc_render      = sc.get('render')     or {},
+                member_render  = member.get('render') or {},
+            )
+        else:
+            raise NotImplementedError(f"unsupported danmaku format {self.dm_format}")
+
+    def _compile_patterns(self, raw, label):
+        """关键词/用户名过滤项 -> 编译后的正则列表；非法配置告警并返回空列表。"""
+        try:
+            if not raw:
+                return []
+            if isinstance(raw, str):
+                raw = [raw]
+            elif not isinstance(raw, list):
+                raise ValueError('必须是 list 或 str')
+            return [re.compile(str(x)) for x in raw]
+        except Exception as e:
+            self.logger.warning(f'{label}{raw}设置错误:{e}，此功能将不会生效.')
+            return []
+
+    def _parse_max_length(self, raw):
+        """max_length -> (模式, 值)。'100%'→('ratio',1.0)、'1920px'→('px',1920)、
+        '30char'→('char',30)、0/~→('off',0)。格式不对则告警并关闭(不静默兜底)。"""
+        if raw is None or raw == 0 or str(raw).strip() in ('0', ''):
+            return ('off', 0)
+        s = str(raw).strip().lower()
+        try:
+            if s.endswith('%'):
+                return ('ratio', float(s[:-1]) / 100.0)
+            if s.endswith('px'):
+                return ('px', float(s[:-2]))
+            if s.endswith('char'):
+                return ('char', int(float(s[:-4])))
+        except Exception:
+            pass
+        self.logger.warning(f"max_length '{raw}' 格式不对（应为 100% / 1920px / 30char / 0），过滤已关闭。")
+        return ('off', 0)
+
+    def _build_vip_map(self, vip_lists):
+        """vip_lists 归一为 {uid(str): pill_color(str或None)}。
+        支持 dict{uid:color} / [uid,...] / [{uid:..,pill_color:..}, [uid,color], ...]。
+        pill_color 为 None 表示该 VIP 的药丸用弹幕自身颜色。"""
         vip_map = {}
-        for u in (uid_lists or []):
-            vip_map[str(u)] = None
-        _vl = vip_lists
-        if isinstance(_vl, dict):
-            for u, c in _vl.items():
+        vl = vip_lists
+        if isinstance(vl, dict):
+            for u, c in vl.items():
                 vip_map[str(u)] = (str(c) if c else None)
-        elif isinstance(_vl, (list, tuple)):
-            for it in _vl:
+        elif isinstance(vl, (list, tuple)):
+            for it in vl:
                 if isinstance(it, dict):
                     if it.get('uid') is not None:
                         vip_map[str(it['uid'])] = (str(it.get('pill_color')) if it.get('pill_color') else None)
@@ -76,52 +150,7 @@ class DanmakuDownloader():
                     vip_map[str(it[0])] = (str(it[1]) if len(it) > 1 and it[1] else None)
                 else:
                     vip_map[str(it)] = None
-        self.vip_map = vip_map
-
-
-        try:
-            keywords_filter = dm_filter['keywords']
-            if not keywords_filter:
-                keywords_filter = []
-            elif isinstance(keywords_filter, str):
-                keywords_filter = [keywords_filter]
-            elif isinstance(keywords_filter, list):
-                pass
-            else:
-                raise ValueError('dm_filter.keywords must be a list or str.')
-            keywords_filter = [re.compile(str(x)) for x in keywords_filter]
-            self.dm_filter['keywords'] = keywords_filter
-        except Exception as e:
-            self.logger.warning(f'弹幕屏蔽词{keywords_filter}设置错误:{e}，此功能将不会生效.')
-            self.dm_filter['keywords'] = []
-        
-        try:
-            username_filter = dm_filter['username']
-            if not username_filter:
-                username_filter = []
-            elif isinstance(username_filter, str):
-                username_filter = [username_filter]
-            elif isinstance(username_filter, list):
-                pass
-            else:
-                raise ValueError('dm_filter.username must be a list or str.')
-            username_filter = [re.compile(str(x)) for x in username_filter]
-            self.dm_filter['username'] = username_filter
-        except Exception as e:
-            self.logger.warning(f'用户屏蔽{username_filter}设置错误:{e}，此功能将不会生效.')
-            self.dm_filter['username'] = []
-        
-        self.kwargs = kwargs
-        self.part = 0
-
-        if platform.system() == 'Windows':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
-        if dm_format == 'ass':
-            from .asswriter import AssWriter
-            self.dmwriter = AssWriter(gift_dm_args=self.gift_dm_args,**self.kwargs)
-        else:
-            raise NotImplementedError(f"unsupported danmaku format {dm_format}")
+        return vip_map
 
     def time_fix(self, time_error):
         self.part_start_time -= time_error
@@ -159,58 +188,89 @@ class DanmakuDownloader():
                 self.logger.error(f'弹幕 {old_dm_file} 分段失败: {e}.')
                 filename = None
 
-        # 只有启用了 superchat 录制才做 SC 动态转换
+        # 分段完成后，把占位行转成动画：按各类型 render.enable 决定做不做
         if filename:
-            dm_type = self.dm_filter.get('dm_type') or ''
-            if 'superchat' in dm_type:
-                self._convert_sc_dynamic(filename)
-            if 'gift' in dm_type or 'member' in dm_type:
-                self._convert_gift_dynamic(filename)
+            if self.render_enable.get('superchat'):
+                self._add_sc_to_ass(filename)
+            if self.render_enable.get('gift') or self.render_enable.get('member'):
+                self._add_gift_to_ass(filename)
 
-    def dm_available(self, dm:BaseDanmaku) -> bool:
-
-        # 未识别的 bare BaseDanmaku 没有 text/uname(只有 UserDanmaku/Gift 等才有)，用 getattr 兜底——
-        # 取不到即判为不可用，自然把未识别/系统消息过滤掉，不渲染。
-        if dm.time < 0 \
-                or not getattr(dm, 'text', None) \
-                or not getattr(dm, 'uname', None) \
-                or dm.dtype in ['other', 'others'] \
-                or not dm.dtype:
+    def danmaku_available(self, dm:BaseDanmaku) -> bool:
+        """普通弹幕过滤：时间合法、有文本/发送者，且不命中关键词/用户名。
+        （最大长度不在这里过滤，改为在装饰后截断，见 _truncate_max_length）"""
+        if dm.time < 0 or not getattr(dm, 'text', None) or not getattr(dm, 'uname', None):
             return False
-
-        dm_type = self.dm_filter.get('dm_type') or 'danmaku'
-
-        if dm_type != 'all':
-            if dm.dtype not in dm_type:
-                return False
-
-        for keyword in self.dm_filter['keywords']:
+        for keyword in self.dm_keywords:
             if keyword.search(dm.text):
                 return False
-
-        for username in self.dm_filter['username']:
+        for username in self.dm_usernames:
             if username.fullmatch(dm.uname):
                 return False
-            
-        if max_length := self.dm_filter.get('max_length'):
-            if len(dm.text) > max_length:
-                return False
-
         return True
 
-    def gift_dm_available(self,dm:GiftDanmaku):
-        gift_min = self.gift_minimum_cny
-        #说明用户没有配置这个参数，表示不进行价格过滤
-        if gift_min is None:
+    def _truncate_max_length(self, text:str) -> str:
+        """超过 max_length 的弹幕不丢弃，截到「不超上限的最长前缀」。char 直接切片；
+        px/ratio 是像素宽（非线性），用测宽器二分找最长前缀。"""
+        mode, val = self.max_length_spec
+        if mode == 'off' or not text:
+            return text
+        if mode == 'char':
+            return text[:int(val)]
+        limit_px = val if mode == 'px' else val * self.dmwriter.width   # ratio: 屏宽的倍数
+        if self.dmwriter._get_length(text) <= limit_px:
+            return text
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self.dmwriter._get_length(text[:mid]) <= limit_px:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo]
+
+    def gift_available(self, dm:GiftDanmaku) -> bool:
+        """礼物按价格过滤：未设门槛 / 无人民币价 一律放行；否则价 >= 门槛才放行。"""
+        if self.gift_min_cny is None:
             return True
-        # 如果礼物没有 price_cny（人民币价）无法过滤，直接 True
         if getattr(dm, "price_cny", None) is None:
             return True
+        return float(dm.price_cny) >= float(self.gift_min_cny)
 
-        if float(dm.price_cny) < float(gift_min):
+    def process_danmaku(self, dm:BaseDanmaku) -> bool:
+        """消费一条弹幕：记账 → 渲染开关 → 过滤 → 文本装饰 → 写入 ASS。
+        返回是否成功写入（调用方据此刷新"最近收到弹幕"的时间戳）。"""
+        # 相对时间：相对本段起点，并补偿固定延迟
+        dm.time = dm.timestamp - self.part_start_time - self.dm_delay_fixed
+
+        # 记账：按类型 record.enable，独立于渲染（被过滤掉也照记营收）
+        if self.record_enable.get(dm.dtype):
+            save_gift_to_jsonl(dm, self.gifts_file_path)
+
+        # 渲染开关：未配置/关闭的类型(含 entry、未识别消息)不渲染
+        if not self.render_enable.get(dm.dtype):
             return False
-        else:
-            return True
+
+        # 过滤：普通弹幕走内容过滤；礼物走价格过滤；SC/上舰不过滤
+        if dm.dtype == 'danmaku':
+            if not self.danmaku_available(dm):
+                return False
+        elif isinstance(dm, GiftDanmaku):
+            if not self.gift_available(dm):
+                return False
+
+        # 文本装饰：普通弹幕套模板 + VIP 改写打标（礼物/上舰文案模板在 AssWriter.add_slide_R 内）
+        pill_color = None
+        if dm.dtype == 'danmaku':
+            if self.dm_template:
+                dm.text = replace_keywords(self.dm_template, dm)
+            if self.vip_map and (uid := str(getattr(dm, "uid", ""))) in self.vip_map:
+                dm.text = f"{dm.uname}:{dm.content}"
+                dm.is_vip = True
+                pill_color = self.vip_map[uid]   # None=用弹幕自身颜色
+            # 超长截断（对最终文本，含模板/VIP 改写后的结果）
+            dm.text = self._truncate_max_length(dm.text)
+
+        return self.dmwriter.add(dm, pill_color=pill_color)
 
     def start_dmc(self):
         async def danmu_monitor(url:str=None): # 监督员
@@ -234,54 +294,13 @@ class DanmakuDownloader():
             retry = 0
 
             while not self.stoped: #这是 弹幕监控调度器（做ABC三件事）
-                # ✔ A. 消费弹幕
+                # ✔ A. 消费弹幕（各平台 decoder 已统一产出 BaseDanmaku 及其子类）
                 try:
                     dm = q.get_nowait() # 立即取队列元素，如果队列空就抛异常
-                    if not isinstance(dm, BaseDanmaku):   # 队列里来的若是原始 dict 才转换；各类弹幕都已是 BaseDanmaku
-                        dm = UserDanmaku(
-                            dtype=dm.get('msg_type', 'danmaku'),
-                            uname=dm.get('name', ''),
-                            uid=dm.get('uid'),
-                            content=dm.get('content', ''),
-                            text=dm.get('text', dm.get('content', '')),
-                            timestamp=dm.get('timestamp', datetime.now().timestamp()),
-                            color=dm.get('color', 'ffffff'),
-                            raw=dm,
-                        )
-                    # 将绝对时间转换为相对时间
-                    dm.time = dm.timestamp - self.part_start_time - self.dm_delay_fixed
-                    if self.enable_gift_recorder and dm.dtype in ("gift", "superchat", "member"):
-                        save_gift_to_jsonl(dm, self.gifts_file_path)
-
-                    # 载入弹幕模板
-                    if dm_templ := self.dm_template.get(dm.dtype):
-                        dm.text = replace_keywords(dm_templ, dm)
-
-                    # vip弹幕
-                    vip_pill_color = None
-                    if self.vip_map and (uid := str(getattr(dm, "uid", ""))) in self.vip_map:
-                        # 这里是为了给asswriter的get_length能获取到正确的长度
-                        # vip弹幕最终的格式由asswriter决定，默认是下面这样
-                        dm.text=f"{dm.uname}:{dm.content}"
-                        dm.is_vip=True
-                        vip_pill_color = self.vip_map[uid]   # None=用弹幕自身颜色
-
-                    if not self.dm_available(dm):
-                        continue
-                    # print(dm.text)
-                    if isinstance(dm, GiftDanmaku):
-                        if not self.gift_dm_available(dm):
-                            # print(f"过滤掉：{dm.text}")
-                            continue
-
-                    retry = 0
-                    if self.dmwriter.add(dm, pill_color=vip_pill_color):
+                    retry = 0           # 取到弹幕说明连接正常，重置重连计数
+                    if self.process_danmaku(dm):
                         last_dm_time = datetime.now().timestamp()
-                    else:
-                        # print(f"未写入{dm.text}")
-                        pass
                     continue
-
                 except asyncio.QueueEmpty:
                     pass
                 
@@ -342,7 +361,7 @@ class DanmakuDownloader():
                 self.logger.debug(e)
         return True
 
-    def _convert_sc_dynamic(self, ass_file: str):
+    def _add_sc_to_ass(self, ass_file: str):
         """
         将 ASS 文件中的 SC 预览行替换为动态动画版本。
         流程：先转换到临时文件 → 原文件移入回收站 → 临时文件重命名为原文件名。
@@ -350,7 +369,7 @@ class DanmakuDownloader():
         """
         tmp = ass_file + '.tmp'
         try:
-            sc = self.sc_dm_args or {}
+            sc = self._sc.get('render') or {}
             sc_count = SCConverter(
                 screen_width=self.dmwriter.width,
                 screen_height=self.dmwriter.height,
@@ -364,18 +383,23 @@ class DanmakuDownloader():
             if os.path.exists(tmp):
                 os.remove(tmp)           # 清理残留临时文件
 
-    def _convert_gift_dynamic(self, ass_file: str):
-        """将 ASS 文件中的 GIFT_DATA 注释行替换为动态礼物动画（右侧滑入）。"""
-        g = self.gift_dm_args or {}
-        if not g.get('gift_box_enable', True):
-            return   # 未开启礼物框：GIFT_DATA 注释行保留为注释（不渲染），不做转换
+    def _add_gift_to_ass(self, ass_file: str):
+        """将 ASS 文件中的 GIFT_DATA 注释行替换为动态礼物动画（右侧滑入）。
+        礼物/上舰是否渲染由上游 render.enable 决定，这里不再判断开关。"""
+        g   = self._gift.get('render') or {}
+        box = g.get('box') or {}
+        # box 里只挑用户填了的项传给 GiftConverter，其余走 GiftConverter 默认值
+        box_kwargs = {k: box[k] for k in (
+            'top_bg', 'top_opacity', 'bot_bg', 'bot_opacity',
+            'name_color', 'cont_color', 'text_border_color') if k in box and box[k] is not None}
         tmp = ass_file + '.gift.tmp'
         try:
             n = GiftConverter(
                 screen_width=self.dmwriter.width,
                 screen_height=self.dmwriter.height,
-                duration=g.get('gift_duration', 10),
-                anchor_y_ratio=g.get('anchor_y_ratio', 0.88),   # 由 gift_dm_args 传入，默认 0.88
+                duration=g.get('duration', 10),
+                anchor_y_ratio=g.get('anchor_y_ratio', 0.88),
+                **box_kwargs,
             ).convert(ass_file, tmp)
             send2trash(ass_file)
             os.rename(tmp, ass_file)
