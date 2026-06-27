@@ -14,31 +14,23 @@ def save_gift_to_jsonl(dm, file_path: str):
     if directory:
         os.makedirs(directory, exist_ok=True)
 
+    # 弹幕类是纯数据，统计的"名字/数量"在这里按类型归一（醒目留言/舰长/礼物各取各的字段）
     dtype = getattr(dm, 'dtype', 'gift')
     if dtype == 'superchat':
-        gift_data = {
-            "dtype"          : "superchat",
-            "uname"          : getattr(dm, 'uname', '未知用户'),
-            "gift_name"      : "醒目留言",
-            "count"          : 1,
-            "total_price_cny": getattr(dm, 'price_cny', 0.0),
-        }
+        gift_name, count = "醒目留言", 1
     elif dtype == 'member':
-        gift_data = {
-            "dtype"          : "member",
-            "uname"          : getattr(dm, 'uname', '未知用户'),
-            "gift_name"      : getattr(dm, 'member_name', '舰长'),
-            "count"          : getattr(dm, 'member_time', 1),
-            "total_price_cny": getattr(dm, 'price', 0.0),
-        }
+        gift_name = getattr(dm, 'member_name', '舰长')
+        count     = getattr(dm, 'member_count', 1)
     else:
-        gift_data = {
-            "dtype"          : "gift",
-            "uname"          : getattr(dm, 'uname', '未知用户'),
-            "gift_name"      : getattr(dm, 'gift_name', '未知礼物'),
-            "count"          : getattr(dm, 'gift_count', 1),
-            "total_price_cny": getattr(dm, 'total_price_cny', 0.0),
-        }
+        gift_name = getattr(dm, 'gift_name', '未知礼物')
+        count     = getattr(dm, 'gift_count', 1)
+    gift_data = {
+        "dtype"          : dtype,
+        "uname"          : getattr(dm, 'uname', '未知用户'),
+        "gift_name"      : gift_name,
+        "count"          : count,
+        "total_price_cny": getattr(dm, 'price_cny', 0.0),
+    }
 
     # 3. 写入文件 (Append mode)
     # open会创建file_path如果不存在

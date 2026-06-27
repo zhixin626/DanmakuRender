@@ -2,7 +2,7 @@
 SCConverter：将 AssWriter 实时写入的 ASS 文件转换为带动态动画的最终版本。
 
 工作流程：
-  AssWriter.add_super_chat()
+  AssWriter.add_slide_L()
       ↓ 实时写入（直播中）
   raw.ass（含 SC_DATA 注释行 + 预览 Dialogue 行）
       ↓ 直播结束后调用 SCConverter.convert()
@@ -125,7 +125,7 @@ class SCConverter:
     # ------------------------------------------------------------------
 
     def _is_preview_line(self, line: str) -> bool:
-        """判断是否是 add_super_chat 写入的预览 Dialogue 行。"""
+        """判断是否是 add_slide_L 写入的预览 Dialogue 行。"""
         if not line.startswith(_PREVIEW_PREFIX):
             return False
         # Dialogue 格式: "Dialogue: layer,t0,t1,style,..."

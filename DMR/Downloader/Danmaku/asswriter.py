@@ -151,22 +151,28 @@ class AssWriter():
                 f.write(info+'\n')
 
     def add(self, danmu, **kwargs):
+        # 按"最终显示效果"分发：R2L=右进左出滚动；slide_L=左滑入停留；slide_R=右滑入停留
         if isinstance(danmu, SuperChatDanmaku):
-            return self.add_super_chat(danmu)
+            return self.add_slide_L(danmu)                    # SC：左滑入·停留·退出
         elif isinstance(danmu, (GiftDanmaku, MemberDanmaku)):
-            return self.add_gift(danmu)
-        elif isinstance(danmu, SimpleDanmaku):
-            return self.add_simple(danmu, **kwargs)
-        return False
+            return self.add_slide_R(danmu)                    # 礼物/大航海：右滑入·停留·离开
+        elif isinstance(danmu, (UserDanmaku, EntryDanmaku)):
+            return self.add_R2L(danmu, **kwargs)             # 普通/表情/进场：右进左出滚动
+        return False   # 无发送者的系统/未知消息(bare BaseDanmaku)不渲染成弹幕
 
-    def add_gift(self, gift):
-        """写入一条礼物/会员的 GIFT_DATA 注释行，供直播结束后 GiftConverter 解析。
-        格式: ; GIFT_DATA|时间|用户名|第二行内容（gift_coverter_content）"""
+    def add_slide_R(self, gift):
+        """礼物/大航海 → 右滑入·停留·离开。这里只写一条 GIFT_DATA 注释行，
+        直播结束后由 GiftConverter 转成实际的右滑入停留动画。
+        格式: ; GIFT_DATA|时间|用户名|第二行内容（第二行内容在此按类型生成，弹幕类只存原始字段）"""
         with self._lock:
             if not self._filename:
                 raise RuntimeError("ASS file is not open.")
+            if getattr(gift, 'dtype', 'gift') == 'member':
+                content = f"开通{gift.member_name}({gift.member_price}元)x{gift.member_count}{gift.member_unit}"
+            else:  # gift
+                content = f"送出{gift.gift_name}({gift.gift_price}{gift.price_unit})x{gift.gift_count}"
             uname = str(gift.uname or '').replace('|', '/')
-            content = str(getattr(gift, 'gift_coverter_content', '') or '').replace('|', '/')
+            content = str(content or '').replace('|', '/')
             line = f'; GIFT_DATA|{gift.time}|{uname}|{content}\n'
             with open(self._filename, 'a', encoding='utf-8') as f:
                 f.write(line)
@@ -182,8 +188,8 @@ class AssWriter():
                               color=color, border=border, opacity=self.opacity,
                               layer=0, effect='pilldraw')
 
-    def add_simple(self,
-                danmu:SimpleDanmaku,
+    def add_R2L(self,
+                danmu:UserDanmaku,    # 右进左出的滚动弹幕(进场 EntryDanmaku 也走这里，字段同构)
                 calc_collision=True,
                 add_pill=False,
                 pill_color=None,
@@ -198,7 +204,7 @@ class AssWriter():
         pill_color/pad/border: 药丸样式——描边色 RRGGBB(None=用弹幕自身颜色 danmu.color)、上下 buff(像素)、描边粗细。
         """
         # VIP 弹幕自动套药丸;任意弹幕也可经 add_pill=True 套(纯文字也行)。
-        use_pill = bool(danmu.is_vip) or bool(add_pill)
+        use_pill = bool(getattr(danmu, 'is_vip', False)) or bool(add_pill)   # is_vip 由 downloader 按需挂上，可能没有
         # 药丸颜色：传了就用传入色，否则与弹幕文字同色。
         eff_pill_color = pill_color if pill_color else danmu.color
 
@@ -220,7 +226,7 @@ class AssWriter():
         tid, max_dist = 0, -1e5 # -100000.0
 
         # 计算给出弹幕到指定弹幕的距离(用各自的"渲染宽度",含药丸留白)
-        def tail_dist(tail_dm:SimpleDanmaku, tic:float):
+        def tail_dist(tail_dm:BaseDanmaku, tic:float):
             if not tail_dm:
                 return 1e5
             dm_length = getattr(tail_dm, '_render_width', None)
@@ -264,9 +270,9 @@ class AssWriter():
 
         return True
 
-    def add_super_chat(self, super_chat: SuperChatDanmaku):
-        """
-        写入一条 SuperChat 的 SC_DATA 注释行，供直播结束后 SCConverter 解析。
+    def add_slide_L(self, super_chat: SuperChatDanmaku):
+        """SC → 左滑入·停留·退出。这里只写一条 SC_DATA 注释行，
+        直播结束后由 SCConverter 转成实际的左滑入停留动画。
         格式: ; SC_DATA|时间|用户名|价格|单位|内容|上框色|下框色|名字色|内容色
                |sc时长|上框透明度|下框透明度|名字描边宽度|名字描边色|内容描边宽度|内容描边色
         """

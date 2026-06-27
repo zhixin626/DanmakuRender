@@ -9,8 +9,8 @@ import platform
 from datetime import datetime
 from os.path import *
 from DMR.LiveAPI.danmaku import DanmakuClient
-from DMR.utils import SimpleDanmaku, replace_keywords
-from DMR.utils.danmaku import GiftDanmaku
+from DMR.utils import replace_keywords
+from DMR.utils.danmaku import GiftDanmaku, BaseDanmaku, UserDanmaku
 from DMR.utils.gifts_utils import save_gift_to_jsonl
 from typing import Union
 from .sc_converter import SCConverter
@@ -167,7 +167,7 @@ class DanmakuDownloader():
             if 'gift' in dm_type or 'member' in dm_type:
                 self._convert_gift_dynamic(filename)
 
-    def dm_available(self, dm:SimpleDanmaku) -> bool:
+    def dm_available(self, dm:BaseDanmaku) -> bool:
 
         if dm.time < 0 \
                 or not dm.text \
@@ -201,17 +201,13 @@ class DanmakuDownloader():
         #说明用户没有配置这个参数，表示不进行价格过滤
         if gift_min is None:
             return True
-        # 如果礼物没有 total_price_cny
-        # 无法过滤，直接True
-        if getattr(dm, "total_price_cny", None) is None:
-            # print("total_price_cny is None")
+        # 如果礼物没有 price_cny（人民币价）无法过滤，直接 True
+        if getattr(dm, "price_cny", None) is None:
             return True
 
-        if float(dm.total_price_cny) < float(gift_min):
-            # print("dm.total_price_cny < float(gift_min)")
+        if float(dm.price_cny) < float(gift_min):
             return False
         else:
-            # print("dm.total_price_cny > float(gift_min)")
             return True
 
     def start_dmc(self):
@@ -239,13 +235,16 @@ class DanmakuDownloader():
                 # ✔ A. 消费弹幕
                 try:
                     dm = q.get_nowait() # 立即取队列元素，如果队列空就抛异常
-                    if not isinstance(dm, SimpleDanmaku):
-                        dm = SimpleDanmaku(
-                            dtype=dm.get('msg_type', 'other'),
+                    if not isinstance(dm, BaseDanmaku):   # 队列里来的若是原始 dict 才转换；各类弹幕都已是 BaseDanmaku
+                        dm = UserDanmaku(
+                            dtype=dm.get('msg_type', 'danmaku'),
                             uname=dm.get('name', ''),
+                            uid=dm.get('uid'),
                             content=dm.get('content', ''),
+                            text=dm.get('text', dm.get('content', '')),
                             timestamp=dm.get('timestamp', datetime.now().timestamp()),
                             color=dm.get('color', 'ffffff'),
+                            raw=dm,
                         )
                     # 将绝对时间转换为相对时间
                     dm.time = dm.timestamp - self.part_start_time - self.dm_delay_fixed

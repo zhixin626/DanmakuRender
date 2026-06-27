@@ -34,7 +34,7 @@ os.environ['https_proxy'] = ''
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from DMR.LiveAPI.danmaku import DanmakuClient
-from DMR.utils import SimpleDanmaku
+from DMR.utils import UserDanmaku, BaseDanmaku
 
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(levelname)s %(message)s')
 
@@ -61,17 +61,20 @@ def auto_cookie(platform):
     return cands[0] if cands else None
 
 def to_danmaku(dm):
-    """把队列里的 dict 统一转成 SimpleDanmaku"""
-    if isinstance(dm, SimpleDanmaku):
+    """把队列里的 dict 统一转成弹幕对象（现各 decoder 已直接产出对象，此 dict 路径仅兜底）"""
+    if isinstance(dm, BaseDanmaku):   # 已是弹幕对象(任意类型)直接用；只有原始 dict 才往下转换
         return dm
     if isinstance(dm, dict):
-        return SimpleDanmaku(
-            dtype=dm.get('msg_type') or dm.get('dtype') or 'other',
+        content = dm.get('content', '')
+        return UserDanmaku(
+            dtype=dm.get('msg_type') or dm.get('dtype') or 'danmaku',
             uname=dm.get('name') or dm.get('uname') or '',
-            content=dm.get('content', ''),
-            timestamp=dm.get('timestamp'),
-            color=dm.get('color', 'ffffff'),
             uid=dm.get('uid'),
+            content=content,
+            text=dm.get('text', content),
+            timestamp=dm.get('timestamp', datetime.now().timestamp()),
+            color=dm.get('color', 'ffffff'),
+            raw=dm,
         )
     return None
 
