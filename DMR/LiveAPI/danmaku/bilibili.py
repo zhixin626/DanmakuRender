@@ -2,7 +2,7 @@ from datetime import datetime
 import json, re, select, random, traceback
 import asyncio, aiohttp, zlib, brotli
 from struct import pack, unpack
-from DMR.utils import random_user_agent, SuperChatDanmaku, SimpleDanmaku, GiftDanmaku, MemberDanmaku
+from DMR.utils import random_user_agent, BaseDanmaku, UserDanmaku, SuperChatDanmaku, GiftDanmaku, MemberDanmaku, EntryDanmaku
 from DMR.LiveAPI.bilivideo_utils import encode_wbi, getWbiKeys
 from .DMAPI import DMAPI
 from DMR.utils.bark_notifier  import bark_notify
@@ -192,191 +192,89 @@ class Bilibili(DMAPI):
 
         dm_list = decode_packet(data)
 
-        for i, dm in enumerate(dm_list):
+        now = datetime.now().timestamp()
+        for dm in dm_list:
+            if dm.get('type') != 5:          # 非业务包(心跳回包等)直接跳过
+                continue
             try:
-                msg = {}
-                if dm.get('type') == 5:
-                    j = json.loads(dm.get('body'))
+                j = json.loads(dm.get('body'))
+            except Exception:
+                continue
+            cmd = j.get('cmd', '')
+            data = j.get('data', {}) or {}
+            # 每个分支只做一件事：把原始 j 解析成 DMR 的弹幕类型；理解不了的统一塞 BaseDanmaku.raw
+            try:
+                if cmd == 'DANMU_MSG':                         # 普通弹幕
+                    info = j['info']
+                    color = f"{info[0][3]:06x}"
+                    dtype, content, text = 'danmaku', info[1], info[1]
+                    emo = info[0][13] if len(info[0]) > 13 else None   # 表情弹幕的表情 dict
+                    if isinstance(emo, dict) and emo.get('url'):
+                        content = json.dumps({'url': emo['url'], 'desc': info[1]}, ensure_ascii=False)
+                        text, dtype = f'[{info[1]}]', 'emoticon'
+                    msgs.append(UserDanmaku(
+                        dtype=dtype, uname=info[2][1], uid=info[2][0],
+                        content=content, text=text, color=color,
+                        timestamp=info[0][4] / 1000, raw=j))
 
-                    # print(j.get('cmd')) #debug
+                elif cmd == 'SUPER_CHAT_MESSAGE':              # 醒目留言 SC
+                    base = data.get('uinfo', {}).get('base', {})
+                    text = data.get('message', '')
+                    price_cny = data.get('price', 0)           # 真实元价格
+                    msgs.append(SuperChatDanmaku(
+                        uname=base.get('name', ''), uid=data.get('uid', ''),
+                        content=text, text=text,
+                        price=price_cny * 10, price_unit='电池', price_cny=price_cny,
+                        sc_duration=max(30, min(180, data.get('time', 60))),
+                        background_color=data.get('background_color', 'FFF5ED'),
+                        background_bottom_color=data.get('background_bottom_color', 'B2602A'),
+                        name_color='666666', content_color='FFFFFF',
+                        face_url=base.get('face', ''),
+                        timestamp=data.get('ts') or now, raw=j))
 
-                    msg['msg_type'] = {
-                        'SEND_GIFT'                    : 'gift',
-                        'DANMU_MSG'                    : 'danmaku',
-                        'SUPER_CHAT_MESSAGE'           : 'super_chat',
-                        'GUARD_BUY'                    : 'guard_buy',
-                        'USER_TOAST_MSG'               : 'skip',
-                        'USER_TOAST_MSG_V2'            : 'skip',
-                        'SUPER_CHAT_MESSAGE_JPN'       : 'skip',
-                        'INTERACT_WORD_V2'             : 'enter',
-                        'NOTICE_MSG'                   : 'broadcast',
-                        'LIKE_INFO_V3_UPDATE'          : 'like_update',
-                        'ONLINE_RANK_V3'               : 'online_rank',
-                        'ONLINE_RANK_COUNT'            : 'online_count',
-                        'ENTRY_EFFECT'                 : 'entry_effect',
-                        'COMBO_SEND'                   : 'gift_combo',
-                        'RANK_CHANGED'                 : 'rank',
-                        'RANK_CHANGED_V2'              : 'rank',
-                        'LIKE_INFO_V3_CLICK'           : 'like',
-                        'WATCHED_CHANGE'               : 'watched',
-                        'COMMON_NOTICE_DANMAKU'        : 'common_notice',
-                        'STOP_LIVE_ROOM_LIST'          : 'stop_live',
-                        'HOT_ROOM_NOTIFY'              : 'hot_room',
-                        'ROOM_REAL_TIME_MESSAGE_UPDATE': 'room_update',
-                        'VOICE_JOIN_ROOM_COUNT_INFO'   : 'voice_join',
-                        'PREPARING'                    : 'preparing',
-                        'ANCHOR_LOT_AWARD'             : 'lot_award',
-                        'ANCHOR_LOT_END'               : 'lot_end',
-                        'POPULAR_RANK_CHANGED'         : 'rank_changed',
-                        'INTERACT_WORD'                : 'interact_word',
-                    }.get(j.get('cmd'), 'other')  # 类型判断
+                elif cmd == 'GUARD_BUY':                       # 开通大航海(舰长/提督/总督)
+                    uname = data.get('username', '未知用户')
+                    price = data.get('price', 0) / 1000        # 金瓜子 → 元
+                    member_name = data.get('gift_name', '舰长')
+                    num = data.get('num', 1)
+                    text = f"{uname} 开通了{num}个月的{member_name}价值{price}元"
+                    msgs.append(MemberDanmaku(
+                        uname=uname, uid=data.get('uid', ''), content=text, text=text,
+                        member_name=member_name, member_price=price, member_count=num,
+                        member_unit='月', price_cny=price,
+                        timestamp=data.get('start_time') or now, raw=j))
 
-                    if msg["msg_type"] == 'skip':
-                        continue
+                elif cmd == 'SEND_GIFT':                       # 礼物
+                    uname = data.get('sender_uinfo', {}).get('base', {}).get('name') or data.get('uname', '未知用户')
+                    gift_name = data.get('giftName', '未知礼物')
+                    num = data.get('num', 0)
+                    battery = data.get('price', 0) / 100       # 金瓜子单价 → 电池(1电池=100金瓜子)
+                    total_coin = data.get('total_coin') or (data.get('price', 0) * num) or 0
+                    text = f"<{uname}>送给主播价值{battery:.0f}电池的{gift_name}x{num}"
+                    msgs.append(GiftDanmaku(
+                        uname=uname, uid=data.get('sender_uinfo', {}).get('uid') or data.get('uid', ''),
+                        content=text, text=text, gift_name=gift_name, gift_count=num,
+                        gift_price=f"{battery:.0f}", price_unit='电池', price_cny=total_coin / 1000,
+                        color='d9a6c4',
+                        timestamp=data.get('timestamp') or data.get('ts') or now, raw=j))
 
-                    if msg["msg_type"] == "danmaku": # 普通弹幕类型
-                        # print(j)
-                        msg["name"] = j.get("info", ["", "", ["", ""]])[2][1] or j.get(
-                            "data", {}
-                        ).get("uname", "")
-                        msg["color"] = f"{j.get('info', [[0, 0, 0, 16777215]])[0][3]:06x}"
+                elif cmd == 'INTERACT_WORD_V2':                # 进场(正文藏在 data.pb base64 里)
+                    name, face = parse_enter_msg(j)
+                    ts = data.get('timestamp') or data.get('trigger_time')
+                    if ts:
+                        ts = float(ts)
+                        ts = ts / 1e9 if ts > 1e15 else (ts / 1e3 if ts > 1e12 else ts)
+                    msgs.append(EntryDanmaku(
+                        uname=name, uid=data.get('uid', '') or '',
+                        face_url=face, timestamp=ts or now, raw=j))
 
-                        if msg.get("color") == "e33fff": # 把紫色改浅一点
-                            msg["color"] = "e866ff"
+                else:                                          # 理解不了的：原样塞进 BaseDanmaku.raw
+                    # dtype 用 cmd 小写、content 放 data，--all 下可直接看结构(大航海toast/盲盒/rank/notice…)
+                    msgs.append(BaseDanmaku(
+                        dtype=(cmd or 'other').lower(), raw=j,
+                        timestamp=now, content=data or j))
 
-                        msg["content"] = j.get("info")[1]
-                        try:
-                            msg['timestamp'] = j.get('info')[0][4]/1000
-                            if j.get('info')[13] != r'{}':
-                                emoticon_info = j.get('info')[0][13]
-                                emoticon_url = emoticon_info['url']
-                                emoticon_desc = j.get('info')[1]
-                                msg["content"] = json.dumps({'url':emoticon_url,'desc':emoticon_desc},ensure_ascii=False)
-                                msg['text'] = f'[{emoticon_desc}]'
-                                msg['msg_type'] = 'emoticon'
-                        except Exception as e:
-                            pass
-
-                        dm = SimpleDanmaku(
-                            dtype=msg.get('msg_type', 'other'),
-                            uname=msg.get('name', ''),
-                            content=msg.get('content', ''),
-                            timestamp=msg.get('timestamp', datetime.now().timestamp()),
-                            color=msg.get('color', 'ffffff'),
-                            uid=j.get("info")[2][0],
-                        )
-                        msgs.append(dm)
-                        continue
-
-                    elif msg['msg_type'] == 'enter':
-                        # pass
-                        # print(msg)
-                        name, face = parse_enter_msg(j)
-                        if "巧丽哇" in name:
-                            logger.info(f"👋 {name} 进入直播间！")
-                            logger.info(f"🖼️ 头像: {face}")
-                            logger.info(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                            bark_notify("b站通知", f"{name} 进入直播间！",face_url=face)
-
-
-                    elif msg["msg_type"] == "broadcast":
-                        msg["type"] = j.get("msg_type", 0)
-                        msg["roomid"] = j.get("real_roomid", 0)
-                        msg["content"] = j.get("msg_common", "none")
-                        msg["raw"] = j
-
-                    elif msg["msg_type"] == "super_chat":  # 新增此部分
-                        msg["name"] = j.get('data', {}).get('uinfo', {}).get('base', {}).get('name', '')
-                        msg["face_url"] = j.get('data', {}).get('uinfo', {}).get('base', {}).get('face', '')
-                        msg["content"] = j.get('data', {}).get('message', '')
-                        msg["price_cny"] = j.get('data', {}).get('price', 0)   # 真实元价格
-                        msg["price"] = msg["price_cny"] * 10                   # 换算为电池（显示用）
-                        msg["price_unit"] = "电池"
-                        msg["background_color"] = j.get('data', {}).get('background_color', 'FFF5ED')
-                        msg["background_bottom_color"] = j.get('data', {}).get('background_bottom_color', 'B2602A')
-                        msg["name_color"] = '666666' # 灰色
-                        msg["content_color"] = 'FFFFFF' # 白色
-                        # msg["name_color"] = j.get('data', {}).get('uinfo', {}).get('base',{}).get('name_color_str','000000')
-                        # msg["content_color"] = j.get('data', {}).get('message_font_color', 'FFFFFF')
-                        msg["sc_duration"] = max(30, min(180, j.get('data', {}).get('time', 60)))
-                        msg["raw"]=j
-                        try:
-                            msg['timestamp'] = j.get('data', {}).get('ts')
-                        except Exception:
-                            msg['timestamp'] = datetime.now().timestamp()  # 如果没有时间戳，则使用当前时间
-                        msg = SuperChatDanmaku(**msg)  # 转换为 SuperChatDanmaku 对象
-
-                    elif msg["msg_type"] == "guard_buy":
-                        data = j.get('data', {})
-                        uname = data.get('username', '未知用户')
-                        price = data.get('price', 0) / 1000  # 金瓜子 → 元
-                        member_name = data.get('gift_name', '舰长')
-                        num = data.get('num', 1)
-                        ts = data.get('start_time', datetime.now().timestamp())
-                        uid = data.get('uid', '')
-                        msg = MemberDanmaku(
-                            uname=uname,
-                            price=price,
-                            price_unit='元',
-                            member_name=member_name,
-                            member_time=num,
-                            member_time_unit='月',
-                            timestamp=ts,
-                            uid=uid,
-                        )
-
-                    elif msg["msg_type"] == "gift":
-                        data = j.get('data', {})
-
-                        # 1. 提取昵称 (优先取完整名称)
-                        uname = data.get('sender_uinfo', {}).get('base', {}).get('name') or data.get('uname', '未知用户')
-
-                        # 2. 提取礼物基本信息
-                        gift_name = data.get('giftName', '未知礼物')
-                        gift_num = data.get('num', 0)
-
-                        # 3. 计算价值
-                        # raw_price 为金瓜子单价
-                        raw_price = data.get('price', 0)
-                        # B站 1000金瓜子=1元；电池 1电池=0.1元 -> 所以 1电池 = 100金瓜子
-                        gift_price_battery = raw_price / 100
-                        # 总价值（金瓜子）
-                        total_coin = data.get('total_coin') or (raw_price * gift_num) or 0
-                        # 总价值（元）
-                        total_price_cny = total_coin / 1000
-
-
-                        # 时间戳处理
-                        ts = data.get('timestamp') or data.get('ts') or datetime.now().timestamp()
-
-                        text=f"<{uname}>送给主播价值{gift_price_battery:.0f}电池的{gift_name}x{gift_num}"
-
-                        msg = GiftDanmaku(
-                            timestamp=ts,
-                            uname=uname,
-                            content=text,
-                            text=text,
-                            gift_name=gift_name,
-                            gift_count=gift_num,
-                            gift_price=f"{gift_price_battery:.0f}",
-                            price_unit='电池',
-                            dtype='gift',
-                            color='d9a6c4',
-                            total_price_cny=total_price_cny,
-                        )
-
-
-                    else:
-                        msg["content"] = j
-                else:
-                    continue  # 非业务包（心跳回包等），直接跳过
-
-                msgs.append(msg)
-
-            except Exception as e:
-                # traceback.print_exc()
-                # print("出错了")
-                # print(e)
-                pass
+            except Exception:
+                continue
 
         return msgs

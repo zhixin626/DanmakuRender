@@ -21,7 +21,7 @@ from google.protobuf import json_format
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from DMR.LiveAPI.douyin import douyin_utils
-from DMR.utils import split_url, cookiestr2dict, SimpleDanmaku, GiftDanmaku, EntryDanmaku
+from DMR.utils import split_url, cookiestr2dict, BaseDanmaku, UserDanmaku, GiftDanmaku, EntryDanmaku
 from .dy_pb2 import PushFrame, Response, ChatMessage, GiftMessage, MemberMessage
 from .utils import DouyinDanmakuUtils
 import aiohttp
@@ -269,63 +269,44 @@ class Douyin:
         
         msgs = []
         for msg in payload_package.messagesList:
+                # 抖音号叫做 unique_id 是用户可以改的
+                # short_id 才是真的不能改的
+                # id 是长id也是不能改的
             now = datetime.now().timestamp()
-            # print(msg)
-            # if msg.method == 'WebcastSocialMessage':
-            #     chatMessage = ChatMessage()
-            #     chatMessage.ParseFromString(msg.payload)
-            #     data        = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
-            #     print(data)
             if msg.method == 'WebcastChatMessage':
                 chatMessage = ChatMessage()
                 chatMessage.ParseFromString(msg.payload)
                 data        = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
-                # print(data)
-                
                 user_info = data.get('user', {})
-                # print(user_info)
                 name     = user_info.get('nickName') or "未知用户"
                 uid      = user_info.get('shortId',None)
                 content  = data['content']
-                msg_dict = SimpleDanmaku(
+                msg = UserDanmaku(
                     timestamp=now,
                     uname=name,
-                    content=content,   # 保留原始 [xxx],交给渲染引擎用表情包替换(不再转 unicode)
+                    content=content,
+                    text=content,
                     dtype='danmaku',
                     color='ffffff',
                     uid=uid,
+                    raw=data,
                 )
-                
-                # logger.info("WebcastChatMessage\n%s", json.dumps(data, ensure_ascii=False, indent=2))
 
-                
-                # msg_dict = {"timestamp": now, "name": name, "content": content, "msg_type": "danmaku", "color": "ffffff"}
-                # print(msg_dict)
             elif msg.method == 'WebcastMemberMessage':
                 memberMessage = MemberMessage()
                 memberMessage.ParseFromString(msg.payload)
                 data = json_format.MessageToDict(memberMessage, preserving_proto_field_name=True)
-                
                 user_info = data.get('user', {})
                 name      = user_info.get('nickName') or "未知用户"
                 uid       = user_info.get('id',None)
-                # 抖音号叫做 unique_id 是用户可以改的
-                # short_id 才是真的不能改的
-                # id 是长id也是不能改的
-                if "学会自己爬" in name:
-                    print(f"👋 {name} 进入直播间！ uid is {uid}")
-                    print(user_info)
-                    print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    print(f"目标id is 55557889854")
-                    bark_notify("抖音通知", f"{name} 进入直播间！")
-
-                msg_dict = EntryDanmaku(
+                msg = EntryDanmaku(
                     timestamp = now,
                     uname     = name,
                     content   = f"{name}来了",
-                    dtype     = 'entry',
+                    text      = f"{name}来了",
                     color     = 'ffffff',
                     uid       = uid,
+                    raw       = data,
                 )
 
             elif msg.method == 'WebcastGiftMessage':
@@ -336,32 +317,38 @@ class Douyin:
                   continue
                 user_info   = data.get('user', {})
                 name        = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
-
+                uid         = user_info.get('shortId', None)
                 gift_price      = int(data['gift']['diamondCount'])
                 gift_count      = int(data.get('repeatCount', 1))
                 gift_name       = data['gift']['name']
-                total_price     = gift_price*gift_count
-                total_price_cny = total_price/10
-
-                msg_dict = GiftDanmaku(
+                price_cny = (gift_price * gift_count) / 10   # 10抖币=1元
+                _gtext = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}"
+                msg = GiftDanmaku(
                     timestamp       = now,
                     uname           = name,
-                    content         = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
-                    text            = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}",
+                    uid             = uid,
+                    content         = _gtext,
+                    text            = _gtext,
                     gift_name       = gift_name,
                     gift_count      = gift_count,
                     gift_price      = gift_price,
                     price_unit      = '抖币',
-                    price           = total_price,
-                    dtype           = 'gift',
                     color           = 'ffffff',
-                    total_price_cny = total_price_cny,
+                    price_cny       = price_cny,
+                    raw             = data,
                 )
 
             else:
+                # 未识别类型(无发送者)：采样 + 用 BaseDanmaku 入列，content 放 kwargs 袋供 --all 查看
                 cls._sample_unknown_message(msg)
-                msg_dict = {"timestamp": now, "name": "", "content": "", "msg_type": "other", "raw_data": msg}
+                method = getattr(msg, 'method', 'other')
+                msg = BaseDanmaku(
+                    timestamp=now,
+                    dtype=method,
+                    content=method,
+                    raw=msg,
+                )
 
-            msgs.append(msg_dict)
+            msgs.append(msg)
 
         return msgs, ack

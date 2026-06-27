@@ -1,7 +1,7 @@
 import json, os, re, requests
 from struct import pack, unpack
 from datetime import datetime
-from DMR.utils import  SimpleDanmaku,GiftDanmaku,MemberDanmaku
+from DMR.utils import BaseDanmaku, UserDanmaku, GiftDanmaku, MemberDanmaku
 import aiohttp
 from DMR.utils import split_url
 from .DMAPI import DMAPI
@@ -124,84 +124,57 @@ class Douyu(DMAPI):
                 msg = json.loads((b'{"' + msg[:-2] + b"}").decode("utf8", "ignore"))
                 # print(msg)
 
-                msg_type = {"dgb": "gift", "chatmsg": "danmaku", "uenter": "enter","dfobc":"member"}.get(msg["type"], "other")
+                msg_type = {
+                    "chatmsg": "danmaku",
+                    "dgb": "gift",
+                    "uenter": "enter",
+                    "dfobc":"member"
+                }.get(msg["type"], "other")
 
-                if msg_type == "enter":
-                    uname       = msg.get("nn", "")
-                    uid         = msg.get("uid", 0)
-                    if "巧丽哇" in uname:
-                        print(f"👋 {uname} 进入直播间！")
-                        print(msg)
-                        print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-                elif msg_type == "member":
-                    # 目前字段含义尚未确认完整（如 price 单位、会员等级名称等），
-                    # 暂时注释掉，先采样原始消息用于反推协议格式
-                    # uname       = msg.get("nick", "")
-                    # member_time = int(msg.get("mn", 1))
-                    # uid         = msg.get("uid", 0)
-                    # price       = int(msg.get("price", 0))/100
-                    # member_danmaku = MemberDanmaku(
-                    #     uname=uname,
-                    #     price=price,
-                    #     price_unit="鱼翅",
-                    #     member_name="钻石粉丝",
-                    #     member_time=member_time,
-                    #     member_time_unit="月",
-                    #     uid=uid,
-                    #     )
-                    # print(member_danmaku.text) # debug
-                    # msgs.append(member_danmaku)
-                    if sample_raw_message("member", msg):
-                        print(f"{RED}【SAMPLE】{RESET}已采样开通会员原始消息 -> {_sample_dir}/member.jsonl")
-                    continue
+                if msg_type == "danmaku":
+                    msg = UserDanmaku(
+                        dtype="danmaku",
+                        uname=msg.get("nn", ""),
+                        content=msg.get("txt", ""),
+                        text=msg.get("txt", ""),
+                        timestamp=datetime.now().timestamp(),
+                        color=color_tab.get(msg.get("col", "-1"), "ffffff"),
+                        uid=msg.get("uid", 0),
+                        raw=msg,
+                    )
 
                 elif msg_type == "gift":
-                    uname    = msg.get("nn", "")
-                    content  = msg.get("txt", "")
-                    uid      = msg.get("uid", 0)
-                    color    = color_tab.get(msg.get("col", "-1"), "ffffff")
-                    # ===== 0. 基础字段 =====
+                    uname      = msg.get("nn", "")
+                    uid        = msg.get("uid", "")
                     gift_name  = msg.get("gfn", "未知礼物")
                     gift_count = int(msg.get("gfcnt") or 1)
                     gfid       = int(msg.get("gfid") or 0)   # 礼物 id
                     pid        = msg.get("pid")              # 道具 id
-                    gpf        = msg.get("gpf")              # 白嫖标志
                     price_unit = "鱼翅"
                     streamer   = msg.get("receive_nn", "主播")
 
-                    gift_price = None
-                    price_src  = None   # gift / prop
-                    res        = None
-
-                    # ===== 1. 查价格 =====
+                    # 查价格：先按礼物 id，再按道具 id
+                    gift_price, price_src, res = None, None, None
                     if gfid:
-                        res = get_douyu_gift_info(gfid)
-                        price_src = "gift"
-
+                        res, price_src = get_douyu_gift_info(gfid), "gift"
                     if not res and pid:
-                        res = get_douyu_prop_info(pid)
-                        price_src = "prop"
-
+                        res, price_src = get_douyu_prop_info(pid), "prop"
                     if res:
                         gift_price = res.get("price")
 
-                    # ===== 2. 判类型 =====
+                    # 判类型
                     if gift_price is None:
-                        total_price_cny = None
-                        extra = ""
+                        total_price_cny, extra = None, ""
                     elif gift_price == 0:
-                        total_price_cny = 0
-                        extra = ""
+                        total_price_cny, extra = 0, ""
                     else:
-                        total_price_cny = gift_price * gift_count
-                        extra = f"价值{gift_price}{price_unit}的"
+                        total_price_cny, extra = gift_price * gift_count, f"价值{gift_price}{price_unit}的"
 
                     text = f"{uname} 送给{streamer}{extra}{gift_name}×{gift_count}"
-
-                    gift_msg_obj = GiftDanmaku(
+                    msg = GiftDanmaku(
                         timestamp=datetime.now().timestamp(),
                         uname=uname,
+                        uid=uid,
                         content=text,
                         text=text,
                         gift_name=gift_name,
@@ -209,35 +182,34 @@ class Douyu(DMAPI):
                         gift_price=gift_price,
                         gift_type=price_src,
                         price_unit=price_unit,
-                        dtype='gift',
                         color='ffffff',
-                        total_price_cny=total_price_cny,
+                        price_cny=total_price_cny,
                         gfid=gfid,
                         pid=pid,
-                        raw_data=msg,
+                        raw=msg,
                         extra=extra,
                     )
-                    msgs.append(gift_msg_obj)
+
+                elif msg_type == "member":
+                    # 字段含义尚未确认完整，暂不解析；先采样原始消息反推协议，跳过不入列
+                    if sample_raw_message("member", msg):
+                        print(f"{RED}【SAMPLE】{RESET}已采样开通会员原始消息 -> {_sample_dir}/member.jsonl")
                     continue
 
-                elif msg_type == "danmaku":
-                    uname    = msg.get("nn", "")
-                    content  = msg.get("txt", "")
-                    uid      = msg.get("uid", 0)
-                    color    = color_tab.get(msg.get("col", "-1"), "ffffff")
-                    msg = SimpleDanmaku(
-                            dtype="danmaku",
-                            uname=uname,
-                            content=content,
-                            timestamp=datetime.now().timestamp(),
-                            color=color,
-                            uid=uid,
-                        )
-                    msgs.append(msg)
+                elif msg_type == "enter":
+                    continue   # 进场暂不入列（与原行为一致；如需显示可仿 b站做成 EntryDanmaku）
 
-                else:  # msg_type == "other"，未识别类型，采样原始消息以便后续分析
+                else:  # 未识别类型(无发送者)：采样 + 用 BaseDanmaku 入列，content 放 kwargs 袋供 --all 查看
                     raw_type = msg.get("type", "unknown")
                     sample_raw_message(raw_type, msg)
+                    msg = BaseDanmaku(
+                        dtype=raw_type,
+                        raw=msg,
+                        timestamp=datetime.now().timestamp(),
+                        content=msg,        # 原始 dict 作内容，便于 --all 查看
+                    )
+
+                msgs.append(msg)
 
             except Exception as e:
                 logger.debug(f"错误信息:{e}")
