@@ -247,108 +247,76 @@ class Douyin:
                 return url, []
 
     @classmethod
-    def decode_msg(cls, data):
-        wss_package = PushFrame()
-        wss_package.ParseFromString(data)
-        log_id = wss_package.logId
-        # 抖音的 payload 不一定 gzip 压缩:只有以 gzip 魔数(\x1f\x8b)开头才解压,
-        # 否则是未压缩的 Response protobuf,直接解析(否则 gzip.decompress 会抛 BadGzipFile)。
-        payload = wss_package.payload
-        if payload[:2] == b'\x1f\x8b':
-            payload = gzip.decompress(payload)
-        payload_package = Response()
-        payload_package.ParseFromString(payload)
+    def _unpack_frame(cls, data):
+        """抖音外层拆帧：PushFrame(WS 传输帧) → (可能 gzip) → Response(消息容器)。
+        返回 (messagesList, ack)；需要回执时 ack 是要发回的字节，否则 None。"""
+        frame = PushFrame()
+        frame.ParseFromString(data)
+        body = frame.payload
+        # payload 不一定 gzip：只有以 gzip 魔数(\x1f\x8b)开头才解压，否则是未压缩的 Response
+        if body[:2] == b'\x1f\x8b':
+            body = gzip.decompress(body)
+        resp = Response()
+        resp.ParseFromString(body)
 
         ack = None
-        if payload_package.needAck:
+        if resp.needAck:
             obj = PushFrame()
-            obj.payloadType = 'ack'
-            obj.logId = log_id
-            obj.payloadType = payload_package.internalExt
+            obj.logId = frame.logId
+            obj.payloadType = resp.internalExt
             ack = obj.SerializeToString()
-        
+        return resp.messagesList, ack
+
+    @classmethod
+    def decode_msg(cls, data):
+        messages, ack = cls._unpack_frame(data)
         msgs = []
-        for msg in payload_package.messagesList:
-                # 抖音号叫做 unique_id 是用户可以改的
-                # short_id 才是真的不能改的
-                # id 是长id也是不能改的
+        for msg in messages:    # msg = 一条原始 protobuf 消息(有 .method 类型名 和 .payload)
             now = datetime.now().timestamp()
-            if msg.method == 'WebcastChatMessage':
-                chatMessage = ChatMessage()
-                chatMessage.ParseFromString(msg.payload)
-                payload   = json_format.MessageToDict(chatMessage, preserving_proto_field_name=True)
-                user_info = payload.get('user', {})
-                name     = user_info.get('nickName') or "未知用户"
-                uid      = user_info.get('shortId',None)
-                content  = payload['content']
-                msg = UserDanmaku(
-                    timestamp=now,
-                    uname=name,
-                    content=content,
-                    text=content,
-                    dtype='danmaku',
-                    color='ffffff',
-                    uid=uid,
-                    raw=payload,
-                )
+            method = msg.method
+            try:
+                if method == 'WebcastChatMessage':                 # 普通弹幕
+                    proto = ChatMessage(); proto.ParseFromString(msg.payload)
+                    j = json_format.MessageToDict(proto, preserving_proto_field_name=True)
+                    user = j.get('user', {})
+                    content = j.get('content', '')
+                    msgs.append(UserDanmaku(
+                        dtype='danmaku', uname=user.get('nickName') or '未知用户',
+                        uid=user.get('shortId'), content=content, text=content,
+                        color='ffffff', timestamp=now, raw=j))
 
-            elif msg.method == 'WebcastMemberMessage':
-                memberMessage = MemberMessage()
-                memberMessage.ParseFromString(msg.payload)
-                payload   = json_format.MessageToDict(memberMessage, preserving_proto_field_name=True)
-                user_info = payload.get('user', {})
-                name      = user_info.get('nickName') or "未知用户"
-                uid       = user_info.get('id',None)
-                msg = EntryDanmaku(
-                    timestamp = now,
-                    uname     = name,
-                    content   = f"{name}来了",
-                    text      = f"{name}来了",
-                    color     = 'ffffff',
-                    uid       = uid,
-                    raw       = payload,
-                )
+                elif method == 'WebcastMemberMessage':             # 进场
+                    proto = MemberMessage(); proto.ParseFromString(msg.payload)
+                    j = json_format.MessageToDict(proto, preserving_proto_field_name=True)
+                    user = j.get('user', {})
+                    name = user.get('nickName') or '未知用户'
+                    msgs.append(EntryDanmaku(
+                        uname=name, uid=user.get('id'),
+                        content=f"{name}来了", text=f"{name}来了",
+                        color='ffffff', timestamp=now, raw=j))
 
-            elif msg.method == 'WebcastGiftMessage':
-                giftMessage = GiftMessage()
-                giftMessage.ParseFromString(msg.payload)
-                payload     = json_format.MessageToDict(giftMessage, preserving_proto_field_name=True)
-                if 'combo' in payload['gift'] and not 'repeatEnd' in payload:
-                  continue
-                user_info   = payload.get('user', {})
-                name        = user_info.get('nickName') or user_info.get('shortId') or "未知用户"
-                uid         = user_info.get('shortId', None)
-                gift_price      = int(payload['gift']['diamondCount'])
-                gift_count      = int(payload.get('repeatCount', 1))
-                gift_name       = payload['gift']['name']
-                price_cny = (gift_price * gift_count) / 10   # 10抖币=1元
-                _gtext = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}"
-                msg = GiftDanmaku(
-                    timestamp       = now,
-                    uname           = name,
-                    uid             = uid,
-                    content         = _gtext,
-                    text            = _gtext,
-                    gift_name       = gift_name,
-                    gift_count      = gift_count,
-                    gift_price      = gift_price,
-                    price_unit      = '抖币',
-                    color           = 'ffffff',
-                    price_cny       = price_cny,
-                    raw             = payload,
-                )
+                elif method == 'WebcastGiftMessage':               # 礼物
+                    proto = GiftMessage(); proto.ParseFromString(msg.payload)
+                    j = json_format.MessageToDict(proto, preserving_proto_field_name=True)
+                    if 'combo' in j['gift'] and 'repeatEnd' not in j:   # 连击中间态跳过，只取结束帧
+                        continue
+                    user = j.get('user', {})
+                    name = user.get('nickName') or user.get('shortId') or '未知用户'
+                    gift_price = int(j['gift']['diamondCount'])
+                    gift_count = int(j.get('repeatCount', 1))
+                    gift_name = j['gift']['name']
+                    gtext = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}"
+                    msgs.append(GiftDanmaku(
+                        uname=name, uid=user.get('shortId'),
+                        content=gtext, text=gtext,
+                        gift_name=gift_name, gift_count=gift_count, gift_price=gift_price,
+                        price_unit='抖币', price_cny=(gift_price * gift_count) / 10,   # 10抖币=1元
+                        color='ffffff', timestamp=now, raw=j))
 
-            else:
-                # 未识别类型(无发送者)：采样 + 用 BaseDanmaku 入列，content 放 kwargs 袋供 --all 查看
-                cls._sample_unknown_message(msg)
-                method = getattr(msg, 'method', 'other')
-                msg = BaseDanmaku(
-                    timestamp=now,
-                    dtype=method,
-                    content=method,
-                    raw=msg,
-                )
+                else:                                              # 理解不了的：采样 + 原样塞进 BaseDanmaku.raw
+                    cls._sample_unknown_message(msg)
+                    msgs.append(BaseDanmaku(dtype=method, raw=msg, timestamp=now, content=method))
 
-            msgs.append(msg)
-
+            except Exception:
+                continue
         return msgs, ack
