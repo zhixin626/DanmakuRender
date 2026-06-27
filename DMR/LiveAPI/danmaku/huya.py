@@ -4,7 +4,7 @@ from struct import pack, unpack
 
 import asyncio, aiohttp
 
-from DMR.utils import split_url
+from DMR.utils import split_url, BaseDanmaku, UserDanmaku
 from DMR.LiveAPI.tars import tarscore
 from DMR.LiveAPI.huya_wup.wup_struct import EWebSocketCommandType
 from DMR.LiveAPI.huya_wup.wup_struct.WebSocketCommand import HuyaWebSocketCommand
@@ -107,11 +107,23 @@ class Huya(DMAPI):
                     if color == -1:
                         color = 16777215
                     if name != "":
-                        msg = {"name": name, "color": f"{color:06x}", "content": content, "msg_type": "danmaku"}
-                        msgs.append(msg)
+                        msgs.append(UserDanmaku(
+                            dtype="danmaku",
+                            uname=name,
+                            uid=None,
+                            content=content,
+                            text=content,
+                            color=f"{color:06x}",
+                            timestamp=datetime.now().timestamp(),
+                            raw=data,
+                        ))
             else:
-                msg = {"name": "", "content": "", "msg_type": "other","raw_data": data}
-                msgs.append(msg)
+                msgs.append(BaseDanmaku(
+                    dtype="other",
+                    raw=data,
+                    timestamp=datetime.now().timestamp(),
+                    content="",
+                ))
         except Exception as e:
             # print(e)
             pass

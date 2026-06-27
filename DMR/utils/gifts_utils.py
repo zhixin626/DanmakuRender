@@ -19,14 +19,14 @@ def save_gift_to_jsonl(dm, file_path: str):
     if dtype == 'superchat':
         gift_name, count = "醒目留言", 1
     elif dtype == 'member':
-        gift_name = getattr(dm, 'member_name', '舰长')
+        gift_name = getattr(dm, 'member_name', '')
         count     = getattr(dm, 'member_count', 1)
     else:
-        gift_name = getattr(dm, 'gift_name', '未知礼物')
+        gift_name = getattr(dm, 'gift_name', '礼物')
         count     = getattr(dm, 'gift_count', 1)
     gift_data = {
         "dtype"          : dtype,
-        "uname"          : getattr(dm, 'uname', '未知用户'),
+        "uname"          : getattr(dm, 'uname', '用户'),
         "gift_name"      : gift_name,
         "count"          : count,
         "total_price_cny": getattr(dm, 'price_cny', 0.0),

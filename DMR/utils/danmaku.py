@@ -2,15 +2,14 @@ from datetime import datetime
 
 
 def format_price(v):
-    """格式化价格：保留最多 1 位小数并去掉多余的 0。
-    1.0->1, 1.2->1.2, 1.20->1.2, 1.234->1.2；None 原样返回。"""
+    """格式化价格：用 :g 规则去掉无意义的尾零（198.0->198, 1.20->1.2, 1.234->1.234）。None 原样返回。"""
     if v is None:
         return None
     try:
-        f = round(float(v), 1)
+        f = float(v)
     except (TypeError, ValueError):
         return v
-    return int(f) if f == int(f) else f
+    return int(f) if f == int(f) else float(f'{f:g}')
 
 
 class BaseDanmaku():
@@ -93,7 +92,7 @@ class SuperChatDanmaku(BaseDanmaku):
         self.color       = color
         self.content     = content
         self.text        = text
-        self.price       = price                     # 平台币价(如电池数)
+        self.price       = format_price(price)        # 平台币价(如电池数)
         self.price_unit  = price_unit
         self.sc_duration = sc_duration
         self.price_cny   = format_price(price_cny)    # 人民币收益(元)

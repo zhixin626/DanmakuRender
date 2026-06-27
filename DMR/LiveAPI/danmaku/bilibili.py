@@ -192,7 +192,6 @@ class Bilibili(DMAPI):
 
         dm_list = decode_packet(data)
 
-        now = datetime.now().timestamp()
         for dm in dm_list:
             if dm.get('type') != 5:          # 非业务包(心跳回包等)直接跳过
                 continue
@@ -230,19 +229,23 @@ class Bilibili(DMAPI):
                         background_bottom_color=payload.get('background_bottom_color', 'B2602A'),
                         name_color='666666', content_color='FFFFFF',
                         face_url=base.get('face', ''),
-                        timestamp=payload.get('ts') or now, raw=j))
+                        timestamp=payload.get('ts') or datetime.now().timestamp(), raw=j))
 
-                elif msg_type == 'GUARD_BUY':                  # 开通大航海(舰长/提督/总督)
-                    uname = payload.get('username', '未知用户')
-                    price = payload.get('price', 0) / 1000        # 金瓜子 → 元
-                    member_name = payload.get('gift_name', '舰长')
-                    num = payload.get('num', 1)
-                    text = f"{uname} 开通了{num}个月的{member_name}价值{price}元"
+                elif msg_type == 'USER_TOAST_MSG':             # 大航海(舰长/提督/总督)：开通/续费/大航海盲盒爆出
+                    # 用 USER_TOAST_MSG 取代 GUARD_BUY：它对「新开通」和「续费/盲盒爆出」都会发，
+                    # 而 GUARD_BUY 只在新开通时发——所以只认这条既不漏(续费/盲盒)也不重(新开通别再走 GUARD_BUY)。
+                    uname       = payload.get('username', '未知用户')
+                    member_name = payload.get('role_name', '舰长')     # 舰长/提督/总督
+                    num         = payload.get('num', 1)
+                    unit        = payload.get('unit', '月')            # '月'，或盲盒/续费的 '*8天'
+                    price       = (payload.get('price') or 0) / 1000   # 金瓜子 → 元（198000→198, 52800→52.8）
+                    action      = '续费' if payload.get('op_type') == 2 else '开通'   # op_type: 1=开通, 2=续费
+                    text = f"{action}{member_name}({price:g}元)×{num}{unit}"
                     msgs.append(MemberDanmaku(
                         uname=uname, uid=payload.get('uid', ''), content=text, text=text,
                         member_name=member_name, member_price=price, member_count=num,
-                        member_unit='月', price_cny=price,
-                        timestamp=payload.get('start_time') or now, raw=j))
+                        member_unit=unit, price_cny=price,
+                        timestamp=payload.get('start_time') or datetime.now().timestamp(), raw=j))
 
                 elif msg_type == 'SEND_GIFT':                  # 礼物
                     uname = payload.get('sender_uinfo', {}).get('base', {}).get('name') or payload.get('uname', '未知用户')
@@ -250,13 +253,13 @@ class Bilibili(DMAPI):
                     num = payload.get('num', 0)
                     battery = payload.get('price', 0) / 100       # 金瓜子单价 → 电池(1电池=100金瓜子)
                     total_coin = payload.get('total_coin') or (payload.get('price', 0) * num) or 0
-                    text = f"<{uname}>送给主播价值{battery:.0f}电池的{gift_name}x{num}"
+                    text = f"送出{gift_name}({battery:g}电池)x{num}"
                     msgs.append(GiftDanmaku(
                         uname=uname, uid=payload.get('sender_uinfo', {}).get('uid') or payload.get('uid', ''),
                         content=text, text=text, gift_name=gift_name, gift_count=num,
-                        gift_price=f"{battery:.0f}", price_unit='电池', price_cny=total_coin / 1000,
+                        gift_price=battery, price_unit='电池', price_cny=total_coin / 1000,
                         color='d9a6c4',
-                        timestamp=payload.get('timestamp') or payload.get('ts') or now, raw=j))
+                        timestamp=payload.get('timestamp') or payload.get('ts') or datetime.now().timestamp(), raw=j))
 
                 elif msg_type == 'INTERACT_WORD_V2':           # 进场(正文藏在 data.pb base64 里)
                     name, face = parse_enter_msg(j)
@@ -266,15 +269,15 @@ class Bilibili(DMAPI):
                         ts = ts / 1e9 if ts > 1e15 else (ts / 1e3 if ts > 1e12 else ts)
                     msgs.append(EntryDanmaku(
                         uname=name, uid=payload.get('uid', '') or '',
-                        face_url=face, timestamp=ts or now, raw=j))
+                        face_url=face, timestamp=ts or datetime.now().timestamp(), raw=j))
 
                 else:                                          # 理解不了的：原样塞进 BaseDanmaku.raw
                     # dtype 用 msg_type 小写、content 放 data，--all 下可直接看结构(大航海toast/盲盒/rank/notice…)
                     msgs.append(BaseDanmaku(
                         dtype=(msg_type or 'other').lower(), raw=j,
-                        timestamp=now, content=payload or j))
+                        timestamp=datetime.now().timestamp(), content=payload or j))
 
-            except Exception:
-                continue
+            except Exception as e:
+                logger.debug(f"错误信息:{e}")
 
         return msgs

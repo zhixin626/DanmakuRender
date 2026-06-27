@@ -305,7 +305,7 @@ class Douyin:
                     gift_price = int(j['gift']['diamondCount'])
                     gift_count = int(j.get('repeatCount', 1))
                     gift_name = j['gift']['name']
-                    gtext = f"{name} 送给主播价值{gift_price}抖币的{gift_name}×{gift_count}"
+                    gtext = f"送出{gift_name}({gift_price:g}抖币)x{gift_count}"
                     msgs.append(GiftDanmaku(
                         uname=name, uid=user.get('shortId'),
                         content=gtext, text=gtext,
@@ -314,9 +314,8 @@ class Douyin:
                         color='ffffff', timestamp=now, raw=j))
 
                 else:                                              # 理解不了的：采样 + 原样塞进 BaseDanmaku.raw
-                    cls._sample_unknown_message(msg)
                     msgs.append(BaseDanmaku(dtype=method, raw=msg, timestamp=now, content=method))
 
-            except Exception:
-                continue
+            except Exception as e:
+                logger.debug(f"错误信息:{e}")
         return msgs, ack

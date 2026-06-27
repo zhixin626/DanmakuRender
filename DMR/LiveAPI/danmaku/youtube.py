@@ -1,6 +1,8 @@
 import json, re, select, random, traceback, urllib, datetime, base64
 import asyncio, aiohttp
 
+from DMR.utils import UserDanmaku
+
 # The core codes for YouTube support are basically from taizan-hokuto/pytchat
 
 headers = {
@@ -106,8 +108,7 @@ class Youtube:
             for action in j["liveChatContinuation"].get("actions", []):
                 try:
                     renderer = action["addChatItemAction"]["item"]["liveChatTextMessageRenderer"]
-                    msg = {}
-                    msg["name"] = renderer["authorName"]["simpleText"]
+                    name = renderer["authorName"]["simpleText"]
                     message = ""
                     runs = renderer["message"].get("runs")
                     for r in runs:
@@ -115,9 +116,16 @@ class Youtube:
                             message += r["emoji"].get("shortcuts", [""])[0]
                         else:
                             message += r.get("text", "")
-                    msg["content"] = message
-                    msg["msg_type"] = "danmaku"
-                    msgs.append(msg)
+                    msgs.append(UserDanmaku(
+                        dtype="danmaku",
+                        uname=name,
+                        uid=None,
+                        content=message,
+                        text=message,
+                        color="ffffff",
+                        timestamp=datetime.datetime.now().timestamp(),
+                        raw=renderer,
+                    ))
                 except Exception:
                     pass
 

@@ -6,6 +6,9 @@
 输出/
 douyu_unknown_samples/
 douyin_unknown_samples/
+bili_blindbox_samples/
+unknown_danmaku_samples/
+asr_test/
 
 *.7z
 replay-**.yml

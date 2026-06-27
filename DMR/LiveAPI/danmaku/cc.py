@@ -7,6 +7,7 @@ import uuid
 import zlib
 import aiohttp
 
+from DMR.utils import BaseDanmaku, UserDanmaku
 from .DMAPI import DMAPI
 
 
@@ -311,8 +312,16 @@ class CC(DMAPI):
                     msg_type = 'danmaku'
                 else:
                     continue
-                msg = {'name': name, 'content': content, 'msg_type': msg_type, 'color': 'ffffff'}
-                msgs.append(msg.copy())
+                msgs.append(UserDanmaku(
+                    dtype=msg_type,
+                    uname=name,
+                    uid=None,
+                    content=content,
+                    text=content,
+                    color='ffffff',
+                    timestamp=time.time(),
+                    raw=m,
+                ))
         else:
-            msgs = [{'name': '', 'content': '', 'msg_type': 'other', 'color': "ffffff"}]
+            msgs = [BaseDanmaku(dtype='other', raw=None, timestamp=time.time(), content='')]
         return msgs

@@ -139,7 +139,7 @@ class Douyu(DMAPI):
                     "chatmsg": "danmaku",
                     "dgb": "gift",
                     "uenter": "enter",
-                    "dfobc": "member",
+                    "dfrbc": "member",   # 开通/续费钻石粉丝(房间内带价格)；odfpbc/rdfpbc 是无价广播副本，不解析以免重复计费
                 }.get(j["type"], "other")
 
                 if msg_type == "danmaku":
@@ -181,7 +181,8 @@ class Douyu(DMAPI):
                     else:
                         total_price_cny, extra = gift_price * gift_count, f"价值{gift_price}{price_unit}的"
 
-                    text = f"{uname} 送给{streamer}{extra}{gift_name}×{gift_count}"
+                    text = (f"送出{gift_name}({gift_price:g}{price_unit})x{gift_count}"
+                            if gift_price is not None else f"送出{gift_name}x{gift_count}")
                     msgs.append(GiftDanmaku(
                         timestamp=datetime.now().timestamp(),
                         uname=uname,
@@ -202,9 +203,26 @@ class Douyu(DMAPI):
                     ))
 
                 elif msg_type == "member":
-                    # 字段含义尚未确认完整，暂不解析；先采样原始消息反推协议(不入列)
-                    if sample_raw_message("member", j):
-                        print(f"{RED}【SAMPLE】{RESET}已采样开通会员原始消息 -> {_sample_dir}/member.jsonl")
+                    # 钻石粉丝(dfrbc)：nick=开通者, rnick=主播, bn=粉丝牌名, mn=月数,
+                    # cdays=累计天数, price=价格(单位「分」, 15800=158元)
+                    uname    = j.get("nick", "")
+                    streamer = j.get("rnick", "主播")
+                    months   = int(j.get("mn") or 1)
+                    price_cny = (int(j.get("price") or 0)) / 100
+                    text = f"开通钻石粉丝({price_cny:g}元)×{months}月"
+                    msgs.append(MemberDanmaku(
+                        timestamp=datetime.now().timestamp(),
+                        uname=uname,
+                        uid=j.get("uid", ""),
+                        content=text,
+                        text=text,
+                        member_name="钻石粉丝",
+                        member_price=price_cny,
+                        member_count=months,
+                        member_unit="月",
+                        price_cny=price_cny,
+                        raw=j,
+                    ))
 
                 elif msg_type == "enter":
                     pass   # 进场暂不入列
