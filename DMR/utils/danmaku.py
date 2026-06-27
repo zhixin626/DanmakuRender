@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Union
 
 
 def format_price(v):
@@ -14,139 +13,111 @@ def format_price(v):
     return int(f) if f == int(f) else f
 
 
-class SimpleDanmaku():
-    def __init__(self,
-                 time:float=None,
-                 timestamp:float=None,
-                 dtype:str=None,
-                 uname:str=None,
-                 color:str='ffffff',
-                 content:str=None,
-                 text:str=None,
-                 uid:str=None,
-                 is_vip:bool=False,
-                 **kwargs,
-                 ) -> None:
-        # time 表示相对时间，单位为秒
-        # timestamp 表示绝对时间，单位为秒
-        self.time = time
+class BaseDanmaku():
+    """所有流式消息的根：只持有任何消息都有的"信封"字段，并支持像字典一样取属性
+    （dm['x'] / for k,v in dm）。不假设有发送者——无发送者的系统/未知消息也可直接是 BaseDanmaku，
+    解析不了的原始内容统一塞在 raw 里。必传：dtype, raw, timestamp。"""
+    def __init__(self, dtype, raw, timestamp, **kwargs):
+        self.dtype = dtype
+        self.raw   = raw
         if isinstance(timestamp, datetime):
-            self.timestamp = timestamp.timestamp()
-        elif timestamp is None:
-            self.timestamp = datetime.now().timestamp()
+            self.timestamp = timestamp.timestamp()   # 绝对时间(秒)
         else:
             self.timestamp = float(timestamp)
-
-        self.dtype   = dtype      # 弹幕类型，未知类型需要设置为 'other'
-        self.uname   = uname      # 发送者名称
-        self.color   = color      # 弹幕颜色，6位16进制颜色码
-        self.content = content  # 弹幕内容，可能是纯文本或其他格式
-        self.uid     = uid
-        self.is_vip  = is_vip
-
-        for key, value in kwargs.items(): # dm.uname 将 kwargs 中的任意键值对动态添加为对象属性
+        self.time  = None                   # 相对时间(秒，相对视频起点)，由后续渲染流程赋值
+        for key, value in kwargs.items():   # 平台特有字段动态挂上
             self.__dict__[key] = value
 
-        # text属性表示最终显示的字符串
-        self.text = text if text is not None else self.content
-
-    def __getitem__(self, key): # dm["uname"] 这是让你的对象可以像字典一样用中括号访问字段
+    def __getitem__(self, key):
         return self.__dict__[key]
 
-    def __iter__(self): # 可以遍历 for k, v in dm: print(k, v)
+    def __iter__(self):
         for key, value in self.__dict__.items():
             yield key, value
 
-class MemberDanmaku(SimpleDanmaku):
-    def __init__(
-        self,
-        uname:str,
-        price:float,
-        member_name:str,      #"会员"
-        price_unit:str,       #"元"
-        member_time:int,      # 1
-        member_time_unit:str, #"月"
-        text=None,
-        dtype="member",
-        **kwargs,
-    ):
-        super().__init__(uname=uname,dtype=dtype,**kwargs)
-        self.dtype            = 'member'
-        self.member_name      = member_name
-        self.member_time      = member_time
-        self.member_time_unit = member_time_unit
-        self.price            = format_price(price)
-        if text:
-            self.text=text
-        else:
-            self.text=f"{uname} 开通了{member_time}个{member_time_unit}的{member_name}价值{self.price}{price_unit}"
 
-        self.gift_coverter_content=f"开通{member_name}({self.price}{price_unit})x{member_time}{member_time_unit}"
+class UserDanmaku(BaseDanmaku):
+    """普通弹幕 / 表情弹幕。必传：uname, uid, color, content, text（+ 根的 dtype/raw/timestamp）。
+    可选：face_url（头像）。"""
+    def __init__(self, uname, uid, color, content, text, face_url=None, **kwargs):
+        super().__init__(**kwargs)
+        self.uname    = uname
+        self.uid      = uid
+        self.color    = color
+        self.content  = content
+        self.text     = text
+        self.face_url = face_url
 
-class GiftDanmaku(SimpleDanmaku):
-    def __init__(
-        self,
-        text: str = None,
-        price: float = None,
-        gift_name: str = '',
-        gift_count: int = 1,
-        gift_price: float = 0.0,
-        price_unit: str = '',
-        total_price_cny: Union[float,None] = None,
-        *args,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.dtype           = 'gift'
-        self.gift_name       = gift_name
-        self.gift_count      = int(gift_count)
-        self.price_unit      = price_unit
-        self.gift_price      = format_price(gift_price if gift_price is not None else 0.0)
-        self.total_price_cny = format_price(total_price_cny)
-        self.price           = format_price(price if price is not None else self.gift_price * self.gift_count)
 
-        if text:
-            self.text = text
-        else:
-            self.text =f'{self.uname} 送给主播价值{self.gift_price}{self.price_unit}的{self.gift_name}x{self.gift_count}'
+class EntryDanmaku(BaseDanmaku):
+    """进场消息。必传 uname；dtype 固定 'entry'。"""
+    def __init__(self, uname, uid=None, color='ffffff', content=None, text=None, face_url=None, **kwargs):
+        super().__init__(dtype='entry', **kwargs)
+        self.uname    = uname
+        self.uid      = uid
+        self.color    = color
+        self.content  = content
+        self.text     = text if text is not None else f'{uname} 进入直播间'
+        self.face_url = face_url
 
-        self.gift_coverter_content=f"送出{self.gift_name}({self.gift_price}{self.price_unit})x{self.gift_count}"
 
-class SuperChatDanmaku(SimpleDanmaku):
-    def __init__(
-        self,
-        price: float = 0.0,
-        price_unit: str = 'CNY',
-        price_cny: float = 0.0,   # 真实元价格，用于统计收益
-        sc_duration: int = 0,
-        name: str = '',
-        background_color="FFF5ED",
-        background_bottom_color="B2602A",
-        name_color="000000",
-        content_color="FFFFFF",
-        *args,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.dtype = 'superchat'
-        self.uname = name
-        self.price = price
-        self.price_unit = price_unit
-        self.price_cny = float(price_cny)   # 真实元价格
+class GiftDanmaku(BaseDanmaku):
+    """礼物。dtype 固定 'gift'。
+    必传：uname, uid, content, text, gift_name, gift_count, gift_price, price_unit, price_cny。"""
+    def __init__(self, uname, uid, content, text,
+                 gift_name, gift_count, gift_price, price_unit, price_cny,
+                 color='ffffff', **kwargs):
+        super().__init__(dtype='gift', **kwargs)
+        self.uname      = uname
+        self.uid        = uid
+        self.color      = color
+        self.content    = content
+        self.text       = text
+        self.gift_name  = gift_name
+        self.gift_count = int(gift_count)
+        self.gift_price = format_price(gift_price)   # 单个礼物平台币价
+        self.price_unit = price_unit                 # 平台币单位(电池/鱼翅/抖币)
+        self.price_cny  = format_price(price_cny)     # 人民币收益(元，总价)
+
+
+class SuperChatDanmaku(BaseDanmaku):
+    """醒目留言 SC。dtype 固定 'superchat'。无 count（一次一条）。
+    必传：uname, uid, content, text, price(平台币价), sc_duration, price_cny。可选：颜色等。"""
+    def __init__(self, uname, uid, content, text, price, sc_duration, price_cny,
+                 price_unit='电池', color='ffffff',
+                 background_color="FFF5ED", background_bottom_color="B2602A",
+                 name_color="000000", content_color="FFFFFF", **kwargs):
+        super().__init__(dtype='superchat', **kwargs)
+        self.uname       = uname
+        self.uid         = uid
+        self.color       = color
+        self.content     = content
+        self.text        = text
+        self.price       = price                     # 平台币价(如电池数)
+        self.price_unit  = price_unit
         self.sc_duration = sc_duration
-        self.background_color=background_color
-        self.background_bottom_color=background_bottom_color
-        self.name_color=name_color
-        self.content_color=content_color
+        self.price_cny   = format_price(price_cny)    # 人民币收益(元)
+        self.background_color        = background_color
+        self.background_bottom_color = background_bottom_color
+        self.name_color    = name_color
+        self.content_color = content_color
 
 
-class EntryDanmaku(SimpleDanmaku):
-    def __init__(
-        self,
-        text:str=None,
-        *args,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.dtype = 'entry'
-        self.text = text if text is not None else f'{self.uname} 进入直播间'
+class MemberDanmaku(BaseDanmaku):
+    """开通大航海/会员。dtype 固定 'member'。
+    必传：uname, uid, content, text, member_name, member_price, member_count, member_unit, price_cny。
+    （展示文案由 GiftConverter 决定，不在此持有）"""
+    def __init__(self, uname, uid, content, text,
+                 member_name, member_price, member_count, member_unit, price_cny,
+                 color='ffffff', **kwargs):
+        super().__init__(dtype='member', **kwargs)
+        self.uname        = uname
+        self.uid          = uid
+        self.color        = color
+        self.content      = content
+        self.text         = text
+        self.member_name  = member_name
+        self.member_price = format_price(member_price)   # 平台币/元价
+        self.member_count = member_count                 # 开通数量(月数)
+        self.member_unit  = member_unit                  # 单位(月)
+        self.price_cny    = format_price(price_cny)       # 人民币收益(元)
