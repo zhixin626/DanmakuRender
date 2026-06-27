@@ -169,9 +169,11 @@ class DanmakuDownloader():
 
     def dm_available(self, dm:BaseDanmaku) -> bool:
 
+        # 未识别的 bare BaseDanmaku 没有 text/uname(只有 UserDanmaku/Gift 等才有)，用 getattr 兜底——
+        # 取不到即判为不可用，自然把未识别/系统消息过滤掉，不渲染。
         if dm.time < 0 \
-                or not dm.text \
-                or not dm.uname \
+                or not getattr(dm, 'text', None) \
+                or not getattr(dm, 'uname', None) \
                 or dm.dtype in ['other', 'others'] \
                 or not dm.dtype:
             return False
