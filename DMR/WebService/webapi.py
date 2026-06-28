@@ -19,6 +19,13 @@ def _abspath(p):
         return ''
 
 
+def _disp_task(source):
+    """路由用的 source 是 'replay/{任务名}'（见 ReplayTask 加前缀）；展示时剥掉前缀，
+    只显示任务名，与「已完成/人工处理」队列里的任务名保持一致。"""
+    s = source or ''
+    return s[len('replay/'):] if s.startswith('replay/') else s
+
+
 def _format_synctitle_result(result: dict) -> str:
     """把 sync_section_episode_titles 的结果格式化成纯文本（从原 api.py 迁入），方便快捷指令展示。"""
     lines = []
@@ -541,6 +548,7 @@ class WebApi:
                         'force_offline_time': getattr(task, 'force_offline_time', '') or '',
                         'output_dir': _abspath(getattr(task, 'output_dir', '')),
                     })
+        recording_tasks.sort(key=lambda t: t['name'])   # 默认按任务名排序（前端可再按列重排）
 
         # ===== 队列改为 state_dict 派生：每个文件按「当前阶段」只出现一次（互斥）=====
         # 进行中(带进度%/倒计时)取自插件活动字典；已完成子集(已渲染/已合并/已上传)取自各任务
@@ -580,7 +588,7 @@ class WebApi:
                     vp = task.get('video').path if task.get('video') else ''
                     outp = task.get('output', '') or ''
                     render_active.append({
-                        'task': task.get('source', ''),
+                        'task': _disp_task(task.get('source', '')),
                         'video': os.path.join(os.path.basename(os.path.dirname(vp)), os.path.basename(vp)) if vp else '',
                         'output': os.path.join(os.path.basename(os.path.dirname(outp)), os.path.basename(outp)) if outp else '',
                         'video_path': _abspath(vp), 'output_path': _abspath(outp),
@@ -596,8 +604,9 @@ class WebApi:
             if uploader:
                 for u, task in uploader.upload_tasks.items():
                     upload_active.append({
-                        'uuid': u, 'task': task.get('source', ''),
-                        'files': [{'name': os.path.join(os.path.basename(os.path.dirname(f.path)), os.path.basename(f.path))} for f in task.get('files', [])],
+                        'uuid': u, 'task': _disp_task(task.get('source', '')),
+                        # 带完整 path，前端用 pathCell 渲染成可点击打开（与其它队列统一）
+                        'files': [{'path': _abspath(f.path)} for f in task.get('files', [])],
                         'account': task.get('args', {}).get('account', 'Unknown'),
                         'engine': task.get('engine', 'Unknown'),
                         'is_sync': bool(task.get('stream_queue')),

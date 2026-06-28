@@ -44,9 +44,6 @@
         return String(s == null ? '' : s)
             .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
-    // 路径分隔符统一成 Windows 风格的 \（录制路径常混用 / 和 \）
-    function normPath(s) { return String(s == null ? '' : s).replace(/\//g, '\\'); }
-
     // 把完整路径渲染成 “文件夹\文件名”，文件夹点击打开目录、文件名点击用默认播放器打开。
     function pathCell(full) {
         if (!full) return '-';
@@ -102,7 +99,7 @@
         if (a.length) {
             act = '<table><thead><tr><th>任务</th><th>文件</th><th>上传至</th><th>进度/信息</th><th>操作</th></tr></thead><tbody>';
             a.forEach(t => {
-                const files = (t.files || []).map(f => `<div>${escHtml(f.name)}</div>`).join('');
+                const files = (t.files || []).map(f => `<div>${pathCell(f.path)}</div>`).join('');
                 let info = t.is_sync ? '<span style="color:var(--secondary-color)">同步上传中...</span>'
                     : (t.status === 'waiting' ? '<span style="color:#666">等待中...</span>'
                     : (t.progress ? `上传中 ${t.progress}` : '上传中...'));
@@ -159,7 +156,7 @@
             if (stage === 'render') {
                 const isDm = !!info.ass;   // 转码任务没有弹幕文件，不显示「弹幕 ass」行，措辞改「转码」
                 body = '<div>源 flv：' + pathCell(info.flv) + '</div>' +
-                       (isDm ? '<div>弹幕 ass：' + escHtml(normPath(info.ass)) + '</div>' : '') +
+                       (isDm ? '<div>弹幕 ass：' + pathCell(info.ass) + '</div>' : '') +
                        '<div style="color:#c00">错误：' + escHtml(info.error || '') + '</div>';
                 form = mp4Form(tk, hid, (isDm ? '渲染' : '转码') + '好后填入 mp4 路径');
             } else if (stage === 'merge') {
