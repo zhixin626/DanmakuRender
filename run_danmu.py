@@ -7,18 +7,16 @@
 
 示例:
     python run_danmu.py https://live.bilibili.com/22230707
-    python run_danmu.py https://live.douyin.com/zcw199608
-    python run_danmu.py https://www.douyu.com/3125893 --only danmaku,gift,sc
-    python run_danmu.py <url> --grep 关键词        # 只看含关键词的弹幕
-    python run_danmu.py <url> --all                # 连进场/未知消息也显示
+    python run_danmu.py https://www.douyu.com/3125893 --only member
+    python run_danmu.py <url> --all                # 连进场/未识别消息也显示
 
 选项:
     --cookie 路径    指定 cookie(默认按平台自动找 .login_info/ 下最新的)
-    --only 类型,..   只显示这些类型: danmaku emoticon gift sc member entry other
-    --grep 词        只显示 内容/昵称 含该词的
-    --all            显示全部类型(含 entry 进场、other 未知)
-    --no-color       关闭彩色
-    --debug          打印未识别消息的原始内容
+    --only 类型,..   只显示这些类型: danmaku gift sc member entry other
+    --all            额外显示进场(entry)
+    --debug          额外显示未识别的 BaseDanmaku(other),并打印非弹幕对象原文
+
+默认显示: danmaku gift sc member
 """
 import argparse
 import asyncio
@@ -34,24 +32,36 @@ os.environ['https_proxy'] = ''
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from DMR.LiveAPI.danmaku import DanmakuClient
-from DMR.utils import UserDanmaku, BaseDanmaku
+from DMR.utils import BaseDanmaku
 
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(levelname)s %(message)s')
 
-C = dict(reset="\033[0m", dim="\033[2m", red="\033[31m", green="\033[32m",
-         yellow="\033[33m", blue="\033[34m", magenta="\033[35m", cyan="\033[36m", gray="\033[90m")
-USE_COLOR = True
+C = dict(reset="\033[0m", red="\033[31m", green="\033[32m", yellow="\033[33m",
+         blue="\033[34m", magenta="\033[35m", cyan="\033[36m", gray="\033[90m")
 def c(s, name):
-    return f"{C[name]}{s}{C['reset']}" if USE_COLOR else str(s)
+    return f"{C[name]}{s}{C['reset']}"
 
 PLATFORMS = {"bilibili.com": "bilibili", "douyin.com": "douyin",
              "douyu.com": "douyu", "huya.com": "huya"}
+
+# 显示类型 -> 包含的 dtype；other 兜底所有未列出的(系统/未识别消息)
+CATEGORIES = {
+    'danmaku': {'danmaku', 'emoticon'},
+    'gift':    {'gift'},
+    'sc':      {'superchat'},
+    'member':  {'member'},
+    'entry':   {'entry'},
+    'other':   set(),
+}
+DEFAULT_CATS = {'danmaku', 'gift', 'sc', 'member'}   # 默认显示；--all 加 entry、--debug 加 other
+
 
 def detect_platform(url):
     for k, v in PLATFORMS.items():
         if k in url:
             return v
     return ""
+
 
 def auto_cookie(platform):
     pat = {"bilibili": ".login_info/b站_*.json", "douyin": ".login_info/抖音_*.json"}.get(platform)
@@ -60,53 +70,42 @@ def auto_cookie(platform):
     cands = sorted(glob.glob(pat), key=os.path.getmtime, reverse=True)
     return cands[0] if cands else None
 
-def to_danmaku(dm):
-    """把队列里的 dict 统一转成弹幕对象（现各 decoder 已直接产出对象，此 dict 路径仅兜底）"""
-    if isinstance(dm, BaseDanmaku):   # 已是弹幕对象(任意类型)直接用；只有原始 dict 才往下转换
-        return dm
-    if isinstance(dm, dict):
-        content = dm.get('content', '')
-        return UserDanmaku(
-            dtype=dm.get('msg_type') or dm.get('dtype') or 'danmaku',
-            uname=dm.get('name') or dm.get('uname') or '',
-            uid=dm.get('uid'),
-            content=content,
-            text=dm.get('text', content),
-            timestamp=dm.get('timestamp', datetime.now().timestamp()),
-            color=dm.get('color', 'ffffff'),
-            raw=dm,
-        )
-    return None
 
-def format_line(dm):
-    t = datetime.fromtimestamp(dm.timestamp or datetime.now().timestamp()).strftime('%H:%M:%S')
-    ts = c(t, 'gray')
-    dt = dm.dtype
-    name = getattr(dm, 'uname', '') or ''
-    text = getattr(dm, 'text', None)
-    content = getattr(dm, 'content', '') or ''
-    if dt in ('danmaku', 'emoticon'):
-        return f"{ts} {c(name, 'cyan')}{who_uid(dm)}: {text or content}"
-    if dt == 'gift':
-        return f"{ts} {c('🎁礼物', 'blue')} {who_uid(dm)} {text or content}"
-    if dt in ('superchat', 'sc'):
-        price = getattr(dm, 'price', ''); unit = getattr(dm, 'price_unit', '')
-        return f"{ts} {c('💎SC', 'yellow')} {c(name, 'yellow')}{who_uid(dm)} {price}{unit}: {content or text}"
-    if dt == 'member':
-        return f"{ts} {c('⚓舰长', 'magenta')} {who_uid(dm)} {text or content}"
-    if dt in ('entry', 'enter'):
-        return f"{ts} {c('→ ' + (text or name + ' 进入直播间'), 'gray')}{who_uid(dm)}"
-    if dt == 'guard_buy':
-        return f"{ts} {c('⚓上舰', 'red')} {who_uid(dm)} {text or content}"
-    return f"{ts} {c('[' + str(dt) + ']', 'gray')} {c(name,'cyan')}{who_uid(dm)} {text or content}"
+def dm_category(dtype):
+    for cat, dtypes in CATEGORIES.items():
+        if dtype in dtypes:
+            return cat
+    return 'other'
+
 
 def who_uid(dm):
-    """返回 uid 标注(灰色,如 (uid:12345));无 uid 返回空串。方便复制到 uid_lists 测 VIP。"""
+    """uid 标注(灰色,如 (uid:12345));无 uid 返回空串。方便复制去测 VIP 名单。"""
     uid = getattr(dm, 'uid', None)
     return c(f"(uid:{uid})", 'gray') if uid not in (None, '', 0) else ''
 
 
-async def listen(url, kwargs, show_types, grep, debug):
+def format_line(dm):
+    ts = c(datetime.fromtimestamp(dm.timestamp).strftime('%H:%M:%S'), 'gray')
+    dt = dm.dtype
+    name = getattr(dm, 'uname', '') or ''
+    text = getattr(dm, 'text', None)
+    content = getattr(dm, 'content', '') or ''
+    uid = who_uid(dm)
+    if dt in ('danmaku', 'emoticon'):
+        return f"{ts} {c(name, 'cyan')}{uid}: {text or content}"
+    if dt == 'gift':
+        return f"{ts} {c('🎁礼物', 'blue')} {c(name, 'cyan')}{uid} {text or content}"
+    if dt == 'superchat':
+        price = getattr(dm, 'price', ''); unit = getattr(dm, 'price_unit', '')
+        return f"{ts} {c('💎SC', 'yellow')} {c(name, 'yellow')}{uid} {price}{unit}: {content or text}"
+    if dt == 'member':
+        return f"{ts} {c('⚓舰长', 'magenta')} {c(name, 'cyan')}{uid} {text or content}"
+    if dt == 'entry':
+        return f"{ts} {c('→ ' + (text or name + ' 进入直播间'), 'gray')}{uid}"
+    return f"{ts} {c('[' + str(dt) + ']', 'gray')} {c(name, 'cyan')}{uid} {text or content}"
+
+
+async def listen(url, kwargs, show_cats, debug):
     q = asyncio.Queue()
     client = DanmakuClient(url, q, **kwargs)
     task = asyncio.create_task(client.start())
@@ -114,17 +113,12 @@ async def listen(url, kwargs, show_types, grep, debug):
     try:
         while True:
             raw = await q.get()
-            dm = to_danmaku(raw)
-            if dm is None:
+            if not isinstance(raw, BaseDanmaku):   # decoder 现统一产出弹幕对象;非对象仅调试时看
+                if debug:
+                    print(c(f"[RAW] {raw}", 'gray'))
                 continue
-            if debug and dm.dtype == 'other':
-                print(c(f"[RAW] {raw}", 'gray'))
-            if show_types is not None and dm.dtype not in show_types:
-                continue
-            if grep and grep not in (getattr(dm, 'content', '') or '') and grep not in (getattr(dm, 'uname', '') or '') \
-                    and grep not in (getattr(dm, 'text', '') or ''):
-                continue
-            print(format_line(dm))
+            if dm_category(raw.dtype) in show_cats:
+                print(format_line(raw))
     except asyncio.CancelledError:
         pass
     finally:
@@ -141,31 +135,41 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("url", nargs="?", help="直播间 URL")
     ap.add_argument("--cookie", help="cookie 文件(默认按平台自动找)")
-    ap.add_argument("--only", help="只显示的类型,逗号分隔: danmaku,emoticon,gift,sc,member,entry,other")
-    ap.add_argument("--grep", help="只显示 内容/昵称 含该关键词的")
-    ap.add_argument("--all", action="store_true", help="显示全部类型(含 entry/other)")
-    ap.add_argument("--no-color", action="store_true", help="关闭彩色")
-    ap.add_argument("--debug", action="store_true", help="打印未识别消息原始内容")
+    ap.add_argument("--only", help="只显示的类型,逗号分隔: " + " ".join(CATEGORIES))
+    ap.add_argument("--all", action="store_true", help="额外显示进场(entry)")
+    ap.add_argument("--debug", action="store_true", help="额外显示未识别的 BaseDanmaku(other),并打印非弹幕对象原文")
     args = ap.parse_args()
 
     if not args.url:
         ap.print_help()
         sys.exit(0)
 
-    global USE_COLOR
-    USE_COLOR = not args.no_color
-    if USE_COLOR and sys.platform == 'win32':
+    # 选择要显示的类型；--only 传了不存在的类型(如 memeber)直接报错退出
+    if args.only:
+        cats = [s.strip().lower() for s in args.only.split(",") if s.strip()]
+        bad = [x for x in cats if x not in CATEGORIES]
+        if bad:
+            print(c(f"[!] 未知类型: {', '.join(bad)}；可用: {', '.join(CATEGORIES)}", 'red'))
+            sys.exit(1)
+        show_cats = set(cats)
+    else:
+        show_cats = set(DEFAULT_CATS)
+        if args.all:
+            show_cats.add('entry')    # --all 加进场
+        if args.debug:
+            show_cats.add('other')    # --debug 加未识别的 BaseDanmaku
+
+    if sys.platform == 'win32':
         try:
             import colorama; colorama.just_fix_windows_console()
         except Exception:
-            os.system("")  # 启用 Win10+ 终端的 ANSI
+            os.system("")   # 启用 Win10+ 终端的 ANSI
 
     platform = detect_platform(args.url)
     if not platform:
         print(c(f"[!] 无法识别平台(支持 bilibili/douyin/douyu/huya): {args.url}", 'red'))
         sys.exit(1)
 
-    # 组装 cookie 参数(只传该平台需要的)
     kwargs = {}
     cookie = args.cookie or auto_cookie(platform)
     if cookie and not os.path.exists(cookie):
@@ -175,21 +179,12 @@ def main():
     elif platform == "douyin" and cookie:
         kwargs["douyin_dm_cookies"] = cookie
 
-    # 显示哪些类型
-    if args.only:
-        show_types = set(s.strip() for s in args.only.split(",") if s.strip())
-        show_types |= {"superchat"} if "sc" in show_types else set()
-    elif args.all:
-        show_types = None  # 全部
-    else:
-        show_types = {"danmaku", "emoticon", "gift", "superchat", "sc", "member", "guard_buy"}
-
-    print(c(f"[*] 平台={platform} cookie={cookie or '游客'}", 'gray'))
+    print(c(f"[*] 平台={platform} cookie={cookie or '游客'} 显示={','.join(sorted(show_cats))}", 'gray'))
 
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
-        asyncio.run(listen(args.url, kwargs, show_types, args.grep, args.debug))
+        asyncio.run(listen(args.url, kwargs, show_cats, args.debug))
     except KeyboardInterrupt:
         pass
 
