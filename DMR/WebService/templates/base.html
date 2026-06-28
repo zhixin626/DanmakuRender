@@ -55,6 +55,7 @@
             const btn = document.getElementById('btn-restart');
             if (!btn || btn.dataset.restartSet === '1') return;
             btn.dataset.restartSet = '1';
+            localStorage.setItem('restart_pending', '1');   // 跨页面记住，切页时立即恢复绿色态，避免闪烁
             btn.textContent = '✓ 已设置重启';
             btn.style.color = '#4caf50';
             btn.title = '等待所有任务空闲后重启';
@@ -70,6 +71,7 @@
             const btn = document.getElementById('btn-restart');
             if (!btn || btn.dataset.restartSet !== '1') return;
             btn.dataset.restartSet = '0';
+            localStorage.removeItem('restart_pending');
             btn.textContent = '重启';
             btn.style.color = '';
             btn.title = '';
@@ -78,6 +80,9 @@
             btn.style.cursor = '';
         }
         window.clearRestartPending = clearRestartPending;
+
+        // 切页/刷新时立即恢复「已设置重启」绿色态，赶在首次轮询前，避免按钮闪烁
+        if (localStorage.getItem('restart_pending') === '1') setRestartPending();
 
         // 导航红点：config/failed 为待办型(数量>0亮)；logs_err 为新消息型(localStorage 记已读)
         function updateNavBadges(n) {
