@@ -217,20 +217,26 @@ class Config():
         停用的文件不报变更（由启用/停用开关管理）；global 恒为启用、只会是 modified 或 None。"""
         result = []
 
-        # ① global 全局配置：必须启用、不能停用、不会 new/deleted，改了只能整程序重启生效
+        # ① global 全局配置：必须启用、不能停用、不会 new/deleted，改了只能整程序重启生效；可「忽略」消红点
         g = self.global_config_path
         g_status = 'modified' if self._get_file_hash(g) != self.file_hashes.get(g) else None
+        if g_status == 'modified' and g in self.deferred:
+            g_status = 'deferred'
         result.append(self._state_entry(g, taskname='全局配置', status=g_status,
                                         enabled=True, exists=True, is_global=True))
 
         # ② 磁盘上的任务文件
+        # enabled 表示「此刻真加载进引擎在跑」(在 loaded_files 里)，而非文件 enable 字段——
+        # 否则刚拖进来还没 apply 的新文件(enable 缺省 true)会立刻显示「已启用」，与「待应用(新增)」自相矛盾。
+        # 文件 enable 字段(file_enabled)只用来抑制停用文件的变更提醒。
         current_files = set(self.task_config_files())
         loaded_files = set(self.loaded_task_files)
         for f in sorted(current_files):
-            enabled = self.is_task_enabled(f)
-            if not enabled:
+            file_enabled = self.is_task_enabled(f)
+            is_loaded = f in loaded_files
+            if not file_enabled:
                 status = None
-            elif f not in loaded_files:
+            elif not is_loaded:
                 status = 'new'
             elif self._get_file_hash(f) != self.file_hashes.get(f):
                 status = 'modified'
@@ -239,7 +245,7 @@ class Config():
             if status in ('new', 'modified') and f in self.deferred:
                 status = 'deferred'
             result.append(self._state_entry(f, taskname=filename_to_taskname(f),
-                                            status=status, enabled=enabled, exists=True))
+                                            status=status, enabled=is_loaded, exists=True))
 
         # ③ 已加载但磁盘已删的任务文件
         for f in sorted(loaded_files - current_files):
@@ -267,7 +273,7 @@ class Config():
         diff = difflib.unified_diff(
             old_lines, new_lines,
             fromfile=f'{fname}（已应用）', tofile=f'{fname}（当前）',
-            lineterm='', n=max(len(old_lines), len(new_lines), 1))
+            lineterm='', n=6)   # 每处改动上下各保留 6 行上下文，只展示改动段落而非整个文件
         return list(diff)
 
     def revert(self, filename):
@@ -291,8 +297,12 @@ class Config():
         return False
 
     def defer(self, filename):
-        """把某文件标记为“推迟到重启”：之后再改也保持 deferred、不再红点，直到重启统一应用或撤销推迟。"""
+        """把某文件标记为“忽略”：消红点、不再提醒，改动在下次重启时自然生效，直到撤销忽略。
+        global 也可忽略（它本就只能重启生效）。"""
         fname = os.path.basename(filename)
+        if fname == os.path.basename(self.global_config_path):
+            self.deferred[self.global_config_path] = True
+            return True
         disk_path = self.find_task_file(fname)
         if disk_path is not None:
             self.deferred[disk_path] = True

@@ -345,6 +345,36 @@
         return html;
     }
 
+    // ---- 排序：点表头切列、再点同列切升降；存 localStorage 刷新后保留 ----
+    var recSort = { key: localStorage.getItem('rec_sort_key') || 'name',
+                    dir: localStorage.getItem('rec_sort_dir') || 'asc' };
+    function setRecSort(key) {
+        if (recSort.key === key) recSort.dir = (recSort.dir === 'asc' ? 'desc' : 'asc');
+        else { recSort.key = key; recSort.dir = 'asc'; }
+        localStorage.setItem('rec_sort_key', recSort.key);
+        localStorage.setItem('rec_sort_dir', recSort.dir);
+        window._recSig = null;   // 强制重建一次
+        refreshTasks();
+    }
+    window.setRecSort = setRecSort;
+
+    function sortRecTasks(tasks) {
+        var k = recSort.key, dir = recSort.dir === 'desc' ? -1 : 1;
+        return tasks.slice().sort(function (a, b) {
+            var cmp = (k === 'status')
+                ? (a.status - b.status)
+                : String(a[k] || '').localeCompare(String(b[k] || ''), 'zh');
+            if (cmp === 0 && k !== 'name') cmp = String(a.name).localeCompare(String(b.name), 'zh');  // 同值按任务名兜底
+            return cmp * dir;
+        });
+    }
+    function recArrow(key) {
+        return recSort.key === key ? (recSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    }
+    function recTh(key, label) {
+        return '<th onclick="setRecSort(\'' + key + '\')" style="cursor:pointer;user-select:none;" title="点击排序">' + label + recArrow(key) + '</th>';
+    }
+
     function refreshTasks() {
         fetch('/api/tasks')
             .then(response => response.json())
@@ -354,13 +384,17 @@
                     taskInfoMap[task.name] = { force_offline_time: task.force_offline_time };
                 });
                 if (data.recording_tasks.length > 0) {
-                    // 结构签名：排除每秒变化的时长，只有任务/状态/按钮变了才重建整张表
-                    const sig = JSON.stringify(data.recording_tasks.map(t =>
+                    const tasks = sortRecTasks(data.recording_tasks);
+                    // 结构签名：排除每秒变化的时长，只有任务/状态/按钮/排序变了才重建整张表
+                    const sig = JSON.stringify(tasks.map(t =>
                         [t.name, t.platform, t.url, t.status, t.output_dir]));
                     if (sig !== window._recSig) {
                         window._recSig = sig;
-                        let html = '<table><thead><tr><th>任务名</th><th>平台</th><th>直播间</th><th>状态</th><th>分段时长</th><th>本场时长</th><th>操作</th></tr></thead><tbody>';
-                        data.recording_tasks.forEach(task => {
+                        let html = '<table><thead><tr>' +
+                            recTh('name', '任务名') + recTh('platform', '平台') +
+                            '<th>直播间</th>' + recTh('status', '状态') +
+                            '<th>分段时长</th><th>本场时长</th><th>操作</th></tr></thead><tbody>';
+                        tasks.forEach(task => {
                             const statusClass = task.status === 1 ? 'status-running' : (task.status === 2 ? 'status-replay' : (task.status === 3 ? 'status-stopping' : 'status-stopped'));
                             const statusText = task.status === 1 ? '录制中' : (task.status === 2 ? '回放中' : (task.status === 3 ? '等待确认下播' : '未开播'));
                             html += `<tr>
