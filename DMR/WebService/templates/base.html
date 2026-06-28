@@ -24,7 +24,7 @@
                     <a href="{{ url_for('record') }}">录制</a>
                     <a href="{{ url_for('process') }}" style="position:relative;">队列<span class="nav-dot" id="dot-failed"></span></a>
                     <a href="{{ url_for('logs_page') }}" style="position:relative;">日志<span class="nav-dot" id="dot-logs"></span></a>
-                    <a href="{{ url_for('config_list') }}">配置</a>
+                    <a href="{{ url_for('config_list') }}" style="position:relative;">配置<span class="nav-dot" id="dot-config"></span></a>
                     <a href="{{ url_for('logout') }}" style="position:relative;">注销</a>
                     <button id="btn-restart" onclick="triggerRestart()">重启</button>
                     <button id="btn-shutdown" onclick="triggerShutdown()" style="color:#ff6b6b;">退出</button>
@@ -64,10 +64,27 @@
         }
         window.setRestartPending = setRestartPending;
 
-        // 导航红点：failed 为待办型(数量>0亮)；logs_err 为新消息型(localStorage 记已读)
+        // 把重启按钮从「已设置重启」复原成可点的「重启」（程序真重启后新进程报 restart_pending=false 时调）。
+        // 守卫 restartSet==='1'：只在已置位时才复原，避免刚点击到服务端置位之间的极短窗口被误复原。
+        function clearRestartPending() {
+            const btn = document.getElementById('btn-restart');
+            if (!btn || btn.dataset.restartSet !== '1') return;
+            btn.dataset.restartSet = '0';
+            btn.textContent = '重启';
+            btn.style.color = '';
+            btn.title = '';
+            btn.disabled = false;
+            btn.onclick = triggerRestart;
+            btn.style.cursor = '';
+        }
+        window.clearRestartPending = clearRestartPending;
+
+        // 导航红点：config/failed 为待办型(数量>0亮)；logs_err 为新消息型(localStorage 记已读)
         function updateNavBadges(n) {
             if (!n) return;
             if (n.restart_pending) setRestartPending();
+            else clearRestartPending();   // 重启完成→自动复原按钮，不必手动刷新
+            _toggleDot('dot-config', (n.config || 0) > 0);
             _toggleDot('dot-failed', (n.failed || 0) > 0);
             var err = n.logs_err || 0;
             if (window.location.pathname === '/logs' && document.visibilityState === 'visible') {
