@@ -238,9 +238,13 @@ def render_segment(cfg):
     # 字幕（可选）：和弹幕在同一遍 libass 里一起烧，几乎不增加编码成本
     sub_seg = cfg.get("subtitle")
     sub_filter = f",subtitles={os.path.basename(sub_seg)}" if sub_seg else ""
+    # scale+pad 到固定 W×H：兜住「直播中途分辨率变化(如连线)」——否则后半段帧尺寸变了、
+    # 而下游编码器按固定 -s {W}x{H} 切 nv12 字节流 → 字节错位 → 彩条乱码；且弹幕/礼物框(ass 按 W×H 定位)会被拉伸。
+    # 源本就是 W×H 时此步为 no-op；变化的片段会被等比缩放居中补边到 W×H。放在 subtitles 之前，保证弹幕在 W×H 上不变形。
+    uniform = f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:-1:-1:color=black,setsar=1,"
     dec_cmd += ["-i", os.path.basename(seg_file),
                 # fps 在 subtitles 之前：先把(可变帧率的)源铺成均匀 CFR，再让 libass 逐帧画弹幕 → 顺滑
-                "-vf", f"fps={fps},subtitles={os.path.basename(textonly_ass)}{sub_filter}",
+                "-vf", f"fps={fps},{uniform}subtitles={os.path.basename(textonly_ass)}{sub_filter}",
                 "-fps_mode", "cfr", "-f", "rawvideo", "-pix_fmt", "nv12", "-"]
     dec = subprocess.Popen(dec_cmd, cwd=segdir, stdout=subprocess.PIPE)
     venc = cfg.get("venc", "h264_nvenc")
