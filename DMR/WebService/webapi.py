@@ -6,7 +6,6 @@ import os
 import time
 import json
 import yaml
-import glob
 import subprocess
 
 
@@ -267,39 +266,83 @@ class WebApi:
         @app.route('/api/config/list')
         @self.login_required
         def config_list_api():
-            """配置文件列表（供配置页/录制页构建），含每个任务是否启用。"""
+            """配置文件实时状态：直接照 Config.get_all_states() 渲染（global + 各任务的启用/变更状态）。
+            Config 是唯一权威，这里只转发，不再自己扫目录。"""
             dmr = getattr(self.engine, 'dmr', None)
             configs = []
-            if os.path.isdir(self.config_dir):
-                for f in sorted(glob.glob(os.path.join(self.config_dir, '*.yml'))):
-                    fn = os.path.basename(f)
-                    if fn.lower() == 'global.yml':
-                        continue
-                    enabled = True
-                    if dmr is not None:
-                        try:
-                            enabled = dmr.config.is_task_enabled(f)
-                        except Exception:
-                            pass
-                    configs.append({
-                        'filename': fn,
-                        'path': os.path.abspath(f),   # 完整路径，供前端显示「文件夹\文件」并点击打开
-                        'taskname': os.path.splitext(fn)[0].split('-', 1)[-1],
-                        'enabled': enabled,
-                        'is_example': fn.startswith('example-'),
-                    })
+            if dmr is not None:
+                try:
+                    configs = dmr.config.get_all_states()
+                except Exception as e:
+                    self.logger.debug(f'读取配置状态失败: {e}')
             return {'configs': configs, 'notifications': self.get_notifications()}
 
         @app.route('/api/config/toggle/<filename>', methods=['POST'])
         @self.login_required
         def config_toggle_api(filename):
-            """启用/停用某任务：写回配置文件的 enable 字段并即时增删任务。
-            body: {"enabled": true/false}"""
+            """启用/停用某任务：写回配置文件的 enable 字段并即时增删任务。body: {"enabled": true/false}"""
             dmr = getattr(self.engine, 'dmr', None)
             if dmr is None:
                 return {'ok': False, 'message': '引擎未就绪'}, 503
             enabled = bool((request.get_json(silent=True) or {}).get('enabled', True))
             return dmr.toggle_task(os.path.basename(filename), enabled)
+
+        # ---- 配置变更：提醒(红点) + 查看改动 + 手动应用 + 撤销 + 推迟（不自动热重载）----
+        @app.route('/api/config/pending')
+        @self.login_required
+        def config_pending_api():
+            dmr = getattr(self.engine, 'dmr', None)
+            return {'pending': dmr.config.get_pending_changes() if dmr else []}
+
+        @app.route('/api/config/diff/<filename>')
+        @self.login_required
+        def config_diff_api(filename):
+            dmr = getattr(self.engine, 'dmr', None)
+            return {'diff': dmr.config.get_diff(os.path.basename(filename)) if dmr else []}
+
+        @app.route('/api/config/apply/<filename>', methods=['POST'])
+        @self.login_required
+        def config_apply_api(filename):
+            dmr = getattr(self.engine, 'dmr', None)
+            if dmr is None:
+                return {'ok': False, 'message': '引擎未就绪'}, 503
+            return dmr.apply_config_change(os.path.basename(filename))
+
+        @app.route('/api/config/revert/<filename>', methods=['POST'])
+        @self.login_required
+        def config_revert_api(filename):
+            dmr = getattr(self.engine, 'dmr', None)
+            if dmr is None:
+                return {'ok': False, 'message': '引擎未就绪'}, 503
+            ok = dmr.config.revert(os.path.basename(filename))
+            return {'ok': ok, 'message': '已撤销改动' if ok else '撤销失败（无可回退的版本）'}
+
+        @app.route('/api/config/defer/<filename>', methods=['POST'])
+        @self.login_required
+        def config_defer_api(filename):
+            dmr = getattr(self.engine, 'dmr', None)
+            if dmr is None:
+                return {'ok': False, 'message': '引擎未就绪'}, 503
+            ok = dmr.config.defer(os.path.basename(filename))
+            return {'ok': ok, 'message': '已推迟到重启时生效' if ok else '未找到该文件'}
+
+        @app.route('/api/config/undefer/<filename>', methods=['POST'])
+        @self.login_required
+        def config_undefer_api(filename):
+            dmr = getattr(self.engine, 'dmr', None)
+            if dmr is None:
+                return {'ok': False, 'message': '引擎未就绪'}, 503
+            dmr.config.undefer(os.path.basename(filename))
+            return {'ok': True, 'message': '已撤销推迟'}
+
+        @app.route('/api/config/defer_all', methods=['POST'])
+        @self.login_required
+        def config_defer_all_api():
+            dmr = getattr(self.engine, 'dmr', None)
+            if dmr is None:
+                return {'ok': False, 'message': '引擎未就绪'}, 503
+            cnt = sum(1 for s in dmr.config.get_pending_changes() if dmr.config.defer(s['filename']))
+            return {'ok': True, 'message': f'已推迟 {cnt} 个文件到重启'}
 
         @app.route('/api/upload_tasks/<uuid>/stop', methods=['POST'])
         @self.login_required
@@ -625,9 +668,15 @@ class WebApi:
     def get_notifications(self):
         """导航红点汇总：搭便车塞进各页面已有的轮询响应，不新增请求。
         config/failed 为“待办型”(数量>0亮)；logs_err 为“新消息型”(前端用 localStorage 比对已读)。"""
-        n = {'failed': 0, 'logs_err': 0, 'restart_pending': False}
+        n = {'config': 0, 'failed': 0, 'logs_err': 0, 'restart_pending': False}
         # 是否已设置「空闲后重启」：供前端把重启按钮恢复成绿色「已设置」态（刷新后也保持）
         n['restart_pending'] = bool(getattr(self.engine, '_restart_pending', False))
+        dmr = getattr(self.engine, 'dmr', None)
+        if dmr is not None:
+            try:
+                n['config'] = len(dmr.config.get_pending_changes())   # 配置增删改红点
+            except Exception:
+                pass
         try:
             # 待办计数 = 各任务"需人工处理"的挂起任务数（失败重试用尽后转人工）
             for info in (getattr(self.engine, 'task_dict', {}).values() if self.engine else []):

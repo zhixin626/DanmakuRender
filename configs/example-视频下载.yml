@@ -1,3 +1,4 @@
+enable: false
 # 本文件一个代表一个录制任务，这里的设置基本上包含了所有可用的参数
 # 配置文件编写请参考 https://github.com/SmallPeaches/DanmakuRender 
 common_event_args:
