@@ -227,11 +227,18 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             width, height = default_resolution
 
         self.width,self.height = width, height
-
-        self.downloader = None
         self.dmw = None
 
         def danmaku_thread():
+            self.dmw.start(self_segment=not self.video)
+
+        def video_thread():
+            self.downloader.start()
+
+        self.executor = ThreadPoolExecutor(max_workers=int(self.danmaku) + int(self.video))
+        futures = []
+
+        if self.danmaku:
             description = f'{self.taskname}的录播弹幕文件, {self.url}, Powered by DanmakuRender: https://github.com/SmallPeaches/DanmakuRender.'
             danmu_output = join(self.output_dir, f'[正在录制]{self.taskname}-{time.strftime("%Y%m%d-%H%M%S",time.localtime())}-Part%03d.ass')
             self.dmw = DanmakuDownloader(self.url,
@@ -241,10 +248,8 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                                      width=self.width,
                                      height=self.height,
                                      danmaku_args=self.danmaku_args)   # 弹幕全部参数(格式/连接/高级/四类型)都在这里
-
-            self.dmw.start(self_segment=not self.video)
-
-        def video_thread():
+            futures.append(self.executor.submit(danmaku_thread))
+        if self.video:
             self.downloader = downloader_class(
                 stream_url=stream_url,
                 header=stream_request_header,
@@ -259,15 +264,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 debug=self.debug,
                 **self.kwargs
             )
-            self.downloader.start()
-
-        self.executor = ThreadPoolExecutor(max_workers=int(self.danmaku) + int(self.video))
-        futures = []
-
-
-        if self.danmaku:
-            futures.append(self.executor.submit(danmaku_thread))
-        if self.video:
             futures.append(self.executor.submit(video_thread))
 
         last_onair_check = time.time()
