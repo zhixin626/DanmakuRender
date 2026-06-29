@@ -15,12 +15,15 @@
     --only 类型,..   只显示这些类型: danmaku gift sc member entry other
     --all            额外显示进场(entry)
     --debug          额外显示未识别的 BaseDanmaku(other),并打印非弹幕对象原文
+    --dump-raw [文件] 把 gift/member 的原始消息(SEND_GIFT/USER_TOAST_MSG)追加存到
+                     文件(默认 raw_gift_member.jsonl),不受 --only/--all 影响,用于排查重复
 
 默认显示: danmaku gift sc member
 """
 import argparse
 import asyncio
 import glob
+import json
 import logging
 import os
 import sys
@@ -105,7 +108,7 @@ def format_line(dm):
     return f"{ts} {c('[' + str(dt) + ']', 'gray')} {c(name, 'cyan')}{uid} {text or content}"
 
 
-async def listen(url, kwargs, show_cats, debug):
+async def listen(url, kwargs, show_cats, debug, dump_raw=None):
     q = asyncio.Queue()
     client = DanmakuClient(url, q, **kwargs)
     task = asyncio.create_task(client.start())
@@ -117,6 +120,10 @@ async def listen(url, kwargs, show_cats, debug):
                 if debug:
                     print(c(f"[RAW] {raw}", 'gray'))
                 continue
+            # gift/member 的原始消息落盘(不受显示过滤影响),用于排查重复(看 tid/payflow_id)
+            if dump_raw and raw.dtype in ('gift', 'member'):
+                with open(dump_raw, 'a', encoding='utf-8') as fp:
+                    fp.write(json.dumps(getattr(raw, 'raw', None), ensure_ascii=False) + '\n')
             if dm_category(raw.dtype) in show_cats:
                 print(format_line(raw))
     except asyncio.CancelledError:
@@ -138,6 +145,8 @@ def main():
     ap.add_argument("--only", help="只显示的类型,逗号分隔: " + " ".join(CATEGORIES))
     ap.add_argument("--all", action="store_true", help="额外显示进场(entry)")
     ap.add_argument("--debug", action="store_true", help="额外显示未识别的 BaseDanmaku(other),并打印非弹幕对象原文")
+    ap.add_argument("--dump-raw", nargs="?", const="raw_gift_member.jsonl", default=None,
+                    help="把 gift/member 的原始消息追加存到文件(默认 raw_gift_member.jsonl),用于排查重复")
     args = ap.parse_args()
 
     if not args.url:
@@ -180,11 +189,13 @@ def main():
         kwargs["douyin_dm_cookies"] = cookie
 
     print(c(f"[*] 平台={platform} cookie={cookie or '游客'} 显示={','.join(sorted(show_cats))}", 'gray'))
+    if args.dump_raw:
+        print(c(f"[*] gift/member 原始消息将追加写入: {args.dump_raw}", 'gray'))
 
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
-        asyncio.run(listen(args.url, kwargs, show_cats, args.debug))
+        asyncio.run(listen(args.url, kwargs, show_cats, args.debug, args.dump_raw))
     except KeyboardInterrupt:
         pass
 
