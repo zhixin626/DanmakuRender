@@ -29,76 +29,81 @@ class DanmakuDownloader():
                  height:int=1080,
                  **kwargs) -> None:
         da = danmaku_args or {}
-        self.danmaku_args = da
-        self.stoped = False
         self.logger = logging.getLogger(__name__)
+        self.stoped = False
+        self.part = 0
+        self.kwargs = kwargs
         self.url = url
         self.output = output
         self.segment = segment
         self.dm_format = da.get('format', 'ass')
         self.dm_stream_option = da.get('stream_option') or {}
 
+        self._init_advanced(da)
+        self._init_types(da)
+        self._init_danmaku_filter(da)
+        self._init_writer(da, description, width, height)
+
+    def _init_advanced(self, da):
+        """高级连接参数（advanced_args）。"""
         adv = da.get('advanced_args') or {}
-        self.dm_delay_fixed   = adv.get('dm_delay_fixed', 6)
-        self.dm_auto_restart  = adv.get('dm_auto_restart', 300)
-        self.dm_extra_inputs  = adv.get('dm_extra_inputs', [])   # 是个 list！
-        self.dm_file_min_time = adv.get('dm_file_min_time', 10)
+        self.dm_delay_fixed   = adv.get('dm_delay_fixed', 6)     # 弹幕相对时间的固定延迟补偿(秒)
+        self.dm_auto_restart  = adv.get('dm_auto_restart', 300)  # 多久收不到弹幕就重连(秒)
+        self.dm_extra_inputs  = adv.get('dm_extra_inputs', [])   # 额外弹幕输入源(list)
+        self.dm_file_min_time = adv.get('dm_file_min_time', 10)  # 弹幕文件过短则删除的时长阈值(秒)
 
-        # —— 四类型配置（普通弹幕 / 礼物 / SC / 上舰）——
-        dan    = da.get('danmaku') or {}
-        gift   = da.get('gift') or {}
+    def _init_types(self, da):
+        """四类型(弹幕/礼物/SC/上舰)的渲染开关、记录开关、礼物过滤、营收落盘路径。"""
+        gift   = da.get('gift')      or {}
         sc     = da.get('superchat') or {}
-        member = da.get('member') or {}
-        self._dan_render = dan.get('render') or {}
-        self._dan_filter = dan.get('filter') or {}
-        self._gift   = gift
-        self._sc     = sc
-        self._member = member
-
+        member = da.get('member')    or {}
+        dan_render = (da.get('danmaku') or {}).get('render') or {}
+        self._gift = gift   # 供 _add_gift_to_ass 取 render.box
+        self._sc   = sc     # 供 _add_sc_to_ass 取 render
         # 渲染开关（dtype -> 是否渲染）。未配置的类型(如 entry/other)一律不渲染。
         self.render_enable = {
-            'danmaku':   self._dan_render.get('enable', True),
+            'danmaku':   dan_render.get('enable', True),
             'gift':      (gift.get('render')   or {}).get('enable', True),
             'superchat': (sc.get('render')     or {}).get('enable', True),
             'member':    (member.get('render') or {}).get('enable', True),
         }
-        # 记录开关（只有 gift/superchat/member 进营收统计）
+        # 记录开关（只有 gift/superchat/member 进营收统计 gifts.jsonl）
         self.record_enable = {
             'gift':      (gift.get('record')   or {}).get('enable', False),
             'superchat': (sc.get('record')     or {}).get('enable', False),
             'member':    (member.get('record') or {}).get('enable', False),
         }
-        # 礼物价格门槛（None=不按价格过滤）
-        self.gift_min_cny = (gift.get('filter') or {}).get('min_cny', None)
-        # 礼物落盘路径：与弹幕同目录的 gifts.jsonl
-        self.gifts_file_path = os.path.join(os.path.dirname(output), "gifts.jsonl")
+        self.gift_min_cny    = (gift.get('filter') or {}).get('min_cny', None)   # 礼物价格门槛(None=不按价过滤)
+        self.gifts_file_path = os.path.join(os.path.dirname(self.output), "gifts.jsonl")
 
-        # 普通弹幕过滤：关键词/用户名 编译为正则；最大宽度解析为 (模式, 值)
-        self.dm_keywords    = self._compile_patterns(self._dan_filter.get('keywords'), '弹幕屏蔽词')
-        self.dm_usernames   = self._compile_patterns(self._dan_filter.get('username'), '用户屏蔽')
-        self.max_length_spec = self._parse_max_length(self._dan_filter.get('max_length'))
-        # 普通弹幕文本模板（礼物/上舰的模板在 AssWriter.add_slide_R 内处理）
-        self.dm_template = self._dan_render.get('template') or None
-        # VIP 名单 -> {uid(str): 药丸色(str或None)}
-        self.vip_map = self._build_vip_map(self._dan_render.get('vip_lists'))
+    def _init_danmaku_filter(self, da):
+        """普通弹幕的过滤(关键词/用户名/最大长度) + 文本装饰(模板/VIP)。"""
+        dan        = da.get('danmaku') or {}
+        dan_render = dan.get('render') or {}
+        dan_filter = dan.get('filter') or {}
+        self.dm_keywords     = self._compile_patterns(dan_filter.get('keywords'), '弹幕屏蔽词')
+        self.dm_usernames    = self._compile_patterns(dan_filter.get('username'), '用户屏蔽')
+        self.max_length_spec = self._parse_max_length(dan_filter.get('max_length'))   # (模式, 值)
+        self.dm_template     = dan_render.get('template') or None   # 普通弹幕模板(礼物/上舰模板在 AssWriter 内)
+        self.vip_map         = self._build_vip_map(dan_render.get('vip_lists'))   # {uid(str): 药丸色(str或None)}
 
-        self.kwargs = kwargs
-        self.part = 0
-
+    def _init_writer(self, da, description, width, height):
+        """弹幕写入器（目前仅支持 ass）。"""
         if platform.system() == 'Windows':
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-        if self.dm_format == 'ass':
-            from .asswriter import AssWriter
-            self.dmwriter = AssWriter(
-                description=description, width=width, height=height,
-                danmaku_render = self._dan_render,
-                gift_render    = gift.get('render')   or {},
-                sc_render      = sc.get('render')     or {},
-                member_render  = member.get('render') or {},
-            )
-        else:
+        if self.dm_format != 'ass':
             raise NotImplementedError(f"unsupported danmaku format {self.dm_format}")
+        gift   = da.get('gift')      or {}
+        sc     = da.get('superchat') or {}
+        member = da.get('member')    or {}
+        from .asswriter import AssWriter
+        self.dmwriter = AssWriter(
+            description=description, width=width, height=height,
+            danmaku_render = (da.get('danmaku') or {}).get('render') or {},
+            gift_render    = gift.get('render')   or {},
+            sc_render      = sc.get('render')     or {},
+            member_render  = member.get('render') or {},
+        )
 
     def _compile_patterns(self, raw, label):
         """关键词/用户名过滤项 -> 编译后的正则列表；非法配置告警并返回空列表。"""
