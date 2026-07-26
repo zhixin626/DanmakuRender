@@ -31,3 +31,7 @@ DMR-**.yml
 *.bat
 
 *.dll
+
+
+# 字幕编辑器已独立到 D:\Editor字幕编辑器，不随本项目发布
+/editor/

@@ -1,12 +1,20 @@
 import copy
 import logging
 import os
+import platform
 
 from .baserender import BaseRender
 from .ffmpeg import RawFFmpegRender
-from .subtitle import escape_sub, generate_subtitle_ass, clean_subtitle_intermediates
 from os.path import exists
 from DMR.utils import *
+
+
+def escape_sub(path):
+    """把路径转义成可放进 ffmpeg `subtitles=` 滤镜的形式（Windows 下处理 \\ 与盘符冒号）。"""
+    if platform.system().lower() == 'windows':
+        return path.replace("\\", "/").replace(":/", "\\:/")
+    return path
+
 
 class DmRender(BaseRender):
     def __init__(self,
@@ -17,7 +25,6 @@ class DmRender(BaseRender):
                  aencoder_args: list,
                  output_resize: str,
                  advanced_render_args: dict=None,
-                 subtitle: dict=None,
                  ffmpeg: str = None,
                  debug=False,
                  **kwargs
@@ -29,7 +36,6 @@ class DmRender(BaseRender):
         self.aencoder_args = aencoder_args
         self.output_resize = output_resize
         self.advanced_render_args = advanced_render_args if isinstance(advanced_render_args, dict) else {}
-        self.subtitle = subtitle if isinstance(subtitle, dict) else {}
         self.ffmpeg = ffmpeg if ffmpeg else ToolsList.get('ffmpeg')
         self.debug = debug
 
@@ -57,12 +63,6 @@ class DmRender(BaseRender):
 
         danmaku = escape_sub(danmaku)
 
-        # 语音识别字幕：对该视频做 ASR 生成字幕 ass，作为第二层叠加到弹幕之上（共用模块）
-        sub_filter = ''
-        sub_ass = generate_subtitle_ass(video, self.subtitle, self.logger)
-        if sub_ass:
-            sub_filter = ",subtitles=filename='%s'" % escape_sub(sub_ass)
-
         # 自定义video filter
         if self.advanced_render_args.get('filter_complex'):
             filter_name = '-filter_complex'
@@ -75,8 +75,6 @@ class DmRender(BaseRender):
             fps = FFprobe.get_fps(video)
             fps_prefix = f'fps={fps:.6g},' if fps and fps > 0 else ''
             filter_str = '%ssubtitles=filename=\'%s\'' % (fps_prefix, danmaku)
-
-        filter_str += sub_filter   # 弹幕在下、字幕在上，单遍编码一起烧
 
         ffmpeg_args += [
             '-fflags', '+discardcorrupt+genpts',
@@ -95,12 +93,7 @@ class DmRender(BaseRender):
         ]
 
         self.logger.info(f'开始渲染: {output}')   # 此处才真正开始 ffmpeg 渲染
-        result = self.raw_ffmpeg.call_ffmpeg(ffmpeg_args, progress_cb=progress_cb, duration=duration)
-        # 渲染成功后，ASR 字幕中间文件由本步自己清理（共用模块），不进主清理管线
-        ok = result[0] if isinstance(result, (tuple, list)) else result
-        if ok and self.subtitle.get('enable'):
-            clean_subtitle_intermediates(video, sub_ass, self.subtitle.get('clean', True), self.logger)
-        return result
+        return self.raw_ffmpeg.call_ffmpeg(ffmpeg_args, progress_cb=progress_cb, duration=duration)
 
     def render_one(self, video: VideoInfo, output: str, progress_cb=None, **kwargs):
         if not exists(video.path):
