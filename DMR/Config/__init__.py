@@ -69,8 +69,12 @@ class Config():
             return None
 
     def _read_text(self, path):
+        # newline='' 关闭文本模式的换行符自动转换(否则读进来 CRLF 被统一成 LF)。
+        # 必须和 _get_file_hash(读原始字节)保持一致：撤销时把这份快照原样写回磁盘，
+        # 才能还原出和当初 hash 一致的字节；否则 LF 文件在 Windows 上会被写成 CRLF，
+        # 撤销后 hash 对不上，状态一直卡在「待应用」。
         try:
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(path, 'r', encoding='utf-8', newline='') as f:
                 return f.read()
         except Exception:
             return ''
@@ -286,7 +290,8 @@ class Config():
         try:
             if loaded_path is not None and self.file_contents.get(loaded_path) is not None:
                 target = disk_path or loaded_path
-                with open(target, 'w', encoding='utf-8') as f:
+                # newline='' 原样写回快照(不转换换行)，配合 _read_text 保证还原出的字节与原 hash 一致
+                with open(target, 'w', encoding='utf-8', newline='') as f:
                     f.write(self.file_contents[loaded_path])
                 return True
             if disk_path and os.path.exists(disk_path):

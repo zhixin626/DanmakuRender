@@ -1,21 +1,60 @@
+# 核心依赖：录制 / 弹幕 / 渲染 / 上传 / 清理 / WebUI
+# 字幕编辑器与语音识别字幕为可选功能，依赖体积很大，见文件末尾。
+
+# ── 网络 / 协议 ──
 requests
 aiohttp
-jsengine
+httpx
 lxml
-pyyaml
-stream-gears
-protobuf>=4.23.2
-quickjs
-websocket-client
 brotli
+websocket-client
+protobuf>=4.23.2
+gmssl
+rsa
+m3u8
+jsengine
+quickjs
+
+# ── 直播流下载 ──
+stream-gears
+streamlink
 yt-dlp
 yutto
+
+# ── 配置 / 工具 ──
+pyyaml
 easydict
-streamlink
-gmssl
-m3u8
-rsa
-pillow
+python-dotenv
+send2trash
+tqdm
+colorama
+colorlog
+wcwidth
+
+# ── WebUI ──
 flask
 
-send2trash
+# ── 渲染（弹幕 / 彩色 emoji / 封面）──
+pillow
+numpy
+av
+matplotlib
+fonttools
+opencv-python
+
+# ── 登录（扫码；装完还需执行 playwright install chromium）──
+playwright
+
+# ── Windows 专用（回收站 / 资源管理器）──
+pywin32; sys_platform == "win32"
+
+
+# ════════════════════════════════════════════════════════════════════
+# 可选功能，按需单独安装：
+#
+#   字幕编辑器 (editor/qt.py)
+#       pip install -r requirements-editor.txt
+#
+#   语音识别字幕 (配置 subtitle.enable: true)
+#       pip install -r requirements-asr.txt
+# ════════════════════════════════════════════════════════════════════

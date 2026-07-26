@@ -46,8 +46,8 @@ download_args:
       # streamlink可用平台请参考 https://streamlink.github.io/plugins.html
       # 默认为auto，由程序自动选择
       engine: auto
-      # 录制视频的格式，默认flv
-      output_format: flv
+      # 录制视频容器格式，留空则由程序按实际引擎自动决定（streamgears→flv，ffmpeg录hls/fmp4→mp4）
+      output_format:
       # 延迟下播计时（秒）
       # 使用这个功能可以把主播短暂下播又开播认定为同一场直播
       stop_wait_time: 7200
@@ -82,8 +82,10 @@ download_args:
                               '-analyzeduration','15000000',
                               '-probesize','50000000',
                               '-thread_queue_size', '16']
-        # ffmpeg输出参数(仅ffmpeg下载引擎生效)
-        ffmpeg_output_args: [ '-movflags','faststart+frag_keyframe+empty_moov']
+        # ffmpeg输出参数(仅ffmpeg下载引擎生效)。留空则由程序按容器/是否分段自动决定：
+        #   mp4分段用 -segment_format_options movflags=+frag_keyframe+empty_moov（可边录边看且抗崩），
+        #   mp4不分段用 -movflags +frag_keyframe+empty_moov，flv不加。显式填写则完全按你的来。
+        ffmpeg_output_args: ~
         # 禁用下载速度慢时自动重启(仅ffmpeg下载引擎生效)
         disable_lowspeed_interrupt: false
         # streamlink 额外输入参数
@@ -139,7 +141,8 @@ download_args:
           fontsize: 36
           # 弹幕距离屏幕顶端的距离（像素）
           dst: 20
-          # 单条弹幕持续时间（秒）
+          # 弹幕滚动速度：走完一屏宽度所需的秒数（越小越快）。全场弹幕同速，长短弹幕不再有快慢差。
+          # 实际存活时间会略长于此值，因为弹幕还要走完自身宽度才完全离场。
           dmduration: 16
           # 弹幕不透明度
           opacity: 0.8
@@ -316,28 +319,6 @@ render_args:
       # 直接定义video filter，这里的{DANMAKU}代表弹幕文件路径
       # 注意设置filter_complex之后将会禁用fps等其他有关filter的选项
       filter_complex: subtitles=filename='{DANMAKU}'
-    # 语音识别字幕：渲染弹幕时对该段视频做 ASR，生成字幕并和弹幕一起烧进画面（单遍编码）
-    # 需要 run_asr.py 所在的 FunASR 环境（与 DMR 同环境即可），首次会下载/加载模型，较慢
-    subtitle:
-      # 是否开启自动字幕识别（默认关闭）
-      enable: false
-      # 字体名（需系统已安装，ffmpeg/libass 按此名匹配）
-      font_name: 微软雅黑
-      # 字号（像素，基于视频真实分辨率）
-      font_size: 60
-      # 距视频下边缘的距离，比例 0~1（0.06 = 6%，基于视频高度，与 GUI 一致）
-      margin_bottom: 0.06
-      # 字体颜色 #RRGGBB
-      font_color: '#FFD500'
-      # 描边宽度，0 为无描边
-      outline: 6
-      # 描边颜色 #RRGGBB
-      outline_color: '#000000'
-      # 每行最多字数，超过则自动换行（0=不换行）
-      wrap_chars: 20
-      # 渲染完成后，ASR 字幕中间文件（.txt 与 (字幕).ass）是否由渲染步骤自己 send2trash。
-      # true=删（默认），false=保留。不再走主清理管线（clean_args）。
-      clean: true
   # 原视频转码
   transcode:
     # 渲染输出文件夹，默认为在录制输出文件夹后面加上“转码后”
@@ -397,8 +378,6 @@ upload_args:
     # 实时上传（边录边传），每录制一个分段上传一次，同一场直播的不同分P仍然会在一个视频下，默认开启
     # 注意：实时上传可能无法上传很短的视频，尤其是在网速较快的情况下（B站对修改稿件的间隔有限制）
     realtime: True
-    # 上传的视频最短长度，小于此长度的视频会被自动过滤，默认120s
-    min_length: 120
     # 以下参数来自biliuprs，详细内容可以参考 https://biliup.github.io/biliup-rs/index.html
     # 上传线路，设置为空则由biliuprs自动选择
     line: ~
@@ -467,8 +446,6 @@ upload_args:
     # 强烈建议关闭实时上传，并启动合并视频再上传，因为YouTube API默认每天只能上传6个视频
     # 使用此功能请确保延迟下播时间设置较短，否则不同分辨率的视频合并会导致上传失败
     concat_video: True
-    # 上传的视频最短长度，小于此长度的视频会被自动过滤，默认120s
-    min_length: 120
     # 以下参数来自Google API，部分选项请参考 https://developers.google.com/youtube/v3/docs/videos/insert
     # 标题，可以使用关键字替换
     # 默认的例子：[飞天狙想要努力变胖/直播回放] 晚上七点半比赛 2023年2月24日 （带弹幕版）
@@ -506,7 +483,6 @@ upload_args:
     login_info: ~
     retry: 0
     realtime: False
-    min_length: 120
     channel_id: 218
     creation_type: 3
     copyright: 1  # 1: 自制原创, 0: 转载
@@ -533,8 +509,6 @@ upload_args:
     retry: 3
     # 上传超时时间（秒），如果上传时间超过这个时间将会被强制终止（用于防止卡死），0表示不限制
     timeout: 0
-    # 上传的视频最短长度，小于此长度的视频会被自动过滤，默认120s
-    min_length: 120
     # 上传命令行参数，可以使用关键字替换
     # 为保证安全调用，请使用参数列表的形式，例如：['python', 'upload.py', '{PATH}']
     command: ~
@@ -582,8 +556,10 @@ clean_args:
     w_srcfile: False
     w_srcpre: True
 
-# 录制分段合并参数（可选，按 group_id 把同场直播的多个分段合并成一个文件）
-# 开关在 common_event_args.auto_merge；这里只放合并的具体参数
+# 录制分段合并参数（可选，按 group_id 把同场直播的多个分段合并）
+# 开关在 common_event_args.auto_merge；这里只放合并的具体参数。
+# 分辨率一致的连续分段无损合并成一个文件；分辨率不一致时不做重编码，
+# 按「连续同分辨率」分成多个文件（单独的段直通复制），按时间顺序依次上传
 merge_args:
   # 要合并的视频类型，可选 src_video / dm_video，可多选，例如 ['dm_video']
   merge_type: ~
@@ -591,11 +567,14 @@ merge_args:
   is_amplify: False
   # 增益分贝数（is_amplify 为 True 时生效）
   extra_gain_db: 0
-  # 合并后输出文件名模板，可用 {stime} 占位，例如 {stime.month:02d}月{stime.day:02d}日
+  # 合并后输出文件名模板，可用 {stime} 占位，例如 {stime.month:02d}月{stime.day:02d}日；
+  # 因分辨率不一致产出多个文件时，自动按时间顺序追加 _part1/_part2 序号
   file_name_template: "{stime.month}月{stime.day}日"
-  # 合并后是否由 merger 直接删除被合并的源文件（send2trash 回收站）。
+  # 全部合并成功后是否由 merger 删除被合并的源文件（send2trash 回收站）。
   # false 则保留源文件、交给 cleaner 按 clean_args 统一清理
   remove_source: True
+  # 合并失败的重试次数（用尽后挂起转入 WebUI 人工处理队列）
+  retry: 3
 
 # Bark 推送通知参数（可选）
 bark_args:

@@ -46,8 +46,8 @@ download_args:
       # streamlink可用平台请参考 https://streamlink.github.io/plugins.html
       # 默认为auto，由程序自动选择
       engine: auto
-      # 录制视频的格式，默认flv
-      output_format: flv
+      # 录制视频容器格式，留空则由程序按实际引擎自动决定（streamgears→flv，ffmpeg录hls/fmp4→mp4）
+      output_format:
       # 延迟下播计时（秒）
       # 使用这个功能可以把主播短暂下播又开播认定为同一场直播
       stop_wait_time: 7200
@@ -80,8 +80,9 @@ download_args:
         group_id:
         # ffmpeg取流参数(仅ffmpeg下载引擎生效)
         ffmpeg_stream_args: [-rw_timeout, '10000000', -analyzeduration, '15000000', -probesize, '50000000', -thread_queue_size, '16']
-        # ffmpeg输出参数(仅ffmpeg下载引擎生效)
-        ffmpeg_output_args: [-movflags, faststart+frag_keyframe+empty_moov]
+        # ffmpeg输出参数(仅ffmpeg下载引擎生效)。留空则由程序按容器/是否分段自动决定
+        # （mp4分段走 segment_format_options 分片，可边录边看且抗崩；flv不加）。显式填写则按你的来。
+        ffmpeg_output_args: ~
         # 禁用下载速度慢时自动重启(仅ffmpeg下载引擎生效)
         disable_lowspeed_interrupt: false
         # streamlink 额外输入参数
@@ -145,7 +146,7 @@ download_args:
           # 弹幕不透明度
           opacity: 0.8
           # 自适应弹幕大小（把设置的弹幕大小按1080P标准缩放）
-          auto_fontsize: true
+          auto_fontsize: false
           # 弹幕描边颜色(6位十六进制)
           outlinecolor: 0
           # 弹幕描边宽度
@@ -335,28 +336,6 @@ render_args:
       # 直接定义video filter，这里的{DANMAKU}代表弹幕文件路径
       # 注意设置filter_complex之后将会禁用fps等其他有关filter的选项
       filter_complex: subtitles=filename='{DANMAKU}'
-    # 语音识别字幕：渲染弹幕时对该段视频做 ASR，生成字幕并和弹幕一起烧进画面（单遍编码）
-    # 需要 run_asr.py 所在的 FunASR 环境（与 DMR 同环境即可），首次会下载/加载模型，较慢
-    subtitle:
-      # 是否开启自动字幕识别（默认关闭）
-      enable: false
-      # 字体名（需系统已安装，ffmpeg/libass 按此名匹配）
-      font_name: 微软雅黑
-      # 字号（像素，基于视频真实分辨率）
-      font_size: 60
-      # 距视频下边缘的距离，比例 0~1（0.06 = 6%，基于视频高度，与 GUI 一致）
-      margin_bottom: 0.06
-      # 字体颜色 #RRGGBB
-      font_color: '#FFD500'
-      # 描边宽度，0 为无描边
-      outline: 6
-      # 描边颜色 #RRGGBB
-      outline_color: '#000000'
-      # 每行最多字数，超过则自动换行（0=不换行）
-      wrap_chars: 20
-      # 渲染完成后，ASR 字幕中间文件（.txt 与 (字幕).ass）是否由渲染步骤自己 send2trash。
-      # true=删（默认），false=保留。不再走主清理管线（clean_args）。
-      clean: true
   # 原视频转码
   transcode:
     # 渲染输出文件夹，默认为在录制输出文件夹后面加上“转码后”
@@ -416,8 +395,6 @@ upload_args:
     # 实时上传（边录边传），每录制一个分段上传一次，同一场直播的不同分P仍然会在一个视频下，默认开启
     # 注意：实时上传可能无法上传很短的视频，尤其是在网速较快的情况下（B站对修改稿件的间隔有限制）
     realtime: true
-    # 上传的视频最短长度，小于此长度的视频会被自动过滤，默认120s
-    min_length: 120
     # 以下参数来自biliuprs，详细内容可以参考 https://biliup.github.io/biliup-rs/index.html
     # 上传线路，设置为空则由biliuprs自动选择
     line:
@@ -486,8 +463,6 @@ upload_args:
     # 强烈建议关闭实时上传，并启动合并视频再上传，因为YouTube API默认每天只能上传6个视频
     # 使用此功能请确保延迟下播时间设置较短，否则不同分辨率的视频合并会导致上传失败
     concat_video: true
-    # 上传的视频最短长度，小于此长度的视频会被自动过滤，默认120s
-    min_length: 120
     # 以下参数来自Google API，部分选项请参考 https://developers.google.com/youtube/v3/docs/videos/insert
     # 标题，可以使用关键字替换
     # 默认的例子：[飞天狙想要努力变胖/直播回放] 晚上七点半比赛 2023年2月24日 （带弹幕版）
@@ -516,7 +491,6 @@ upload_args:
     login_info:
     retry: 0
     realtime: false
-    min_length: 120
     channel_id: 218
     creation_type: 3
     copyright: 1  # 1: 自制原创, 0: 转载
@@ -543,8 +517,6 @@ upload_args:
     retry: 3
     # 上传超时时间（秒），如果上传时间超过这个时间将会被强制终止（用于防止卡死），0表示不限制
     timeout: 0
-    # 上传的视频最短长度，小于此长度的视频会被自动过滤，默认120s
-    min_length: 120
     # 上传命令行参数，可以使用关键字替换
     # 为保证安全调用，请使用参数列表的形式，例如：['python', 'upload.py', '{PATH}']
     command:
