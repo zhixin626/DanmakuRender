@@ -49,7 +49,6 @@ class GiftConverter(SCConverter):
                  buff=10,
                  push_duration_ms=300,
                  slide_dur=0.5,
-                 wrap_width=15,   # 换行宽度（中文算1，英文/ASCII算0.5）
                  # 时长固定（价格过滤由 danmaku.py 的 gift_dm_available 上游统一处理）
                  duration=10,
                  anchor_y_ratio=_ANCHOR_Y_RATIO,   # 由 gift_dm_args 传入，默认 0.88
@@ -74,7 +73,6 @@ class GiftConverter(SCConverter):
             anchor_y_ratio   = anchor_y_ratio,
             push_duration_ms = push_duration_ms,
             slide_dur        = slide_dur,
-            wrap_width       = wrap_width
         )
 
         self.margin_right = _MARGIN_RIGHT
@@ -177,7 +175,8 @@ class GiftConverter(SCConverter):
         x1 = self.box_x1
         x0 = self.box_x0
 
-        name = sc['uname']
+        # 上框名字不折行,超出盒内可用宽按像素截断加省略号;下框内容按像素预算换行
+        name = self._measurer.truncate(sc['uname'], self._text_budget)
         content = sc['content']
         fmt_content = self._wrap_content(content)
 

@@ -1,10 +1,18 @@
 from datetime import datetime
+import json
+import random
 import threading
 from DMR.utils import *
 from itertools import cycle
 
 
 __all__ = ['AssWriter']
+
+# 滚动弹幕速度的随机抖动幅度(±比例)。全场完全同速时，同一波涌入的弹幕会排成
+# 固定队形(锯齿状)并原样保持到走出屏幕，一场直播反复出现同一形状，看久了腻。
+# 8% 的差别瞬时看不出快慢(要 20%+ 才会显出"超车"感)，但二十秒能累积拉开两三百像素，
+# 足以让队形自己散开。调大=散得快但可能看出快慢，调小=更整齐但队形保持更久。
+DMSPEED_JITTER = 0.00
 
 def hex_opacity(opacity):
     return hex(255-int(opacity*255))[2:].zfill(2)
@@ -89,7 +97,11 @@ class AssWriter():
         self.margin_h = margin_h if margin_h > 1 else margin_h * self.height
         self.margin_w = margin_w if margin_w > 1 else margin_w * self.width
         self.dst = r.get('dst', 20)
+        # dmduration = 弹幕走完一整个屏幕宽度所需的秒数(即"速度"的表达方式,越小越快)。
+        # 由它推出全场统一的像素速度:所有弹幕同速,长短弹幕不再有快慢差。
+        # 注意实际存活时间必定略大于 dmduration —— 弹幕还要走完自身宽度才算完全离场。
         self.dmduration = r.get('dmduration', 16)
+        self.dmspeed = self.width / self.dmduration   # px/s
         self.opacity = hex_opacity(r.get('opacity', 0.8))
         self.outlinecolor = str(r.get('outlinecolor', '000000')).zfill(6)
         self.outlinesize = r.get('outlinesize', 1.0)
@@ -227,7 +239,10 @@ class AssWriter():
             dm_length = getattr(tail_dm, '_render_width', None)
             if dm_length is None:
                 dm_length = self._get_length(tail_dm.text)
-            dist = (tic - tail_dm.time) * (dm_length + self.width) / self.dmduration - dm_length
+            # 该弹幕已走过的距离 - 自身长度 = 它的尾端离屏幕右边缘还有多远。
+            # 必须用【它自己的】速度(见 DMSPEED_JITTER):各条弹幕速度略有差别,
+            # 用全局速度算会偏,可能把新弹幕塞进追尾位置。
+            dist = (tic - tail_dm.time) * getattr(tail_dm, '_speed', self.dmspeed) - dm_length
             return dist
 
         for i, tail_dm in enumerate(self._track_tails):
@@ -243,8 +258,12 @@ class AssWriter():
         if calc_collision and max_dist < self.margin_w:
             return False
 
+        # 每条弹幕在基准速度上加一点随机偏移(见 DMSPEED_JITTER)。
+        # 走的距离 = 一整屏 + 弹幕自身宽度(与下面 \move 的 x0→x1 严格对应),除以速度得存活时间。
+        speed = self.dmspeed * random.uniform(1 - DMSPEED_JITTER, 1 + DMSPEED_JITTER)
+        travel = self.width + render_w
         t0 = '%02d:%02d:%05.2f'%sec2hms(danmu.time)
-        t1 = '%02d:%02d:%05.2f'%sec2hms(danmu.time + self.dmduration)
+        t1 = '%02d:%02d:%05.2f'%sec2hms(danmu.time + travel / speed)
         text_color = RGB2BGR(danmu.color)   # 文字色(勿覆盖药丸的 color 参数)
 
         # 文字行(\an1 来自样式)。套药丸时文字左右各缩进 pad_x;Name 带标记供 emoji 渲染器识别。
@@ -256,11 +275,17 @@ class AssWriter():
         dm_info += danmu.text
 
         with self._lock, open(self._filename, 'a', encoding='utf-8') as f:
+            emoticon = getattr(danmu, 'emoticon', None)
+            if emoticon:
+                f.write('; DMR_EMOTICON: ' + json.dumps(
+                    emoticon, ensure_ascii=False, separators=(',', ':')
+                ) + '\n')
             f.write(dm_info + '\n')
             if use_pill:   # 紧跟一行 libass 药丸描边(emoji 渲染器靠"紧随文字行"来配对)
                 f.write(self._pill_dialogue(t0, t1, tid, render_w, pad, eff_pill_color, border) + '\n')
 
         danmu._render_width = render_w   # 供后续弹幕碰撞计算用(含药丸留白)
+        danmu._speed = speed             # 同上:碰撞计算要用它自己的速度,不能用基准速度
         self._track_tails[tid] = danmu
 
         return True

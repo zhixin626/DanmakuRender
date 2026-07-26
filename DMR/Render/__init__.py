@@ -188,7 +188,8 @@ class Render():
             
             target_render = TargetRender(**render_args)
             verb = {'dmrender': '渲染', 'emoji_dmrender': '彩色emoji渲染', 'transcode': '转码', 'rawffmpeg': '自定义ffmpeg处理'}.get(mode, '处理')
-            self.logger.info(f'准备{verb}任务: {video.path}')
+            log_task_start = self.logger.debug if mode == 'emoji_dmrender' else self.logger.info
+            log_task_start(f'准备{verb}任务: {video.path}')
             os.makedirs(os.path.dirname(output), exist_ok=True)
 
             self._render_class[task['uuid']] = target_render

@@ -14,6 +14,8 @@ SC_DATA 注释行格式（由 AssWriter 写入）：
 
 import os
 
+from DMR.utils.text_width import TextMeasurer
+
 # SC_DATA 注释行前缀
 _SC_DATA_PREFIX = '; SC_DATA|'
 # 末尾固定的4个颜色字段（6位十六进制）数量
@@ -58,7 +60,6 @@ class SCConverter:
                  anchor_y_ratio=0.93,   # 新SC底边所在位置（屏幕高度比例）
                  push_duration_ms=300,  # push动画时长（毫秒）
                  slide_dur=0.5,         # 滑入/滑出时长（秒）
-                 wrap_width=15,         # 换行宽度（中文算1，英文/ASCII算0.5）
                  # sc_duration/opacity/border 均从 SC_DATA 逐条读取，不在此配置
                  ):
         self.screen_width    = screen_width
@@ -77,7 +78,11 @@ class SCConverter:
         self.push_dur_ms     = push_duration_ms
         self.push_dur_s      = push_duration_ms / 1000.0
         self.slide_dur       = slide_dur
-        self.wrap_width      = wrap_width
+
+        # 盒子文字测宽器:字体固定 Microsoft YaHei(与 asswriter 的 message_box/gift_box 样式一致),
+        # 内容/名字都是 \b1 粗体。换行/截断按像素预算,预算由几何直接推出,改盒宽自动跟随
+        self._measurer = TextMeasurer('Microsoft YaHei', fontsize, bold=True)
+        self._text_budget = box_width - 2 * text_padding   # 内容/名字行的可用像素宽
 
         # 派生坐标
         self.slide_x  = -(box_width + margin_left)      # 矩形左边缘在屏幕外的 x
@@ -206,23 +211,9 @@ class SCConverter:
     # ------------------------------------------------------------------
 
     def _wrap_lines(self, content):
-        """按显示宽度换行：中文等宽字符算1，英文/ASCII算0.5，每行不超过 wrap_width。"""
-        if not content:
-            return []
-        lines = []
-        cur = ''
-        cur_w = 0.0
-        for ch in content:
-            w = 0.5 if ord(ch) < 128 else 1.0
-            if cur and cur_w + w > self.wrap_width:
-                lines.append(cur)
-                cur, cur_w = ch, w
-            else:
-                cur += ch
-                cur_w += w
-        if cur:
-            lines.append(cur)
-        return lines
+        """按像素预算换行(替代旧的"中文1格/ASCII半格"估算):逐字符实测宽度,
+        每行不超过盒内可用宽,宽 ASCII/emoji 不再溢出盒子右缘。"""
+        return self._measurer.wrap(content, self._text_budget)
 
     def _wrap_content(self, content):
         """返回用 \\N 连接的换行后内容（供 Dialogue 行使用）。"""
@@ -407,9 +398,14 @@ class SCConverter:
         nb   = f'\\bord{sc["name_border_width"]}\\3c&H{sc["name_border_color"]}&'
         cb   = f'\\bord{sc["content_border_width"]}\\3c&H{sc["content_border_color"]}&'
 
-        # 格式化内容（按显示宽度换行：中文1，英文0.5）
+        # 格式化内容（按像素预算换行）
         content = sc['content']
         fmt_content = self._wrap_content(content)
+
+        # 上框名字与价格同排:名字预算 = 行宽 - 价格宽 - 半个字号的间隙,超出截断加省略号(名字不折行)
+        price_text = f'{sc["price"]}{sc["price_unit"]}'
+        name_budget = self._text_budget - self._measurer.measure(price_text, sprite_bound=False) - fs // 2
+        uname = self._measurer.truncate(sc['uname'], name_budget)
 
         fad_map = {'entry': '\\fad(500,0)', 'push': '\\fad(0,0)',
                    'static': '\\fad(0,0)',  'exit': '\\fad(0,500)'}
@@ -460,9 +456,9 @@ class SCConverter:
                 f'Dialogue: 0,{s0},{s1},message_box,,0,0,0,,'
                 f'{{{fad}{topb_mv}\\c&H{sc["bg_bottom_color"]}\\1a&H{both}&\\shad0\\p1}}'
                 f'm 0 0 l {w} 0 l {w} {bh-r} b {w} {bh} {w} {bh} {w-r} {bh} l {r} {bh} b 0 {bh} 0 {bh} 0 {bh-r} l 0 0\n'
-                # 用户名（左对齐）
+                # 用户名（左对齐，超长已按像素截断）
                 f'Dialogue: 1,{s0},{s1},message_box,,0,0,0,,'
-                f'{{{fad}{name_mv}\\c&H{sc["name_color"]}\\fs{fs}\\b1{nb}\\q2}}{sc["uname"]}\n'
+                f'{{{fad}{name_mv}\\c&H{sc["name_color"]}\\fs{fs}\\b1{nb}\\q2}}{uname}\n'
                 # 价格（右对齐）
                 f'Dialogue: 1,{s0},{s1},message_box,,0,0,0,,'
                 f'{{{fad}{price_mv}\\c&H{sc["name_color"]}\\fs{fs}\\b1{nb}\\q2}}{sc["price"]}{sc["price_unit"]}\n'

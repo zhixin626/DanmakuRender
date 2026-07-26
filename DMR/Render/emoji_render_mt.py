@@ -5,7 +5,8 @@
 用法:
     python emoji_render_mt.py <输入.flv> <输入.ass> <输出.mp4>
         [--workers 4] [--segmul 3] [--vb 8M] [--ab 160K] [--no-hwaccel]
-        [--emoji-font 路径] [--emoji-pack 表情目录] [--resize 1280x720|0.5]
+        [--emoji-font 路径] [--emoji-pack 表情目录] [--emoticon-dir 纯表情目录]
+        [--resize 1280x720|0.5]
 
 特性:
     - 无损切段 → 每段独立进程并行渲染(libass烧普通弹幕 + nv12上贴彩色emoji) → concat → 混原音。
@@ -15,7 +16,11 @@
     - [xxx] 方括号表情替换: --emoji-pack 指向目录,把弹幕里的 [笑] 换成 目录/笑.png。
     - --resize: 输出缩放,"宽x高" 或缩放系数(如 0.5);合成在原分辨率完成,仅最终编码缩放。
 """
-import os, re, sys, json, time, shutil, subprocess, threading, queue, glob
+import os, re, sys, json, time, shutil, logging, subprocess, threading, queue, glob
+import hashlib
+import io
+import urllib.parse
+import urllib.request
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -26,6 +31,57 @@ except Exception:
 
 FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
+
+# 本脚本零 DMR 依赖(独立子进程运行),用标准库 logging。
+# 每行带 [级别] 前缀,被 DMR 以管道捕获时由 emoji_dmrender 解析出级别转发到主日志;
+# 单独跑时就是普通的控制台输出。级别开到 DEBUG,由父进程决定哪些进控制台。
+log = logging.getLogger("emoji_mt")
+
+
+def setup_log():
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    log.addHandler(h)
+    log.setLevel(logging.DEBUG)
+    log.propagate = False
+
+
+def kill_tree(pid):
+    """强杀进程及其子孙。taskkill 返回不代表进程已消失,调用方需自行确认。"""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+        else:
+            os.kill(pid, 9)
+    except Exception:
+        pass
+
+
+def wait_dead(procs, timeout=10.0):
+    """等进程真正退出。taskkill 是异步的,不等就去删文件必然撞上句柄未释放。"""
+    deadline = time.time() + timeout
+    for pr in procs:
+        left = deadline - time.time()
+        try:
+            pr.wait(timeout=max(0.1, left))
+        except Exception:
+            pass
+
+
+def rmtree_retry(path, tries=5, wait=1.0):
+    """删临时目录。杀毒扫描/句柄未释放会让 Windows 短暂锁住文件,重试几次;
+    最终失败必须吭声,否则残留目录会一直攒着没人知道。"""
+    for i in range(tries):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            if i == tries - 1:
+                log.warning("临时目录清理失败,请手动删除: %s (%s)", path, e)
+                return False
+            time.sleep(wait)
 
 def _default_emoji_font():
     """系统自带彩色 emoji 字体(跨平台兜底)"""
@@ -46,6 +102,7 @@ QDEPTH = 8
 
 # 无字形整形(shaping)时,这些"组合/修饰"码点会渲成多余方块,渲染前一律去掉:
 #   FE00-FE0F 变体选择符、200D 零宽连接(ZWJ)、20E3 keycap 封闭符、1F3FB-1F3FF 肤色修饰符
+# 注意:_STRIP 和下面的 is_emoji 在 DMR/utils/text_width.py(弹幕测宽)有同款拷贝,改动必须两边同步
 _STRIP = {0x200D: None, 0x20E3: None}
 _STRIP.update({c: None for c in range(0xFE00, 0xFE10)})     # 变体选择符
 _STRIP.update({c: None for c in range(0x1F3FB, 0x1F400)})   # 肤色修饰符
@@ -66,7 +123,8 @@ def sec_to_ass(t):
 def fmt(sec):
     sec = int(sec); return f"{sec//60}分{sec%60:02d}秒"
 
-SHORTCODE_RE = re.compile(r"\[([^\[\]]{1,20})\]")
+SHORTCODE_RE = re.compile(r"\[([^\[\]\r\n]{1,200})\]")
+EMOTICON_PREFIX = "; DMR_EMOTICON:"
 
 def has_special(body, pack):
     """该弹幕是否需要走精灵路径(含unicode emoji 或 已知方括号表情)"""
@@ -75,7 +133,7 @@ def has_special(body, pack):
         return True
     if pack:
         for m in SHORTCODE_RE.finditer(clean):
-            if m.group(1) in pack:
+            if m.group(1).lower() in pack:
                 return True
     return False
 
@@ -86,8 +144,8 @@ def tokenize(text, pack):
     parts = SHORTCODE_RE.split(text)   # 偶数位是普通文本,奇数位是 [] 里的内容
     for i, part in enumerate(parts):
         if i % 2 == 1:  # 方括号内容
-            if pack and part in pack:
-                tokens.append(("png", pack[part])); continue
+            if pack and part.lower() in pack:   # 大小写不敏感:[ok]/[OK] 都命中同一张图
+                tokens.append(("png", pack[part.lower()])); continue
             part = f"[{part}]"  # 不在表情包里 → 当普通文字
         cur = ""; ce = None
         for ch in part:
@@ -155,11 +213,14 @@ def render_segment(cfg):
         return im
 
     cache = {}
-    def get_sprite(text, rgb, pill=None):
+    def get_sprite(text, rgb, pill=None, event_pack=None):
         pkey = (tuple(pill["color"]), pill["pad"], pill["border"]) if pill else None
-        key = (text, tuple(rgb), pkey)
+        # None=普通弹幕用默认 pack；dict=纯 emoticon 只用该条事件的精确图片。
+        active_pack = pack if event_pack is None else event_pack
+        event_key = None if event_pack is None else tuple(sorted(event_pack.items()))
+        key = (text, tuple(rgb), pkey, event_key)
         if key in cache: return cache[key]
-        toks = tokenize(text, pack)
+        toks = tokenize(text, active_pack)
         has_png = any(k == "png" for k, _ in toks)
         # 内容宽
         content_w = 0
@@ -231,7 +292,7 @@ def render_segment(cfg):
         cache[key] = (sY, sU, sV, A, spr.width, spr.height, tbo, lbo)
         return cache[key]
     for ev in emoji_events:
-        ev["_spr"] = get_sprite(ev["text"], ev["rgb"], ev.get("pill"))
+        ev["_spr"] = get_sprite(ev["text"], ev["rgb"], ev.get("pill"), ev.get("emoticon_pack"))
 
     dec_cmd = [FFMPEG, "-v", "error", "-fflags", "+genpts+discardcorrupt"]
     if use_hwaccel: dec_cmd += ["-hwaccel", "auto"]
@@ -248,6 +309,7 @@ def render_segment(cfg):
                 "-fps_mode", "cfr", "-f", "rawvideo", "-pix_fmt", "nv12", "-"]
     dec = subprocess.Popen(dec_cmd, cwd=segdir, stdout=subprocess.PIPE)
     venc = cfg.get("venc", "h264_nvenc")
+    venc_args = cfg.get("venc_args") or ["-b:v", vb]   # 完整编码参数，缺省回退固定码率
     # 缩放放在编码段(合成在原分辨率完成,emoji \move 坐标才不会错位)
     scale_args = []
     rs = cfg.get("resize")
@@ -256,7 +318,7 @@ def render_segment(cfg):
     enc = subprocess.Popen(
         [FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
          "-s", f"{W}x{H}", "-r", f"{fps}", "-i", "-", "-an", *scale_args,
-         "-c:v", venc, "-b:v", vb, "-f", "mpegts", os.path.basename(out_ts)],
+         "-c:v", venc, *venc_args, "-f", "mpegts", os.path.basename(out_ts)],
         cwd=segdir, stdin=subprocess.PIPE)
 
     fb = W * H * 3 // 2
@@ -370,8 +432,7 @@ def resolve_emoji_font(val):
             return os.path.abspath(p)
     except Exception:
         pass
-    print(f"[!] 找不到 emoji 字体 '{val}',回退到系统 Segoe UI Emoji。"
-          f"(可改用完整路径,如 test\\NotoColorEmoji.ttf)")
+    log.warning("找不到 emoji 字体 '%s',回退到系统 Segoe UI Emoji。(可改用完整路径,如 test\\NotoColorEmoji.ttf)", val)
     return DEFAULT_EMOJI_FONT
 
 
@@ -396,7 +457,8 @@ def audio_codec(path):
 
 
 def load_pack(pack_dirs):
-    """目录里的 png -> {名字: 路径}。支持逗号分隔多个目录,靠后的覆盖靠前的(房间专属覆盖通用)。"""
+    """目录里的 png -> {名字: 路径}。支持逗号分隔多个目录,靠后的覆盖靠前的(房间专属覆盖通用)。
+    key 统一小写:匹配大小写不敏感(弹幕里 [ok]/[OK] 都能命中 OK.png),也对齐 Windows 文件系统行为。"""
     pack = {}
     if not pack_dirs:
         return pack
@@ -407,8 +469,157 @@ def load_pack(pack_dirs):
         for fn in os.listdir(d):
             name, ext = os.path.splitext(fn)
             if ext.lower() in (".png", ".webp", ".gif"):
-                pack[name] = os.path.abspath(os.path.join(d, fn))
+                pack[name.lower()] = os.path.abspath(os.path.join(d, fn))
     return pack
+
+
+class EmoticonStore:
+    """纯 emoticon 的本地表情库：按 unique 记账，图片按 URL 哈希落盘。"""
+    MAX_BYTES = 10 * 1024 * 1024
+    FORMAT_EXT = {"PNG": ".png", "WEBP": ".webp", "GIF": ".gif", "JPEG": ".jpg"}
+
+    def __init__(self, directory):
+        self.directory = os.path.abspath(directory) if directory else None
+        self.registry_path = os.path.join(self.directory, "emoticon.json") if self.directory else None
+        self.registry = {}
+        self.dirty = False
+        self._resolved = {}
+        if not self.directory:
+            return
+        os.makedirs(self.directory, exist_ok=True)
+        try:
+            with open(self.registry_path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self.registry = data
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log.warning("读取 emoticon.json 失败，将按空表情库处理: %s", e)
+
+    @staticmethod
+    def _normalized_url(url):
+        url = str(url or "").strip()
+        if not url:
+            return ""
+        p = urllib.parse.urlsplit(url)
+        if p.scheme not in ("http", "https"):
+            return ""
+        # B站同一资源会混用 http/https，统一成 https 避免重复缓存。
+        scheme = "https" if (p.hostname or "").lower().endswith("hdslb.com") else p.scheme
+        return urllib.parse.urlunsplit((scheme, p.netloc, p.path, p.query, ""))
+
+    @staticmethod
+    def _key(meta, url):
+        unique = str(meta.get("emoticon_unique") or "").strip()
+        return unique or ("url_" + hashlib.sha256(url.encode("utf-8")).hexdigest())
+
+    def _entry_path(self, entry):
+        filename = os.path.basename(str(entry.get("file") or ""))
+        return os.path.join(self.directory, filename) if filename else None
+
+    def _download(self, url):
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+        if host != "hdslb.com" and not host.endswith(".hdslb.com"):
+            raise ValueError(f"拒绝非 B站图片域名: {host or url}")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            declared = int(resp.headers.get("Content-Length") or 0)
+            if declared > self.MAX_BYTES:
+                raise ValueError(f"图片过大: {declared} bytes")
+            data = resp.read(self.MAX_BYTES + 1)
+        if len(data) > self.MAX_BYTES:
+            raise ValueError(f"图片超过 {self.MAX_BYTES} bytes")
+
+        with Image.open(io.BytesIO(data)) as im:
+            image_format = (im.format or "").upper()
+            im.verify()
+        ext = self.FORMAT_EXT.get(image_format)
+        if not ext:
+            raise ValueError(f"不支持的图片格式: {image_format or 'unknown'}")
+
+        filename = hashlib.sha256(url.encode("utf-8")).hexdigest() + ext
+        target = os.path.join(self.directory, filename)
+        temp = target + f".{os.getpid()}.part"
+        try:
+            with open(temp, "wb") as f:
+                f.write(data)
+            os.replace(temp, target)
+        finally:
+            try:
+                if os.path.exists(temp):
+                    os.remove(temp)
+            except OSError:
+                pass
+        return filename, target
+
+    def resolve(self, meta):
+        """返回该条纯 emoticon 的精确本地图片；无法补齐时返回 None。"""
+        if not self.directory or not isinstance(meta, dict):
+            return None
+        url = self._normalized_url(meta.get("url"))
+        key = self._key(meta, url)
+        memo_key = (key, url)
+        if memo_key in self._resolved:
+            return self._resolved[memo_key]
+
+        entry = self.registry.get(key)
+        if isinstance(entry, dict):
+            path = self._entry_path(entry)
+            entry_url = self._normalized_url(entry.get("url"))
+            if path and os.path.isfile(path) and (not url or entry_url == url):
+                self._resolved[memo_key] = path
+                return path
+
+        if not url:
+            log.warning("emoticon 缺少可用 URL 且本地未命中: %s", meta.get("name") or key)
+            self._resolved[memo_key] = None
+            return None
+
+        try:
+            filename, path = self._download(url)
+        except Exception as e:
+            log.warning("emoticon 下载失败 %s: %s", meta.get("name") or key, e)
+            self._resolved[memo_key] = None
+            return None
+
+        self.registry[key] = {
+            "name": meta.get("name"),
+            "url": url,
+            "width": meta.get("width"),
+            "height": meta.get("height"),
+            "is_dynamic": meta.get("is_dynamic", 0),
+            "file": filename,
+        }
+        self.dirty = True
+        self._resolved[memo_key] = path
+        log.info("已补齐 emoticon: %s", meta.get("name") or key)
+        return path
+
+    def save(self):
+        if not self.directory or not self.dirty:
+            return
+        # 写入前重新合并磁盘内容，降低多个渲染任务同时补表情时互相覆盖的概率。
+        merged = {}
+        try:
+            with open(self.registry_path, encoding="utf-8") as f:
+                old = json.load(f)
+            if isinstance(old, dict):
+                merged.update(old)
+        except Exception:
+            pass
+        merged.update(self.registry)
+        temp = self.registry_path + f".{os.getpid()}.tmp"
+        try:
+            with open(temp, "w", encoding="utf-8") as f:
+                json.dump(merged, f, ensure_ascii=False, indent=2)
+            os.replace(temp, self.registry_path)
+        finally:
+            try:
+                if os.path.exists(temp):
+                    os.remove(temp)
+            except OSError:
+                pass
 
 
 def main():
@@ -430,6 +641,7 @@ def main():
             sys.exit(1)
         return
 
+    setup_log()
     if len(args) < 3:
         print(__doc__); sys.exit(1)
     flv, ass, out_mp4 = os.path.abspath(args[0]), os.path.abspath(args[1]), os.path.abspath(args[2])
@@ -437,10 +649,14 @@ def main():
         return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
     for t in (FFMPEG, FFPROBE):
         if not check_tool(t):
-            print(f"找不到 {t},请确认已安装并加入 PATH(或放到脚本目录)。"); sys.exit(1)
+            log.error("找不到 %s,请确认已安装并加入 PATH(或放到脚本目录)。", t); sys.exit(1)
     workers = int(opt("--workers", 4)); segmul = int(opt("--segmul", 3))
     vb = opt("--vb", "8M"); ab = opt("--ab", "160K")
     vencoder = opt("--vencoder", "h264_nvenc")
+    aencoder = opt("--aencoder", "aac")
+    # 完整编码器参数（与 DmRender 一致）；未传时为 None，下游回退到 -b:v / -b:a
+    _va = opt("--venc-args"); venc_args = json.loads(_va) if _va else None
+    _aa = opt("--aenc-args"); aenc_args = json.loads(_aa) if _aa else None
     use_hwaccel = "--no-hwaccel" not in sys.argv
     resize = opt("--resize")   # "宽x高" 或 缩放系数(如 0.5);留空=原分辨率
     subtitle_ass = opt("--subtitle")   # ASR 字幕 ass（可选）；和弹幕一起在同一遍 libass 烧
@@ -448,15 +664,16 @@ def main():
     try:   # 位图字体(如 Noto)按 strike 缩放,较慢且略糊;矢量(Segoe)更快更清晰
         ImageFont.truetype(emoji_font, 32)
     except OSError:
-        print(f"[提示] {os.path.basename(emoji_font)} 是位图字体(按 strike 缩放,较慢/略糊);"
-              f"追求速度与清晰可用矢量 Segoe UI Emoji(默认)。")
+        log.warning("%s 是位图字体(按 strike 缩放,较慢/略糊);追求速度与清晰可用矢量 Segoe UI Emoji(默认)。",
+                    os.path.basename(emoji_font))
     pack = load_pack(opt("--emoji-pack"))
+    emoticon_store = EmoticonStore(opt("--emoticon-dir"))
     for pth in (flv, ass):
         if not os.path.exists(pth):
-            print(f"找不到文件: {pth}"); sys.exit(1)
+            log.error("找不到文件: %s", pth); sys.exit(1)
 
     work = os.path.join(os.path.dirname(out_mp4) or ".", "_mt_" + os.path.splitext(os.path.basename(out_mp4))[0])
-    if os.path.exists(work): shutil.rmtree(work, ignore_errors=True)
+    if os.path.exists(work): rmtree_retry(work)
     os.makedirs(work, exist_ok=True)
 
     import av
@@ -472,7 +689,21 @@ def main():
             fps = float(v.guessed_rate or v.average_rate)
         except Exception:
             fps = float(v.average_rate)
-    dur = float(c.duration) / 1e6 if c.duration else 0
+    format_name = str(getattr(c.format, "name", "") or "").lower()
+    is_flv = "flv" in format_name.split(",") or os.path.splitext(flv)[1].lower() == ".flv"
+
+    def _normalize_duration(raw_duration, start_time):
+        """直播 FLV 常保留上游绝对时间戳，demuxer 的 duration 实际是末尾 PTS。"""
+        if is_flv and start_time > 0 and raw_duration > start_time:
+            fixed = raw_duration - start_time
+            log.debug("FLV 时长按时间戳区间修正: %.3f - %.3f = %.3f 秒",
+                      raw_duration, start_time, fixed)
+            return fixed
+        return raw_duration
+
+    raw_duration = float(c.duration) / 1e6 if c.duration else 0
+    start_time = float(c.start_time) / 1e6 if c.start_time else 0
+    dur = _normalize_duration(raw_duration, start_time)
     c.close()
     if not dur:
         def _probe(entries, sel=None):
@@ -481,7 +712,10 @@ def main():
             cmd += ["-show_entries", entries, "-of", "csv=p=0", flv]
             try: return float(subprocess.run(cmd, capture_output=True, text=True).stdout.strip())
             except Exception: return 0
-        dur = _probe("format=duration") or _probe("stream=duration", "v:0")
+        raw_duration = _probe("format=duration")
+        start_time = _probe("format=start_time")
+        dur = _normalize_duration(raw_duration, start_time) if raw_duration else 0
+        dur = dur or _probe("stream=duration", "v:0")
         if not dur:
             try:
                 d = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-count_packets",
@@ -511,14 +745,37 @@ def main():
             break
     textfont = resolve_font(fontname, bold)
     out_res = f" 输出{resize_str}" if resize_str else ""
-    print(f"输入: {os.path.basename(flv)} {W}x{H}@{fps:.0f}fps 时长{fmt(dur)}{out_res} | 并行{workers}路 段x{segmul} 硬解{use_hwaccel}")
-    print(f"文字字体: {fontname}{'(粗)' if bold else ''} -> {os.path.basename(textfont)} | emoji字体: {os.path.basename(emoji_font)} | 表情包: {len(pack)}个")
+    log.info("输入: %s %dx%d@%.0ffps 时长%s%s | 并行%d路 段x%d 硬解%s",
+             os.path.basename(flv), W, H, fps, fmt(dur), out_res, workers, segmul, use_hwaccel)
+    log.debug("文字字体: %s%s -> %s | emoji字体: %s | 表情包: %d个",
+              fontname, "(粗)" if bold else "", os.path.basename(textfont),
+              os.path.basename(emoji_font), len(pack))
 
     header = [l for l in txt if not l.startswith("Dialogue")]
     dia_textonly = []; emoji_all = []
     drop_pill = False   # 标记:下一条 libass 药丸行(紧跟刚入精灵的弹幕)要丢弃,改在精灵里重画
+    pending_emoticon = None
     for l in txt:
-        if not l.startswith("Dialogue"): continue
+        if l.startswith(EMOTICON_PREFIX):
+            try:
+                meta = json.loads(l[len(EMOTICON_PREFIX):].strip())
+                path = emoticon_store.resolve(meta)
+                name = str(meta.get("name") or "")
+                if name.startswith("[") and name.endswith("]"):
+                    name = name[1:-1]
+                pending_emoticon = {
+                    "meta": meta,
+                    # 空 dict 也有意义：表明这是纯 emoticon，但资源补齐失败，禁止回退默认 pack。
+                    "pack": ({name.lower(): path} if name and path else {}),
+                }
+            except Exception as e:
+                log.warning("忽略损坏的 DMR_EMOTICON 注释: %s", e)
+                pending_emoticon = {"meta": {}, "pack": {}}
+            continue
+        if not l.startswith("Dialogue"):
+            continue
+        event_emoticon = pending_emoticon
+        pending_emoticon = None
         f = l.split(",", 9)
         st, et = ass_time(f[1]), ass_time(f[2])
         effect = f[8].strip() if len(f) > 8 else ""
@@ -526,8 +783,11 @@ def main():
             if drop_pill:
                 drop_pill = False; continue          # 属于走精灵的弹幕 → 丢弃(精灵里按真实宽重画)
             dia_textonly.append((st, et, l)); continue   # 纯文字/普通弹幕的药丸 → 交 libass 画
+        # 普通弹幕用默认 pack；纯 emoticon 只用注释绑定的专属图片，绝不回退根 pack。
+        event_pack = event_emoticon["pack"] if event_emoticon is not None else None
+        active_pack = pack if event_pack is None else event_pack
         # 只有含 emoji/表情(需 emoji 引擎)的弹幕才走精灵;纯文字(含纯文字药丸)留给 libass
-        if f[3] == "R2L" and has_special(f[9], pack):
+        if f[3] == "R2L" and has_special(f[9], active_pack):
             name = f[4].strip() if len(f) > 4 else ""
             pill = parse_pill(name)
             body = f[9]; mv = re.search(r"\\move\(([^)]*)\)", body)
@@ -539,11 +799,16 @@ def main():
                 aa = int(am.group(1),16) if am else 0x39
                 text = re.sub(r"\{[^}]*\}", "", body)
                 text = text.replace("\\N", " ").replace("\\n", " ").replace("\\h", " ").strip().translate(_STRIP)
-                emoji_all.append(dict(s=st, e=et, x0=x0, y0=y0, x1=x1, text=text, rgb=rgb, op=(255-aa)/255, pill=pill))
+                emoji_all.append(dict(
+                    s=st, e=et, x0=x0, y0=y0, x1=x1, text=text,
+                    rgb=rgb, op=(255-aa)/255, pill=pill,
+                    emoticon_pack=event_pack,
+                ))
                 if pill: drop_pill = True   # 这条带药丸 → 紧随其后的 libass 药丸行要丢弃
                 continue
         dia_textonly.append((st, et, l))
-    print(f"特殊弹幕(emoji/表情): {len(emoji_all)} 行")
+    emoticon_store.save()
+    log.debug("特殊弹幕(emoji/表情): %d 行", len(emoji_all))
 
     # 字幕 ass（可选）：解析成 header + dialogue 列表，后面按段切分、与弹幕同遍 libass 烧
     sub_header, sub_dia = [], []
@@ -555,10 +820,10 @@ def main():
                 continue
             sf = l.split(",", 9)
             sub_dia.append((ass_time(sf[1]), ass_time(sf[2]), l))
-        print(f"字幕: {len(sub_dia)} 行")
+        log.debug("字幕: %d 行", len(sub_dia))
 
     seg_time = max(20.0, dur / max(1, workers * segmul)) if dur else 120.0
-    print(f"切段中（每段约 {fmt(seg_time)}）...")
+    log.debug("切段中（每段约 %s）...", fmt(seg_time))
     seg_in = ["-fflags", "+genpts+discardcorrupt", "-i", flv, "-map", "0:v"]
     def seg_out(ext):
         return ["-f", "segment", "-segment_time", f"{seg_time}", "-reset_timestamps", "1",
@@ -569,15 +834,15 @@ def main():
         # 源文件损坏时，-c copy 切 .ts 会触发 h264_mp4toannexb 在坏 NAL 处崩。
         # 回退1：改切 .mkv（仍 -c copy，无损且快）——mkv 不做 annexb 转换，坏包原样穿过，
         #        留待后面每段解码时由 discardcorrupt 丢弃坏帧（与 dmrender 的容错一致）。
-        print("无损切段(.ts)失败（源可能损坏），回退为切 .mkv（仍无损）...")
+        log.warning("无损切段(.ts)失败（源可能损坏），回退为切 .mkv（仍无损）...")
         r = subprocess.run([FFMPEG, "-v", "error", "-y"] + seg_in + ["-c", "copy"] + seg_out("mkv"), cwd=work)
     if r.returncode != 0:
         # 回退2（极少触发）：软解 + 忽略坏帧 + 重编码切段，牺牲一代画质保出片。
-        print("切 .mkv 仍失败，回退为重编码切段...")
+        log.warning("切 .mkv 仍失败，回退为重编码切段...")
         r = subprocess.run([FFMPEG, "-v", "error", "-y", "-err_detect", "ignore_err"]
-                           + seg_in + ["-c:v", vencoder, "-b:v", vb] + seg_out("ts"), cwd=work)
+                           + seg_in + ["-c:v", vencoder] + (venc_args or ["-b:v", vb]) + seg_out("ts"), cwd=work)
     if r.returncode != 0:
-        print("切段失败"); sys.exit(1)
+        log.error("切段失败"); sys.exit(1)
     # 段时间不用 csv（直播源时间戳不规则/有起点偏移时，csv 的 start/end 会与段文件实际时长对不上，
     # 尤其第一段；跨段弹幕按错误时间点重定位 → 段边界整体跳）。改用各段「实际时长」累计出 off/send，
     # 让弹幕时间轴与拼接后的视频时间轴严格对齐（干净源上 csv==实际，无副作用）。
@@ -597,7 +862,7 @@ def main():
             seg_dur = (float(parts[2]) - float(parts[1])) if len(parts) >= 3 else 0.0
         segs.append((segfile, cum, cum + seg_dur))
         cum += seg_dur
-    print(f"共 {len(segs)} 段")
+    log.debug("共 %d 段", len(segs))
 
     jobs = []
     for idx, (segfile, sstart, send) in enumerate(segs):
@@ -663,7 +928,7 @@ def main():
         out_ts = os.path.join(work, f"done_{idx:03d}.ts")
         prog = os.path.join(work, f"prog_{idx:03d}.txt"); open(prog, "w").write("0")
         cfg = dict(seg=os.path.join(work, segfile), textonly=ass_k, subtitle=sub_k, out=out_ts, prog=prog,
-                   W=W, H=H, fps=fps, vb=vb, venc=vencoder, hwaccel=use_hwaccel, fs=fs,
+                   W=W, H=H, fps=fps, vb=vb, venc=vencoder, venc_args=venc_args, hwaccel=use_hwaccel, fs=fs,
                    resize=resize_str,
                    textfont=textfont, emojifont=emoji_font, pack=pack, events=ev_k)
         cfg_path = os.path.join(work, f"cfg_{idx:03d}.json")
@@ -672,7 +937,35 @@ def main():
             json.dump(cfg, fcfg)
         jobs.append(dict(idx=idx, cfg=cfg_path, prog=prog))
 
-    print("开始并行渲染（Ctrl+C 停止）...\n")
+    # 源流音频可能带有断裂/跳跃时间戳。视频分段渲染会生成一条新的连续时间轴，
+    # 因此不能再把原 AAC 直接 copy 回去，否则两套时间轴长时间播放后可能失步。
+    # 音频修复和视频 worker 并行执行，避免把重编码耗时串行加在渲染末尾。
+    fixed_audio = None
+    audio_log_path = os.path.join(work, "audio_fix.log")
+    audio_proc = None
+    audio_log = None
+    if audio_codec(flv):
+        audio_encode_args = list(aenc_args) if aenc_args is not None else ["-b:a", ab]
+        audio_encoder = aencoder if aencoder != "copy" else "aac"
+        # AAC 用 M4A 保留精确采样时间基，避免 Matroska 毫秒时间基在片尾多出约 0.1 秒；
+        # 其他编码器使用兼容范围更广的 MKA。
+        audio_ext = ".m4a" if "aac" in audio_encoder.lower() else ".mka"
+        fixed_audio = os.path.join(work, "fixed_audio" + audio_ext)
+        audio_cmd = [
+            FFMPEG, "-v", "error", "-y", "-nostdin",
+            "-fflags", "+discardcorrupt+genpts",
+            "-i", flv, "-map", "0:a:0", "-vn",
+            "-af", "aresample=async=1000:first_pts=0",
+            "-c:a", audio_encoder, *audio_encode_args,
+            "-ar", "48000", fixed_audio,
+        ]
+        audio_log = open(audio_log_path, "w", encoding="utf-8", errors="replace")
+        audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=audio_log)
+        log.debug("音频时间轴修复已并行启动")
+    else:
+        log.debug("输入没有音轨，跳过音频时间轴修复")
+
+    log.debug("开始并行渲染（Ctrl+C 停止）...")
     procs = {}; pending = list(jobs); running = []
     t0 = time.time(); CREATE_GROUP = 0x00000200 if os.name == "nt" else 0
     def launch(job):
@@ -680,10 +973,9 @@ def main():
                                 creationflags=CREATE_GROUP)
     def killall():
         for pr in procs.values():
-            try:
-                if os.name == "nt": subprocess.run(["taskkill", "/F", "/T", "/PID", str(pr.pid)], capture_output=True)
-                else: pr.terminate()
-            except Exception: pass
+            kill_tree(pr.pid)
+        if audio_proc and audio_proc.poll() is None:
+            kill_tree(audio_proc.pid)
 
     STALL = 180   # 某段进度 180 秒无推进 → 判定卡死,杀掉并标记失败
     failed = set()
@@ -710,8 +1002,7 @@ def main():
                     n_now = prog_n(job); st = pstate[job["idx"]]
                     if n_now > st[0]: st[0] = n_now; st[1] = time.time()
                     elif time.time() - st[1] > STALL:
-                        try: subprocess.run(["taskkill", "/F", "/T", "/PID", str(pr.pid)], capture_output=True)
-                        except Exception: pass
+                        kill_tree(pr.pid)
                         failed.add(job["idx"]); continue
                     still.append((job, pr))
                 else:   # 已退出：检查是否正常完成
@@ -723,32 +1014,59 @@ def main():
                 done = sum(prog_n(job) for job in jobs)
                 el = now - t0; cur = done / el if el > 0 else 0
                 fl = f" 失败{len(failed)}段" if failed else ""
+                # 被 DMR 以管道捕获时只发机读进度行（供 WebUI 显示百分比），
+                # 不刷进度条——那是给交互终端看的,进了日志只会刷屏。
+                tty = sys.stdout.isatty()
                 if total:
                     dtot = max(total, done)   # 估算帧数偏少时动态抬高,避免显示超过100%/负剩余
                     pct = done / dtot * 100; eta = max(0.0, (dtot - done) / cur) if cur > 0 else 0; bn = int(pct / 100 * 20)
-                    sys.stdout.write(f"\r[{'#'*bn}{'-'*(20-bn)}] {pct:5.1f}%  {done}/{dtot}帧  {cur:.0f}fps  已用{fmt(el)} 剩~{fmt(eta)}{fl}   ")
-                    # 被 DMR 以管道捕获时（非交互终端）额外打一行机读进度，供 WebUI 显示百分比
-                    if not sys.stdout.isatty():
-                        sys.stdout.write(f"\n[DMR_PROGRESS] {pct:.1f}\n")
-                else:
+                    if tty:
+                        sys.stdout.write(f"\r[{'#'*bn}{'-'*(20-bn)}] {pct:5.1f}%  {done}/{dtot}帧  {cur:.0f}fps  已用{fmt(el)} 剩~{fmt(eta)}{fl}   ")
+                    else:
+                        sys.stdout.write(f"[DMR_PROGRESS] {pct:.1f}\n")
+                elif tty:
                     sys.stdout.write(f"\r{done}帧  {cur:.0f}fps  已用{fmt(el)}{fl}   ")
                 sys.stdout.flush()
             time.sleep(0.2)
     except KeyboardInterrupt:
-        print("\n\n收到停止信号,结束所有子进程..."); killall(); shutil.rmtree(work, ignore_errors=True)
-        print("已停止。"); return
+        log.info("收到停止信号,结束所有子进程...")
+        killall(); wait_dead(procs.values())
+        if audio_proc:
+            wait_dead([audio_proc])
+        if audio_log and not audio_log.closed:
+            audio_log.close()
+        rmtree_retry(work)
+        log.info("已停止。"); return
+    # 混音/清理之前必须确认 worker 全退干净,否则句柄还占着文件
     for pr in procs.values():
         try: pr.wait(timeout=5)
-        except Exception:
-            try: subprocess.run(["taskkill", "/F", "/T", "/PID", str(pr.pid)], capture_output=True)
-            except Exception: pass
-    print()
+        except Exception: kill_tree(pr.pid)
+    wait_dead(procs.values())
+    audio_rc = 0
+    if audio_proc:
+        try:
+            audio_rc = audio_proc.wait()
+        finally:
+            if audio_log:
+                audio_log.close()
+    if sys.stdout.isatty():
+        print()   # 给进度条收尾换行,免得后面的日志接在同一行
 
     # 校验：每段都要有 done_*.ts，否则报错退出(不产出残缺视频、不卡死)
     missing = [j["idx"] for j in jobs if not os.path.exists(os.path.join(work, f"done_{j['idx']:03d}.ts"))]
     bad = sorted(failed | set(missing))
     if bad:
-        print(f"渲染失败的分段: {bad}\n中间文件保留在: {work}\n(可重跑;若反复失败,把对应 cfg_NNN.json / 该段报错发我)")
+        log.error("渲染失败的分段: %s | 中间文件保留在: %s (可重跑;若反复失败,把对应 cfg_NNN.json / 该段报错发我)",
+                  bad, work)
+        sys.exit(1)
+    if audio_rc != 0 or (audio_proc and not os.path.exists(fixed_audio)):
+        detail = ""
+        try:
+            detail = open(audio_log_path, encoding="utf-8", errors="replace").read().strip()
+        except Exception:
+            pass
+        log.error("音频时间轴修复失败%s | 中间文件保留在: %s",
+                  f": {detail[-500:]}" if detail else "", work)
         sys.exit(1)
 
     dones = sorted(glob.glob(os.path.join(work, "done_*.ts")))
@@ -756,21 +1074,32 @@ def main():
         for d in dones: fo.write(f"file '{os.path.basename(d)}'\n")
     subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "concat", "-safe", "0",
                     "-i", "concat.txt", "-c", "copy", "full.ts"], cwd=work)
-    print("拼接完成,混音中...")
+    log.debug("拼接完成,混音中...")
     full = os.path.join(work, "full.ts")
-    # 源音频本就是 aac 时直接 copy,免去一次重编码(更快、无损)
-    a_args = ["-c:a", "copy"] if audio_codec(flv) == "aac" else ["-c:a", "aac", "-b:a", ab]
-    r = subprocess.run([FFMPEG, "-v", "error", "-y", "-i", full, "-i", flv,
-                        "-map", "0:v", "-map", "1:a?", "-c:v", "copy", *a_args,
-                        "-shortest", out_mp4])
+    if audio_proc:
+        # 音频已在视频渲染期间完成修复和编码，此处只需快速封装。
+        mux_cmd = [
+            FFMPEG, "-v", "error", "-y",
+            "-i", full, "-i", fixed_audio,
+            "-map", "0:v", "-map", "1:a:0",
+            "-c", "copy", "-shortest", out_mp4,
+        ]
+    else:
+        mux_cmd = [
+            FFMPEG, "-v", "error", "-y",
+            "-i", full, "-map", "0:v",
+            "-c:v", "copy", out_mp4,
+        ]
+    r = subprocess.run(mux_cmd)
     dt = time.time() - t0
     if r.returncode == 0:
-        shutil.rmtree(work, ignore_errors=True)
+        rmtree_retry(work)
         real_frames = sum(prog_n(job) for job in jobs) or total   # 用真实渲染帧数算平均,更准
         avg = real_frames / dt if dt > 0 else 0
-        print(f"\n完成！用时 {fmt(dt)}（平均 {avg:.0f}fps）,输出: {out_mp4}")
+        log.info("完成！视频时长 %s，用时 %s（平均 %.0ffps）,输出: %s",
+                 fmt(dur), fmt(dt), avg, out_mp4)
     else:
-        print(f"混音失败,中间文件保留在: {work}")
+        log.error("混音失败,中间文件保留在: %s", work)
 
 
 if __name__ == "__main__":
