@@ -27,6 +27,11 @@ class StreamState(str, Enum):
     REPLAY_START = "replay_start"
     STOPPING = "stopping"        # 稳态：刚下播,等待确认是否真的下播(stop_wait_time)
 
+class StreamUnavailableError(RuntimeError):
+    """房间报在播但拿不到直播流地址（如加密/密码房间）。
+    用于区分"正常录制中途崩溃"(走快速重启)和"压根取不到流"(走慢速轮询)，避免无限空转重启。"""
+    pass
+
 class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中初始化
     def __init__(self,
                  url,
@@ -57,7 +62,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.stream_args = stream_args
         self.video = stream_args.get('enable', True)
         self.engine = stream_args.get('engine') or 'auto'
-        self.output_format = stream_args.get('output_format', 'flv')
+        self.output_format = stream_args.get('output_format')  # 留空则在 start_once 里按实际引擎自动决定容器
         self.stop_wait_time = stream_args.get('stop_wait_time', 0)
         self.stream_option = stream_args.get('stream_option') or {}
         self.advanced_video_args = stream_args.get('advanced_args') or {}
@@ -69,6 +74,13 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.dm_format = danmaku_args.get('format', 'ass')
 
         self.stoped = True
+        # WebUI 只读取这些单调时钟截止点来显示倒计时；不会因此增加平台请求。
+        self.next_check_deadline = None
+        self.stop_confirm_deadline = None
+        # OFFLINE 原先用不可中断的 time.sleep；改用 Event 后可被「立即检测」唤醒。
+        self._check_wakeup = threading.Event()
+        self._check_now_lock = threading.Lock()
+        self._last_check_now = 0.0
         os.makedirs(self.output_dir,exist_ok=True)
     @property
     def taskname_disp(self) -> str:
@@ -179,6 +191,10 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         os.makedirs(self.output_dir,exist_ok=True)
 
         stream_url = self.liveapi.GetStreamURL(**self.stream_option)
+        if not stream_url:
+            # 房间报在播但取不到流地址（典型：加密/密码房间）。
+            # 这里直接抛出，避免把 None 当地址喂给 ffmpeg 导致秒退后无限快速重启。
+            raise StreamUnavailableError(f'{self.taskname}: 无法获取直播流地址（可能是加密/密码房间）')
         stream_request_header = self.liveapi.GetStreamHeader()
         width, height = FFprobe.get_resolution(stream_url, stream_request_header)
         # 斗鱼和虎牙的直播地址只能用一次，所以要重新获取
@@ -221,12 +237,18 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         else:
             raise NotImplementedError(f'No Downloader Named {this_engine}.')
 
+        # output_format 跟着实际引擎走：streamgears 只会产 flv；ffmpeg 录 hls/fmp4 用 mp4
+        # （H.264/HEVC 都能装进分片 mp4，且与 flv 一样抗崩）。用户在配置里显式写了就尊重其设置。
+        if not self.output_format:
+            self.output_format = 'mp4' if this_engine == 'ffmpeg' else 'flv'
+
         if not (width and height):
             default_resolution = self.advanced_video_args.get('default_resolution', (1920, 1080))
             self.logger.warning(f'无法获取视频大小，使用默认值 {default_resolution}.')
             width, height = default_resolution
 
         self.width,self.height = width, height
+        self.logger.info(f'{self.taskname_disp}🎬录制流 {width}x{height}，容器 {self.output_format}，引擎 {this_engine}')
         self.dmw = None
 
         def danmaku_thread():
@@ -345,6 +367,17 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 waited += 1
             return self._cmd_force_live
 
+        def sleep_or_cmd_offline(duration) -> bool:
+            """睡眠 duration 秒，期间每秒检查一次「强制下播」指令，收到则清标志并提前返回 True"""
+            waited = 0
+            while waited < duration:
+                if self._cmd_offline:
+                    self._cmd_offline = False
+                    return True
+                time.sleep(min(1, duration - waited))
+                waited += 1
+            return False
+
         def update_state(state):
             now = datetime.now()
             now_onair = self.get_effective_onair()
@@ -397,7 +430,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.loop = True
         trust_onair_at_startup = self.advanced_video_args.get("trust_onair_at_startup",True)
 
-        stop_waited = 0
         stop_wait_time = int(self.stop_wait_time)
         stop_check_interval = self.advanced_video_args.get('stop_check_interval', 60)
         start_check_interval = self.advanced_video_args.get('start_check_interval', 60)
@@ -415,6 +447,13 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         # =============================================
 
         restart_cnt = 0
+        # 连续"取不到流地址"的次数。用来区分"推流瞬断/卡顿"(短暂取不到，快速重试可恢复)
+        # 和"加密/密码房或长时间无流"(持续取不到，再快也是空转)。
+        stream_unavail_cnt = 0
+        stream_unavail_fast_retries = 8     # 前 N 次按快速重试，超过则判定为持续无流，转慢速轮询
+        # 一轮录制若录满这么久才断流，视为"正常断流"(B站CDN地址过期/节点切换导致)，
+        # 平静换地址续录；不到这个时长就断，视为"异常中断"，按递增间隔重连并提示。
+        normal_reconnect_min_sec = 60
         restart_interval = self.advanced_video_args.get('restart_interval', (0, 10, 60))
         if isinstance(restart_interval, (int, float)):
             restart_interval_min = restart_interval_step = restart_interval_max = restart_interval
@@ -446,7 +485,10 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 continue
             # ---------- REPLAY ing ----------
             if state == StreamState.REPLAY:
-                if sleep_or_force_live(stop_check_interval):
+                self.next_check_deadline = time.monotonic() + stop_check_interval
+                force_live = sleep_or_force_live(stop_check_interval)
+                self.next_check_deadline = None
+                if force_live:
                     self._cmd_force_live = False
                     self.forced_replay_pending = False
                     self.forced_live_pending = True   # 让下一轮 OFFLINE->LIVE_START 无视录制时段
@@ -457,16 +499,46 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             if state == StreamState.LIVE_END:
                 self.logger.info(f"{self.taskname_disp}⌛下播,本轮录制结束")
                 write_time_to_txt("end")
-                stop_waited = 0
+                self.stop_confirm_deadline = time.monotonic() + max(0, stop_wait_time)
                 continue
 
             # ---------- STOPPING：刚下播,等待确认是否真的下播 ----------
             if state == StreamState.STOPPING:
                 restart_cnt = 0
+                if self.stop_confirm_deadline is None:
+                    self.stop_confirm_deadline = time.monotonic() + max(0, stop_wait_time)
+
+                remaining = max(0.0, self.stop_confirm_deadline - time.monotonic())
+                # 正常倒计时归零时，上一轮 STOPPING→STOPPING 的 update_state 已完成最终平台检查。
+                # stop_wait_time=0 时本轮是 LIVE_END→STOPPING，需在收尾前补一次真正的最终检查。
+                if remaining <= 0:
+                    if self.force_stop_trigger:
+                        # 不能用 get_effective_onair：force_stop_trigger=True 时它必定返回 False。
+                        # 人为下播在完成确认等待后查真实平台状态；仍在线则下一轮进入 REPLAY。
+                        if self.liveapi.Onair():
+                            self.forced_replay_pending = True
+                    elif prev_state != StreamState.STOPPING and self.get_effective_onair():
+                        self.stop_confirm_deadline = None
+                        state = StreamState.LIVE
+                        continue
+                    self.logger.info(f"{self.taskname_disp}🔴直播真的结束了")
+                    self._pipeSend('liveend', '直播真的结束了', data=self.sess_id)
+
+                    self.sess_id = uuid(8)
+                    self.segment_id = 1
+                    self.force_stop_trigger = False
+                    self.stop_confirm_deadline = None
+                    state = StreamState.OFFLINE
+                    continue
+
                 interval = get_check_interval(stop_check_interval,check_policy)
-                time.sleep(interval)
-                stop_waited += interval
-                if stop_waited > stop_wait_time:
+                wait_time = min(interval, remaining)
+                # 逐秒小步睡：期间收到「直接下播」指令就跳过剩余确认等待，立即按真下播收尾
+                skip_wait = sleep_or_cmd_offline(wait_time)
+                if skip_wait:
+                    self.logger.info(f"{self.taskname_disp}🔔收到指令：跳过下播确认等待，立即下播")
+                    self.force_stop_trigger = True   # 与录制中「强制下播」同语义：主播实际在线则下次按回放
+                if skip_wait:
                     self.logger.info(f"{self.taskname_disp}🔴直播真的结束了")
                     self._pipeSend('liveend', '直播真的结束了', data=self.sess_id)
 
@@ -479,18 +551,30 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                         self.forced_replay_pending = True
 
                     self.force_stop_trigger = False
+                    self.stop_confirm_deadline = None
                     state = StreamState.OFFLINE
                 continue
 
             # ---------- OFFLINE ----------(2)
             if state == StreamState.OFFLINE:
                 restart_cnt = 0
+                stream_unavail_cnt = 0
                 interval = get_check_interval(start_check_interval,check_policy)
-                time.sleep(interval)
+                self.stop_confirm_deadline = None
+                self.next_check_deadline = time.monotonic() + interval
+                # 超时=正常自动检测；Event 被置位=WebUI 要求立即检测或任务正在停止。
+                self._check_wakeup.wait(interval)
+                self._check_wakeup.clear()
+                self.next_check_deadline = None
                 continue
 
             # ---------- LIVE_START ----------
             if state == StreamState.LIVE_START:
+                self.stop_confirm_deadline = None
+                self.next_check_deadline = None
+                # 清掉上一场残留的下播指令：指令若恰好在 STOPPING→OFFLINE 切换瞬间发出、
+                # 没被任何循环消费，残留标志会把新一场直播秒杀掉
+                self._cmd_offline = False
                 if prev_state == StreamState.STOPPING:
                     self.logger.info(f"{self.taskname_disp}🔄再次开播,重启录制")
                 else:
@@ -503,29 +587,59 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
             # ---------- LIVE：允许录制 ----------(3)
             try:
-                stop_waited = 0
-
                 res = self.start_once()
+                stream_unavail_cnt = 0   # 成功取到流并录过一轮，连续失败计数清零
 
                 if res == "segment":
                     self.stop_once()
                     self.logger.info(f"{self.taskname_disp}🔄手动分段结束,重启录制")
                     continue
 
+                # start_once 正常返回，但主播还在播：ffmpeg 自己退出了（多为 B站 CDN 地址
+                # 过期/节点切换导致的断流）。按"这一轮录了多久"区分正常断流和异常中断。
                 if update_state(state) == StreamState.LIVE:
-                    raise RuntimeError(f'{self.taskname} 录制异常退出.')
+                    self.stop_once()
+                    recorded = (datetime.now() - self.segment_start_time).total_seconds()
+                    if recorded >= normal_reconnect_min_sec:
+                        # 录够久才断 → 正常断流，平静换地址续录，不当异常、不累加重启计数
+                        restart_cnt = 0
+                        self.logger.info(f"{self.taskname_disp}🔗直播流断开(本段已录{int(recorded//60)}分{int(recorded%60)}秒)，正在重连续录...")
+                        time.sleep(restart_interval_min)
+                        continue
+                    else:
+                        # 很快就断 → 地址失效/网络异常，按递增间隔重连并提示
+                        self.logger.warning(f"{self.taskname_disp}⚠️录制{int(recorded)}秒后异常中断，第{restart_cnt + 1}次重连...")
+                        time.sleep(min(restart_interval_min + restart_interval_step * restart_cnt, restart_interval_max))
+                        restart_cnt += 1
+                        continue
 
             except KeyboardInterrupt:
                 self.stop()
                 exit(0)
 
+            except StreamUnavailableError as e:
+                # 取不到流地址。房间会一直报在播，若一律快速重启会无限空转。
+                self.stop_once()
+                stream_unavail_cnt += 1
+                if stream_unavail_cnt <= stream_unavail_fast_retries:
+                    # 前几次先当成推流瞬断/卡顿：按递增间隔快速重试，等推流恢复就能自动接上。
+                    interval = min(restart_interval_min + restart_interval_step * (stream_unavail_cnt - 1), restart_interval_max)
+                    self.logger.info(f"{self.taskname_disp}🔄取流失败，{interval}秒后重试(第{stream_unavail_cnt}次)...")
+                else:
+                    # 连续多次仍取不到流 → 判定为加密/密码房或长时间无流，转慢速轮询，避免无限空转。
+                    interval = get_check_interval(start_check_interval, check_policy)
+                    if stream_unavail_cnt == stream_unavail_fast_retries + 1:
+                        self.logger.warning(f"{self.taskname_disp}🔒持续取不到流(可能是加密/密码房间)，转为每{interval}秒检测一次...")
+                time.sleep(interval)
+                continue
+
             except Exception as e:
                 if update_state(state) == StreamState.LIVE:
-                    self.logger.info(f"{self.taskname_disp}🔄第{restart_cnt + 1}次重启,等待后重新开始录制...")
-                    self.logger.exception(e)
+                    # start_once 内部直接抛异常（较少见，如取流/建进程出错），属异常中断
                     self.stop_once()
+                    self.logger.warning(f"{self.taskname_disp}⚠️录制异常中断，第{restart_cnt + 1}次重连...")
+                    self.logger.exception(e)
                     time.sleep(min(restart_interval_min + restart_interval_step * restart_cnt, restart_interval_max))
-                    self.logger.info(f"{self.taskname_disp}🔄重启录制")
                     restart_cnt += 1
                     continue
                 else:
@@ -543,6 +657,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
     def stop(self):
         self.loop = False
+        self._check_wakeup.set()
         self.stop_once()
         self._pipeSend('livestop', '录制终止', dtype='str', data=self.sess_id if hasattr(self, 'sess_id') else None)
 
@@ -572,6 +687,19 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
     def cmd_force_live(self):
         """回放状态下手动强制开始录制"""
         self._cmd_force_live = True
+
+    def cmd_check_live(self):
+        """未开播时立即唤醒一次自动检测；同一任务按单调时钟做3秒后端冷却。"""
+        if getattr(self, 'live_state', None) != StreamState.OFFLINE:
+            return False, "任务当前不是未开播状态"
+        now = time.monotonic()
+        with self._check_now_lock:
+            remaining = 3.0 - (now - self._last_check_now)
+            if remaining > 0:
+                return False, f"操作过于频繁，请 {remaining:.1f} 秒后再试"
+            self._last_check_now = now
+        self._check_wakeup.set()
+        return True, "立即检测指令已发送"
 
     def stop_once(self): # 会调用segment callback分段视频
         self.stoped = True

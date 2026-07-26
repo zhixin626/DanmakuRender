@@ -118,23 +118,6 @@ class bilibili(BaseAPI):
                        **kwargs) -> str:
         avail_urls = self.get_stream_urls(**kwargs)
 
-        # 如果显式指定要 FLV，则优先在 FLV 里选「可录制的最高画质 H.264 FLV」
-        if stream_type == "flv":
-            flv_avc = [
-                u for u in avail_urls
-                if u["stream_type"].lower() == "flv-avc"
-            ]
-
-            if not flv_avc:
-                raise RuntimeError("没有可录制的 H.264 FLV（flv-avc）流")
-
-            max_q = max(u["quality"] for u in flv_avc)
-            best = [u for u in flv_avc if u["quality"] == max_q]
-            chosen = random.choice(best)
-            return chosen["stream_url"]
-
-        # -------------------------------------------------------------
-
         # 有可能返回的流存在多种质量，因为H.265和H.264压缩策略不同
         max_quality = max(avail_urls, key=lambda x: x['quality'])['quality']
         avail_urls = [max_res_urls for max_res_urls in avail_urls if max_res_urls['quality'] == max_quality]
@@ -189,12 +172,13 @@ class bilibili(BaseAPI):
             return random.choice(avail_urls)['stream_url']
         else:
             selected_url=random.choice(selected_urls)
+            chosen_info = next((u for u in avail_urls if u['stream_url'] == selected_url), None)
+            cdn = re.search(r'//([^/]+)/', selected_url).group(1) if '//' in selected_url else '未知'
+            proto = 'FLV' if '.flv' in selected_url else 'HLS/fMP4'
             logger.info(
-                "\n================ 最终选择的录制流 ================\n"
-                f"URL : {selected_url}\n"
-                f"CDN : {re.search(r'//([^/]+)/', selected_url).group(1) if '//' in selected_url else '未知'}\n"
-                f"类型: {'FLV' if '.flv' in selected_url else 'HLS / fMP4'}\n"
-                "================================================\n"
+                f'[选流] qn={chosen_info["quality"] if chosen_info else "未知"} '
+                f'编码={chosen_info["stream_type"] if chosen_info else "未知"} '
+                f'CDN={cdn} 协议={proto}'
             )
             return selected_url
 

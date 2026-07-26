@@ -74,6 +74,14 @@ class Downloader(): # 被上层 class engine()初始化，在 add_plugin()里调
         task = self._get_task(taskname)
         if task: task.cmd_force_live()
 
+    def cmd_check_live(self, taskname: str):
+        task = self._get_task(taskname)
+        if not task:
+            return False, f'下载任务 {taskname} 不存在'
+        if not hasattr(task, 'cmd_check_live'):
+            return False, '该任务类型不支持立即检测'
+        return task.cmd_check_live()
+
 
     def newtask(self, message:PipeMessage):  #这里被onReady信息--> 上面的　 _pipeRecvMonitor调用
         taskname = message.data['taskname']

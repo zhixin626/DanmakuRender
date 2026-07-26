@@ -63,6 +63,10 @@ class SyncStreamDownloadTask(StreamDownloadTask):
         # 目前只支持streamlink的同步下载
         this_engine = 'streamlink_sync'
 
+        # output_format 留空时按引擎自动决定（同步下载走 streamlink，用 flv）
+        if not self.output_format:
+            self.output_format = 'mp4' if this_engine == 'ffmpeg' else 'flv'
+
         if this_engine == 'ffmpeg_sync':
             from .ffmpeg import FFmpegDownloader
             downloader_class = FFmpegDownloader

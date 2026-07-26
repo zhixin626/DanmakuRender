@@ -65,17 +65,29 @@ class FFmpegDownloader():
             '-c', 'copy'
         ]
 
-        ffmpeg_output_args = self.advanced_video_args.get('ffmpeg_output_args', 
-                                                          [ '-movflags','faststart+frag_keyframe+empty_moov'])
+        # 输出封装参数。mp4 类容器要分片(frag_keyframe+empty_moov)才能「边录边看」且抗崩：
+        #   - 分段录制(-f segment)时，分片参数必须用 -segment_format_options 传给内层 mp4 封装器；
+        #     直接写 -movflags 会被 segment 外层封装器吃掉、不生效，导致当前分段没有 moov、录制中打不开。
+        #   - flv 是流式容器，天然可边录边看，不需要这些参数。
+        # 用户在 advanced_args.ffmpeg_output_args 里显式写了就完全按其配置。
+        user_output_args = self.advanced_video_args.get('ffmpeg_output_args')
+        is_mp4 = self.output_format in ('mp4', 'mov', 'm4s')
+
         if self.segment:
             ffmpeg_args += ['-f','segment',
                             '-segment_time',str(self.segment),
-                            '-reset_timestamps','1',
-                            *ffmpeg_output_args,
-                            self.raw_name]
+                            '-reset_timestamps','1']
+            if user_output_args is not None:
+                ffmpeg_args += user_output_args
+            elif is_mp4:
+                ffmpeg_args += ['-segment_format_options','movflags=+frag_keyframe+empty_moov']
+            ffmpeg_args += [self.raw_name]
         else:
-            ffmpeg_args += [*ffmpeg_output_args,
-                            self.raw_name]
+            if user_output_args is not None:
+                ffmpeg_args += user_output_args
+            elif is_mp4:
+                ffmpeg_args += ['-movflags','+frag_keyframe+empty_moov']
+            ffmpeg_args += [self.raw_name]
 
         
         self.logger.debug('FFmpegDownloader args:')

@@ -146,8 +146,9 @@ class douyin(BaseAPI):
         }
         self.headers = douyin_utils.get_headers()
         url = douyin_utils.build_request_url(url, query=params)
-        text = self.sess.get(url, headers=self.headers, params=params, timeout=5).text
-        data = json.loads(text)['data']
+        response = self.sess.get(url, headers=self.headers, timeout=5)
+        response.raise_for_status()
+        data = response.json()['data']
         return data
 
     def onair(self) -> bool:
@@ -155,50 +156,122 @@ class douyin(BaseAPI):
         code = resp['data'][0]['status']
         return code == 2
 
-    def get_stream_urls(self, **kwargs) -> str:
+    @staticmethod
+    def _quality_score(quality: dict) -> tuple:
+        """抖音画质排序：优先官方 level，再比较像素、码率和常见画质名称。"""
+        sdk_key = str(quality.get('sdk_key') or quality.get('quality') or '').lower()
+        name_score = 0
+        for keyword, score in (
+            ('origin', 5), ('full_hd', 5), ('uhd', 5),
+            ('hd', 4), ('sd', 3), ('ld', 2),
+        ):
+            if keyword in sdk_key:
+                name_score = score
+                break
+
+        resolution = str(quality.get('resolution') or '')
+        try:
+            width, height = (int(value) for value in resolution.lower().split('x', 1))
+            pixels = width * height
+        except (TypeError, ValueError):
+            pixels = 0
+
+        return (
+            int(quality.get('level') or 0),
+            pixels,
+            int(quality.get('v_bit_rate') or 0),
+            name_score,
+        )
+
+    def get_stream_urls(self, **kwargs) -> list:
         resp = self._get_response_douyin()
         stream_info = resp['data'][0]['stream_url']
         real_urls = []
+        qualities = []
         try:
             extra_data = stream_info['live_core_sdk_data']['pull_data']['stream_data']
             extra_data = json.loads(urllib.parse.unquote(extra_data))
             qualities = stream_info['live_core_sdk_data']['pull_data']['options']['qualities']
-            this_quality = qualities[-1]['sdk_key']
+            avail_qualities = [q for q in qualities if not q.get('disable')]
+            best_quality = max(avail_qualities or qualities, key=self._quality_score)
+            this_quality = best_quality['sdk_key']
             url_dict = extra_data['data']
             for stype, url in url_dict[this_quality]['main'].items():
                 if not str(url).startswith('http'):
                     continue
                 real_urls.append({
                     'quality': this_quality,
+                    'quality_name': best_quality.get('name'),
+                    'level': best_quality.get('level'),
+                    'codec': best_quality.get('v_codec'),
+                    'resolution': best_quality.get('resolution'),
+                    'bitrate': best_quality.get('v_bit_rate'),
                     'stream_type': stype,
                     'stream_url': url,
                 })
         except Exception as e:
-            logger.debug(e)
-            url = list(stream_info['flv_pull_url'].items())[0]
+            logger.warning(f'抖音{self.web_rid}主直播流解析失败，将尝试FLV备用地址: {e}')
+            flv_urls = stream_info.get('flv_pull_url') or {}
+            quality_meta = {
+                str(q.get('sdk_key')): q for q in qualities if q.get('sdk_key')
+            }
+            available_flv_urls = [
+                (quality, url) for quality, url in flv_urls.items()
+                if str(url).startswith('http')
+            ]
+            if not available_flv_urls:
+                raise RuntimeError(f'抖音{self.web_rid}没有可用的直播流地址') from e
+
+            quality, url = max(
+                available_flv_urls,
+                key=lambda item: self._quality_score(
+                    quality_meta.get(str(item[0]), {'quality': item[0]})
+                ),
+            )
+            meta = quality_meta.get(str(quality), {})
             real_urls = [{
-                    'quality': url[0],
+                    'quality': quality,
+                    'quality_name': meta.get('name'),
+                    'level': meta.get('level'),
+                    'codec': meta.get('v_codec'),
+                    'resolution': meta.get('resolution'),
+                    'bitrate': meta.get('v_bit_rate'),
                     'stream_type': 'flv',
-                    'stream_url': url[1],
+                    'stream_url': url,
                 }]
+
+        if not real_urls:
+            raise RuntimeError(f'抖音{self.web_rid}没有可用的直播流地址')
         return real_urls
     
     def get_stream_url(self, stream_type=None, **kwargs) -> str:
-        stream_type = 'flv'
-        
-        avail_urls = self.get_stream_urls()
-        selected_urls = []
-        for url_info in avail_urls:
-            if url_info['stream_type'] != stream_type:
-                continue
-            uri = url_info['stream_url']
-            selected_urls.append(uri)
-        
+        stream_type = str(stream_type or 'flv').lower()
+        if stream_type in ('m3u8', 'fmp4'):
+            stream_type = 'hls'
+
+        avail_urls = self.get_stream_urls(**kwargs)
+        selected_urls = [
+            url_info for url_info in avail_urls
+            if str(url_info['stream_type']).lower() == stream_type
+        ]
+
         if not selected_urls:
             logger.warning(f'抖音{self.web_rid}没有{stream_type}流，将使用默认选项.')
-            return random.choice(avail_urls)['stream_url']
-        else:
-            return random.choice(selected_urls)
+            selected_urls = avail_urls
+
+        chosen_info = random.choice(selected_urls)
+        selected_url = chosen_info['stream_url']
+        cdn = urlparse(selected_url).netloc or '未知'
+        proto = 'FLV' if chosen_info['stream_type'].lower() == 'flv' else 'HLS'
+        logger.info(
+            f'[选流] 画质={chosen_info.get("quality_name") or chosen_info["quality"]} '
+            f'level={chosen_info.get("level", "未知")} '
+            f'分辨率={chosen_info.get("resolution") or "未知"} '
+            f'码率={chosen_info.get("bitrate") or "未知"} '
+            f'编码={chosen_info.get("codec") or "未知"} '
+            f'CDN={cdn} 协议={proto}'
+        )
+        return selected_url
 
     def get_info(self) -> tuple:
         resp = self._get_response_douyin()
@@ -208,11 +281,22 @@ class douyin(BaseAPI):
         keyframe_url = None
         return title, uname, face_url, keyframe_url
 
-if __name__ == '__main__':
-    from DMR.utils import split_url
-    url='https://www.douyu.com/3125893'
-    platform,rid=split_url(url)
-    print(platform,rid)
-    api = douyin(rid)
 
-    # print(api.onair())
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+    rid = input('请输入抖音直播间号(网页直播间URL中的数字, 如 https://live.douyin.com/123456 中的123456): ').strip()
+
+    dy = douyin(rid)
+    print('real_rid:', dy.real_rid)
+    print('is_available:', dy.is_available())
+    print('onair:', dy.onair())
+    print('get_info:', dy.get_info())
+
+    urls = dy.get_stream_urls()
+    print('get_stream_urls:')
+    for u in urls:
+        print(' ', u)
+
+    print('get_stream_url:', dy.get_stream_url())
