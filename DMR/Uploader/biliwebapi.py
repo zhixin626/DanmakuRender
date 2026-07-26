@@ -13,6 +13,7 @@ import threading
 import time
 import queue
 import copy
+import yaml
 from dataclasses import asdict, dataclass, field, InitVar
 from json import JSONDecodeError
 from os.path import splitext, basename
@@ -33,6 +34,19 @@ from .bvid_history import read_period_bvid, write_period_bvid
 
 
 logger = logging.getLogger(__name__)
+_METADATA_LOCK = threading.RLock()
+
+
+class _MetadataDumper(yaml.SafeDumper):
+    pass
+
+
+def _represent_metadata_string(dumper, value):
+    style = '|' if '\n' in value else None
+    return dumper.represent_scalar('tag:yaml.org,2002:str', value, style=style)
+
+
+_MetadataDumper.add_representer(str, _represent_metadata_string)
 
 
 class BiliWebApi:
@@ -186,26 +200,128 @@ class BiliWebApi:
             video.tag = replace_keywords(video.tag, video_info)
         if config.get('source'):
             video.source = replace_keywords(config['source'], video_info)
-        # 封面：优先按 cover_args 生成（抽帧+渲染，共享 util），否则用静态 config['cover']
+        # 先只准备本地封面；实际上传由 upload() 在确认不是 skip_upload 后执行。
         cover_file = generate_cover(video_info.get('path'), config.get('cover_args'),
                                     stime=video_info.get('stime'), account=config.get('account', ''))
         # 记下"本次是动态生成的封面本地路径"（静态 config['cover'] 不归我管，不删）：
         # 上传成功后删除，失败则把它留给 WebUI 人工处理用。
+        if cover_file:
+            cover_file = self._rename_generated_cover(cover_file, video_info, config.get('account'))
         self._gen_cover = cover_file if cover_file else None
         if not cover_file and config.get('cover'):
             cover_file = replace_keywords(config['cover'], video_info)
-        if cover_file:
-            try:
-                if isinstance(cover_file, str) and cover_file.startswith('http'):
-                    import requests
-                    resp = requests.get(cover_file, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10.0)
-                    resp.raise_for_status()
-                    cover_file = BytesIO(resp.content)
-                video.cover = self.cover_up(cover_file)
-            except Exception as e:
-                logger.error(f'视频 {config["title"]} 封面设置失败: {e}, 跳过设置.')
-                video.cover = ''
+        self._cover_file = cover_file
         return video
+
+    @staticmethod
+    def _safe_filename_part(value):
+        return re.sub(r'[\\/:*?"<>|]', '_', str(value or 'unknown'))
+
+    def _record_key(self, video_info):
+        file_id = video_info.get('file_id') or video_info.get('dm_video_id')
+        if not file_id:
+            file_id = hashlib.sha1(os.path.abspath(video_info['path']).encode('utf-8')).hexdigest()[:16]
+        return str(file_id), f'{file_id}:{self.account or "unknown"}'
+
+    def _rename_generated_cover(self, cover_file, video_info, account):
+        """Rename generated covers so archived covers are unique and repeatable."""
+        if not isinstance(cover_file, str) or not os.path.isfile(cover_file):
+            return cover_file
+        file_id, _ = self._record_key(video_info)
+        token = hashlib.sha1(f'{file_id}|{account}'.encode('utf-8')).hexdigest()[:8]
+        video_stem = self._safe_filename_part(splitext(basename(video_info['path']))[0])
+        account_part = self._safe_filename_part(account)
+        ext = splitext(cover_file)[1] or '.jpg'
+        destination = os.path.join(
+            os.path.dirname(os.path.abspath(video_info['path'])),
+            f'{video_stem}__{account_part}__{token}{ext}',
+        )
+        if os.path.abspath(cover_file) != os.path.abspath(destination):
+            os.replace(cover_file, destination)
+        return destination
+
+    @staticmethod
+    def _cover_reference(cover_file, video_path):
+        if not isinstance(cover_file, str):
+            return ''
+        if os.path.dirname(os.path.abspath(cover_file)) == os.path.dirname(os.path.abspath(video_path)):
+            return basename(cover_file)
+        return cover_file
+
+    def _record_metadata(self, video_info, video, cover_file=None):
+        with _METADATA_LOCK:
+            self._record_metadata_locked(video_info, video, cover_file)
+
+    def _record_metadata_locked(self, video_info, video, cover_file=None):
+        """Upsert formatted publish data into metadata.yml beside the final video."""
+        output_dir = os.path.dirname(os.path.abspath(video_info['path']))
+        metadata_path = os.path.join(output_dir, 'metadata.yml')
+        try:
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    metadata = yaml.safe_load(f) or {}
+            else:
+                metadata = {}
+        except (OSError, yaml.YAMLError) as e:
+            logger.warning(f'读取投稿资料文件失败，将重新创建: {metadata_path}: {e}')
+            metadata = {}
+
+        # 兼容此前生成的 version/records 结构：下次写入时自动转换为
+        # ``视频文件名 -> 账号 -> 投稿资料``，不保留内部 file_id。
+        legacy_records = metadata.pop('records', None)
+        metadata.pop('version', None)
+        if isinstance(legacy_records, dict):
+            for legacy in legacy_records.values():
+                if not isinstance(legacy, dict):
+                    continue
+                legacy_video = legacy.get('video')
+                legacy_account = legacy.get('account')
+                if not legacy_video or not legacy_account:
+                    continue
+                legacy_tag = legacy.get('tag', '')
+                if isinstance(legacy_tag, list):
+                    legacy_tag = ','.join(str(tag) for tag in legacy_tag)
+                metadata.setdefault(legacy_video, {})[legacy_account] = {
+                    'cover': legacy.get('cover', ''),
+                    'title': legacy.get('title', ''),
+                    'dynamic': str(legacy.get('dynamic', '')).rstrip('\r\n'),
+                    'tag': str(legacy_tag),
+                    'desc': str(legacy.get('desc', '')).rstrip('\r\n'),
+                }
+
+        video_name = basename(video_info['path'])
+        account = self.account or ''
+        account_records = metadata.get(video_name)
+        if not isinstance(account_records, dict):
+            account_records = {}
+            metadata[video_name] = account_records
+        if cover_file is None:
+            cover_file = self._cover_file
+        account_records[account] = {
+            'cover': self._cover_reference(cover_file, video_info['path']),
+            'title': video.title,
+            'dynamic': str(video.dynamic or '').rstrip('\r\n'),
+            'tag': str(video.tag or ''),
+            'desc': str(video.desc or '').rstrip('\r\n'),
+        }
+        with open(metadata_path, 'w', encoding='utf-8', newline='\n') as f:
+            yaml.dump(metadata, f, Dumper=_MetadataDumper, allow_unicode=True, sort_keys=False)
+        logger.info(f'已记录投稿资料: {metadata_path} ({video_name}/{account})')
+
+    def _upload_pending_cover(self, video, config):
+        """Upload the locally prepared cover; cover failures do not block submission."""
+        cover_file = self._cover_file
+        if not cover_file:
+            return
+        try:
+            if isinstance(cover_file, str) and cover_file.startswith('http'):
+                resp = requests.get(cover_file, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10.0)
+                resp.raise_for_status()
+                cover_file = BytesIO(resp.content)
+            video.cover = self.cover_up(cover_file)
+        except Exception as e:
+            logger.error(f'视频 {config.get("title", "")} 封面设置失败: {e}, 跳过设置.')
+            video.cover = ''
 
     def upload(
         self,
@@ -216,6 +332,15 @@ class BiliWebApi:
         **kwargs,
     ):
         is_new = False
+        self._gen_cover = None
+        self._cover_file = None
+        if kwargs.get('skip_upload'):
+            # 资料模式不读取远端稿件、不上传封面，也不提交视频。
+            archive_video = self.videoinfo_to_videos(files[0], kwargs, session)
+            if kwargs.get('record_metadata'):
+                self._record_metadata(files[0], archive_video)
+            self.videos = None
+            return True, '投稿资料已生成，已跳过上传'
         self._gen_cover = None   # 仅 is_new 时由 videoinfo_to_videos 写入；追加上传不生成新封面
         if not self.videos:
             # 周期追加：未显式指定稿件且开启 auto_append_period 时，查历史决定是否追加到已有稿件
@@ -233,6 +358,11 @@ class BiliWebApi:
             self.videos = self.videoinfo_to_videos(files[0], kwargs, session)
         else:
             self.videos = self.get_remote_data(self.videos.bvid) # 刷新视频信息
+        if is_new:
+            if kwargs.get('record_metadata'):
+                # 先记录本地封面；投稿成功后会用平台封面地址更新此条记录。
+                self._record_metadata(files[0], self.videos)
+            self._upload_pending_cover(self.videos, kwargs)
         # return False, '手动测试上传失败', {'cover': getattr(self, '_gen_cover', None)}
         if stream_queue is None:
             n_files = len(files)
@@ -271,6 +401,9 @@ class BiliWebApi:
         if status and is_new and kwargs.get('auto_append_period') in ('monthly', 'daily') and kwargs.get('output_dir'):
             write_period_bvid(kwargs['output_dir'], (session or {}).get('stime'),
                               self.videos.bvid, period=kwargs['auto_append_period'], account=kwargs.get('account'))
+
+        if status and is_new and kwargs.get('record_metadata'):
+            self._record_metadata(files[0], self.videos, cover_file=self.videos.cover)
 
         # 动态生成的封面：上传成功就删本地文件；失败则把路径随返回值带回（留给 WebUI 人工处理）
         gen_cover = getattr(self, '_gen_cover', None)

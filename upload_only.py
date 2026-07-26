@@ -2,7 +2,7 @@ import yaml
 from pathlib import Path
 import logging
 from datetime import datetime
-from DMR.utils.video_merge import probe_media
+from DMR.utils.ffprobe import probe_media
 from DMR.utils.session_record import read_last_complete_session
 from DMR.utils import *
 from DMR.LiveAPI import LiveAPI

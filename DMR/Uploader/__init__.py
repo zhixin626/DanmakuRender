@@ -211,9 +211,11 @@ class Uploader():
                     data={'config': task.get('config', {}), 'error': str(desc), 'extra': task.get('_extra')},
                 )
             else:
+                skipped_upload = task.get('args', {}).get('skip_upload', False)
+                action = '投稿资料生成完成（已跳过上传）' if skipped_upload else '上传完成'
                 self._pipeSend(
                     event='end',
-                    msg=f"视频 {[f.path for f in task['files']]} 上传完成: {desc}",
+                    msg=f"视频 {[f.path for f in task['files']]} {action}: {desc}",
                     target=task['source'],
                     request_id=task['request_id'],
                     dtype='dict',
@@ -281,9 +283,15 @@ class Uploader():
             while retry >= 0:
                 try:
                     if stream_queue:
-                        self.logger.info(f"正在同步上传 {files[0].title} 至 {upload_args.get('account')}")
+                        self.logger.info(
+                            f"正在将同步投稿任务交给 {task['engine']} 处理: "
+                            f"{files[0].title} (账号: {upload_args.get('account')})"
+                        )
                     else:
-                        self.logger.info(f"正在上传 {[f.path for f in files]} 至 {upload_args.get('account')}")
+                        self.logger.info(
+                            f"正在将投稿任务交给 {task['engine']} 处理: "
+                            f"{[f.path for f in files]} (账号: {upload_args.get('account')})"
+                        )
                     # logging.debug(task)
                     res = target_uploader.upload(files=files, stream_queue=stream_queue,
                                                  session=task['config'].get('session'),
