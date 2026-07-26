@@ -11,14 +11,14 @@ from .baseevents import BaseEvents
 from ..utils import *
 from ..utils.utils import format_duration
 from ..utils.gifts_utils import generate_gift_statistics
-from ..utils.session_record import write_record, delete_record, delete_all_records, read_last_complete_session
+from ..utils.session_record import read_last_complete_session
 
 logger = logging.getLogger(__name__)
 
 # 会话级"格式化标本"字段：不放进 VideoInfo，上传时作为单独的 session dict 传给 uploader 格式化
 SESSION_FIELDS = ('stime', 'etime', 'totaltime',
                   'gifts_revenue', 'num_of_gifters', 'sc_revenue', 'num_of_sc',
-                  'member_revenue', 'member_info', 'total_revenue', 'top_ranking')
+                  'member_revenue', 'member_info', 'total_revenue', 'revenue_summary', 'top_ranking')
 
 class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def __init__(self, name, config):
@@ -34,23 +34,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.src_path       = Path(out_dir)
         self.dmvideo_path   = Path(out_dir + '（弹幕版）')
         self.transcode_path = Path(out_dir + '（转码后）')
-
-    def _persist_record(self, group_id):
-        """把该 group 的内存状态忠实镜像到 output_dir 的会话记录。吞异常，不影响主管线。"""
-        try:
-            if group_id is None or group_id not in self.state_dict:
-                return
-            out_dir = str(self.config['download_args']['output_dir'])
-            write_record(out_dir, group_id, self.name,
-                         self.state_dict.get(group_id),
-                         self.session_data.get(group_id))
-        except Exception as e:
-            self.logger.debug(f'写会话记录失败(已忽略): {e}')
-
-    def _delete_record(self, group_id):
-        """group 全部处理完、内存释放时，删除其会话记录文件。吞异常，不影响主流程。"""
-        out_dir = str(self.config['download_args']['output_dir'])
-        delete_record(out_dir, group_id)
 
     @property
     def event_dict(self):
@@ -211,7 +194,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # onLiveEnd 时（下播事件那拍）不必重复跑。
         if group_id in self.ended_dict and clean_trigger != 'onLiveEnd':
             ret_msgs += self._check_for_clean(group_id, trigger='onLiveEnd')
-        self._persist_record(group_id)
         self._free_state_memory()
         return ret_msgs
 
@@ -244,8 +226,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         continue
                     for upid, arg in enumerate(upload_arg):
                         if not arg.get('realtime'):
-                            continue
-                        if info['file'].duration < arg.get('min_length', 0):
                             continue
                         upload_group_id = info['file'].upload_group_id if hasattr(info['file'], 'upload_group_id') else group_id
                         upload_msg = PipeMessage(
@@ -293,16 +273,12 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 for upid, arg in enumerate(upload_arg):
                     if arg.get('realtime'):
                         continue
-                    up_videos = [v for v in videos if v.duration >= arg.get('min_length', 0)]
-                    if not up_videos:
-                        self.logger.info(f'{self.name}: 视频时长不足 {arg.get("min_length", 0)} 秒，跳过上传。')
-                        continue
-                    upload_group_id = up_videos[0].upload_group_id if hasattr(up_videos[0], 'upload_group_id') else group_id
+                    upload_group_id = videos[0].upload_group_id if hasattr(videos[0], 'upload_group_id') else group_id
                     upload_msg = PipeMessage(
                         source=self.name, target='uploader', event='newtask', request_id=uuid(),
                         data={
                             'taskname': self.name,
-                            'files': up_videos,
+                            'files': videos,
                             'engine': arg['engine'],
                             'stateless': True,
                             'upload_group': upload_group_id+'_'+upload_file_types+'_'+str(upid),
@@ -310,8 +286,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                             'output_dir': str(self.src_path),
                             'args': arg,
                         })
-                    # 只标"真正进了这次上传"的分段；merged/时长不足/None 保持原状
-                    up_ids = set(id(v) for v in up_videos)
+                    # 只标"真正进了这次上传"的分段（merge_src/cleaned/None 等未收集的槽不动）
+                    up_ids = set(id(v) for v in videos)
                     for video_state in self.state_dict[group_id]:
                         slot = video_state[vtype]
                         if slot['file'] is not None and id(slot['file']) in up_ids:
@@ -322,7 +298,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         return ret_msgs
 
     def onRenderEnd(self, message:PipeMessage):
-        self.logger.info(f'{self.name}: {message.msg}.')
+        mode = message.data.get('config', {}).get('mode')
+        log_render_end = self.logger.debug if mode == 'emoji_dmrender' else self.logger.info
+        log_render_end(f'{self.name}: {message.msg}.')
 
         request_id = message.request_id
         self._dispatched.pop(request_id, None)
@@ -422,19 +400,22 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         return ret_msgs
 
     def onMergeEnd(self, message: PipeMessage):
-        """Merger 回报合并完成：把被合并段按 remove_source 标状态、把合并结果作为新段 ready 追加，
-        再回填会话数据并交给 reconcile 推进上传/清理。
+        """Merger 回报合并完成：把被合并段按 remove_source 标状态、把合并产物按序作为新段追加，
+        再交给 reconcile 推进上传/清理。
+        产物是**有序列表**：分辨率一致时只有一个；不一致时 merger 按连续同分辨率分组，
+        每组一个产物（单段直通复制也算一个），列表按时间顺序排列——源段全被消费跳过，
+        上传收集到的天然就是这个顺序。
         被合并的源段：merger 自己删了源(remove_source 默认 True)→ 标 cleaned(已无文件、终态)；
-        没删(remove_source False)→ 标 merged(留着，等 onMergeEnd 的 trigger 清，且 merged 不会被重合并)。
-        合并产物(ready)与源段一样受 dm_video 的 trigger 清理，不做产物/源区分（见 _check_for_clean）。"""
+        没删(remove_source False)→ 标 merge_src(留着，等 trigger 清，且不会被重合并)。
+        合并产物(merged)与源段一样受 dm_video 的 trigger 清理，不做产物/源区分（见 _check_for_clean）。"""
         request_id = message.request_id
         self._dispatched.pop(request_id, None)
         data = message.data or {}
-        merged_video = data.get('output')
+        merged_videos = data.get('outputs') or []
         vt = data.get('merge_type')
-        if merged_video is None:
+        if not merged_videos:
             return []
-        group_id = merged_video.group_id
+        group_id = merged_videos[0].group_id
         if group_id not in self.state_dict:
             return []
 
@@ -450,17 +431,18 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 slot.pop('_pre_merge_status', None)
                 n_merged += 1
 
-        # 2. 合并结果作为新段追加（ready）
-        new_state = {
-            'src_video':     {'status': None, 'file': None, 'wait': []},
-            'src_video_pre': {'status': None, 'file': None, 'wait': []},
-            'dm_video':      {'status': None, 'file': None, 'wait': []},
-        }
-        merged_video.segment_id = len(self.state_dict[group_id]) + 1
-        new_state.setdefault(vt, {'status': None, 'file': None, 'wait': []})
-        # 合并产物状态用 'merged'（区别于渲染产物 'ready'、被合并源段 'merge_src'）
-        new_state[vt] = {'status': 'merged', 'file': merged_video, 'wait': []}
-        self.state_dict[group_id].append(new_state)
+        # 2. 合并产物按序逐个追加为新段（列表顺序 = 时间顺序 = 上传分P顺序）
+        for merged_video in merged_videos:
+            new_state = {
+                'src_video':     {'status': None, 'file': None, 'wait': []},
+                'src_video_pre': {'status': None, 'file': None, 'wait': []},
+                'dm_video':      {'status': None, 'file': None, 'wait': []},
+            }
+            merged_video.segment_id = len(self.state_dict[group_id]) + 1
+            new_state.setdefault(vt, {'status': None, 'file': None, 'wait': []})
+            # 合并产物状态用 'merged'（区别于渲染产物 'ready'、被合并源段 'merge_src'）
+            new_state[vt] = {'status': 'merged', 'file': merged_video, 'wait': []}
+            self.state_dict[group_id].append(new_state)
 
         # 3. 交给 reconcile：先看上传，再以 onMergeEnd trigger 清理（源段 + 合并产物一并）
         return self.reconcile(group_id, clean_trigger='onMergeEnd')
@@ -712,6 +694,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         "member_revenue": raw_stat.get("member_revenue", ""),
                         "member_info"   : raw_stat.get("member_info", ""),
                         "total_revenue" : raw_stat.get("total_revenue", ""),
+                        "revenue_summary": raw_stat.get("revenue_summary", ""),
                         "top_ranking"   : names_str,
                     })
             except Exception as e:
@@ -854,12 +837,11 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                    for gid in list(self.state_dict.keys()))
 
     def _free_group(self, group_id):
-        """回收某组的内存记账（state/ended/session_data/挂起项）+ 落盘记录。"""
+        """回收某组的内存记账（state/ended/session_data/挂起项）。"""
         self.ended_dict.pop(group_id, None)
         self.state_dict.pop(group_id, None)
         self.session_data.pop(group_id, None)
         self.held_tasks = {h: v for h, v in self.held_tasks.items() if v['group_id'] != group_id}
-        self._delete_record(group_id)
 
     def _free_state_memory(self):
         # 正常回收：某场的全部异步工作（渲染/转码/上传/清理/合并）都到终态后释放它。
@@ -883,8 +865,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.ended_dict.clear()
         self.session_data.clear()
         self.held_tasks.clear()
-        # liveevents 随程序退出而死，其内存镜像(.session_*.json)也一并删掉。
-        delete_all_records(str(self.config['download_args']['output_dir']))
         return PipeMessage(
             source=self.name,
             target='downloader',

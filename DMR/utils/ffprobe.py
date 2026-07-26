@@ -1,9 +1,79 @@
+import os
 import subprocess
 import json
+import logging
 import warnings
 import re
+from pathlib import Path
+from typing import Union
 
 from .toolsmgr import ToolsList
+
+logger = logging.getLogger(__name__)
+
+
+def probe_media(
+    path: Union[str, Path],
+    ffprobe: str = r"ffprobe"
+    ):
+    """
+    用 ffprobe 获取基本信息：duration（秒，float），分辨率（width,height），
+    以及格式/比特率等。字段缺失时做容错。
+    """
+    # 取视频流宽高 + 容器时长
+    cmd = [
+        ffprobe,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-show_entries", "format=duration,bit_rate,format_name",
+        "-of", "json",
+        str(path)
+    ]
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        data = json.loads(out.decode("utf-8", errors="ignore"))
+    except subprocess.CalledProcessError as e:
+        logger.warning("ffprobe 失败：%s", e.output.decode("utf-8", errors="ignore"))
+        data = {}
+    except Exception as e:
+        logger.warning("解析 ffprobe 输出失败：%s", e)
+        data = {}
+
+    width = height = None
+    duration = None
+    bit_rate = None
+    fmt = None
+
+    try:
+        s0 = (data.get("streams") or [{}])[0]
+        width = s0.get("width")
+        height = s0.get("height")
+    except Exception:
+        pass
+
+    try:
+        fmt_dict = data.get("format") or {}
+        # ffprobe 的 duration 是字符串
+        duration_raw = fmt_dict.get("duration")
+        duration = float(duration_raw) if isinstance(duration_raw, str) else None
+        bit_rate_raw = fmt_dict.get("bit_rate")
+        bit_rate = int(bit_rate_raw) if isinstance(bit_rate_raw, str) else None
+        fmt = fmt_dict.get("format_name")
+    except Exception:
+        pass
+
+    return {
+        "duration": duration,                 # 秒（float）或 None
+        "resolution": (width, height) if width and height else None,
+        "width": width,
+        "height": height,
+        "bit_rate": bit_rate,                 # 整数（bps）或 None
+        "format": fmt,                        # 例如 "mov,mp4,m4a,3gp,3g2,mj2"
+        "path": str(path),
+        "size": os.path.getsize(path) if os.path.exists(path) else None,
+    }
+
 
 class FFprobe():
     header = {

@@ -11,9 +11,10 @@ from os.path import exists, isdir, isfile, abspath, dirname
 from typing import Tuple
 from DMR.utils import *
 
-# pending_cleanup.json 存放目录（项目根目录）
-_PENDING_CLEANUP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
+# pending_cleanup.json 存放目录：项目根下的 data/（运行时状态，与代码分开放）
+_PENDING_CLEANUP_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'data')
 
 
 def _fmt_delay(seconds: float) -> str:
@@ -51,6 +52,7 @@ class Cleaner():
         # pending_cleanup 文件名含端口号，多实例互不干扰
         port = kwargs.get('port', '')
         suffix = f'_{port}' if port else ''
+        os.makedirs(_PENDING_CLEANUP_DIR, exist_ok=True)
         self._pending_file = os.path.join(_PENDING_CLEANUP_DIR, f'pending_cleanup{suffix}.json')
 
         self._piperecvprocess = None
