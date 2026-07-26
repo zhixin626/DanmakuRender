@@ -64,8 +64,22 @@ def generate_gift_statistics(jsonl_paths, stat_path, start_time=None, rank_top=3
     member_revenue = sum((g.get("total_price_cny") or 0) for g in member_entries)
     total_revenue  = gifts_revenue + sc_revenue + member_revenue
     num_of_sc      = len(sc_entries)
+    num_of_gifters = len({g["uname"] for g in gift_entries})
     _member_counts = Counter(g.get("gift_name", "未知") for g in member_entries)
     member_info    = ",".join(f"{count}个{name}" for name, count in _member_counts.items()) if _member_counts else "无"
+
+    # 营收汇总一句话：礼物+SC+舰长=总计，没有的类型（对应 entries 为空）就不写那一段；
+    # 只有一段时不再补"=总计"（此时总计和那一段本就相等）
+    _revenue_parts = []
+    if gift_entries:
+        _revenue_parts.append(f"{round(gifts_revenue, 2)}元({num_of_gifters}人)")
+    if sc_entries:
+        _revenue_parts.append(f"{round(sc_revenue, 2)}元({num_of_sc}条SC)")
+    if member_entries:
+        _revenue_parts.append(f"{round(member_revenue, 2)}元({member_info})")
+    revenue_summary = "+".join(_revenue_parts)
+    if len(_revenue_parts) > 1:
+        revenue_summary += f"={round(total_revenue, 2)}元"
 
     # 所有人的总消费（礼物 + SC 合并计算排行）
     user_totals = Counter()
@@ -82,12 +96,13 @@ def generate_gift_statistics(jsonl_paths, stat_path, start_time=None, rank_top=3
     stat_entry = {
         "timestamp"      : report_time.strftime("%Y-%m-%d %H:%M:%S"),
         "gifts_revenue"  : round(gifts_revenue, 2),
-        "num_of_gifters" : len({g["uname"] for g in gift_entries}),
+        "num_of_gifters" : num_of_gifters,
         "sc_revenue"     : round(sc_revenue, 2),
         "num_of_sc"      : num_of_sc,
         "member_revenue" : round(member_revenue, 2),
         "member_info"    : member_info,
         "total_revenue"  : round(total_revenue, 2),
+        "revenue_summary": revenue_summary,
         "top_ranking"    : top_ranking,
     }
 

@@ -8,15 +8,21 @@
 示例:
     python run_danmu.py https://live.bilibili.com/22230707
     python run_danmu.py https://www.douyu.com/3125893 --only member
-    python run_danmu.py <url> --all                # 连进场/未识别消息也显示
+    python run_danmu.py <url> --all                # 额外显示进场(entry)
+    python run_danmu.py <url> --only other         # 只看未识别的
+    python run_danmu.py <url> --debug feng.jsonl   # 全部消息落盘,供排查
 
 选项:
     --cookie 路径    指定 cookie(默认按平台自动找 .login_info/ 下最新的)
     --only 类型,..   只显示这些类型: danmaku gift sc member entry other
     --all            额外显示进场(entry)
-    --debug          额外显示未识别的 BaseDanmaku(other),并打印非弹幕对象原文
-    --dump-raw [文件] 把 gift/member 的原始消息(SEND_GIFT/USER_TOAST_MSG)追加存到
-                     文件(默认 raw_gift_member.jsonl),不受 --only/--all 影响,用于排查重复
+    --debug [文件]   把【所有】抓到的消息追加存到 jsonl(默认 raw_danmaku.jsonl),
+                     不受 --only/--all 影响。包括已识别的各类弹幕，以及未被
+                     decoder 解析成弹幕对象的原始内容(dtype 记为 __unparsed__)。
+                     每行格式: {time, dtype, parsed, raw}
+                       parsed = 解析出的字段(不含 raw)
+                       raw    = 平台推送的原始消息
+                     用于排查「收到了什么」与「解析成了什么」的差异
 
 默认显示: danmaku gift sc member
 """
@@ -56,7 +62,7 @@ CATEGORIES = {
     'entry':   {'entry'},
     'other':   set(),
 }
-DEFAULT_CATS = {'danmaku', 'gift', 'sc', 'member'}   # 默认显示；--all 加 entry、--debug 加 other
+DEFAULT_CATS = {'danmaku', 'gift', 'sc', 'member'}   # 默认显示；--all 加 entry；未识别的看 --only other
 
 
 def detect_platform(url):
@@ -108,7 +114,33 @@ def format_line(dm):
     return f"{ts} {c('[' + str(dt) + ']', 'gray')} {c(name, 'cyan')}{uid} {text or content}"
 
 
-async def listen(url, kwargs, show_cats, debug, dump_raw=None):
+def dump_line(path, dm, non_dm):
+    """把一条消息追加写进 jsonl。dm=解析出的弹幕对象，non_dm=没解析成对象的原始内容。
+    两者只会有一个非空。记录解析结果 + 原始消息，便于对照「收到了什么」和「解析成了什么」。"""
+    if not path:
+        return
+    if dm is not None:
+        rec = {
+            'time':   datetime.fromtimestamp(dm.timestamp).strftime('%Y-%m-%d %H:%M:%S'),
+            'dtype':  dm.dtype,
+            'parsed': {k: v for k, v in vars(dm).items() if k != 'raw'},
+            'raw':    getattr(dm, 'raw', None),
+        }
+    else:
+        rec = {
+            'time':   datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'dtype':  '__unparsed__',   # 没被 decoder 转成弹幕对象的东西
+            'parsed': None,
+            'raw':    non_dm if isinstance(non_dm, (dict, list, str, int, float)) else repr(non_dm),
+        }
+    try:
+        with open(path, 'a', encoding='utf-8') as fp:
+            fp.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
+    except Exception as e:
+        print(c(f"[!] 写入 {path} 失败: {e}", 'red'))
+
+
+async def listen(url, kwargs, show_cats, dump_raw=None):
     q = asyncio.Queue()
     client = DanmakuClient(url, q, **kwargs)
     task = asyncio.create_task(client.start())
@@ -116,14 +148,10 @@ async def listen(url, kwargs, show_cats, debug, dump_raw=None):
     try:
         while True:
             raw = await q.get()
-            if not isinstance(raw, BaseDanmaku):   # decoder 现统一产出弹幕对象;非对象仅调试时看
-                if debug:
-                    print(c(f"[RAW] {raw}", 'gray'))
+            if not isinstance(raw, BaseDanmaku):   # decoder 现统一产出弹幕对象;没解析成对象的只记文件
+                dump_line(dump_raw, None, raw)
                 continue
-            # gift/member 的原始消息落盘(不受显示过滤影响),用于排查重复(看 tid/payflow_id)
-            if dump_raw and raw.dtype in ('gift', 'member'):
-                with open(dump_raw, 'a', encoding='utf-8') as fp:
-                    fp.write(json.dumps(getattr(raw, 'raw', None), ensure_ascii=False) + '\n')
+            dump_line(dump_raw, raw, None)         # 所有类型都落盘,不受 --only/--all 影响
             if dm_category(raw.dtype) in show_cats:
                 print(format_line(raw))
     except asyncio.CancelledError:
@@ -144,9 +172,10 @@ def main():
     ap.add_argument("--cookie", help="cookie 文件(默认按平台自动找)")
     ap.add_argument("--only", help="只显示的类型,逗号分隔: " + " ".join(CATEGORIES))
     ap.add_argument("--all", action="store_true", help="额外显示进场(entry)")
-    ap.add_argument("--debug", action="store_true", help="额外显示未识别的 BaseDanmaku(other),并打印非弹幕对象原文")
-    ap.add_argument("--dump-raw", nargs="?", const="raw_gift_member.jsonl", default=None,
-                    help="把 gift/member 的原始消息追加存到文件(默认 raw_gift_member.jsonl),用于排查重复")
+    ap.add_argument("--debug", nargs="?", const="raw_danmaku.jsonl", default=None,
+                    metavar="文件",
+                    help="把【所有】抓到的消息(含未识别)追加存到 jsonl(默认 raw_danmaku.jsonl),"
+                         "不受 --only/--all 影响；每行含 time/dtype/parsed/raw")
     args = ap.parse_args()
 
     if not args.url:
@@ -165,8 +194,6 @@ def main():
         show_cats = set(DEFAULT_CATS)
         if args.all:
             show_cats.add('entry')    # --all 加进场
-        if args.debug:
-            show_cats.add('other')    # --debug 加未识别的 BaseDanmaku
 
     if sys.platform == 'win32':
         try:
@@ -189,13 +216,13 @@ def main():
         kwargs["douyin_dm_cookies"] = cookie
 
     print(c(f"[*] 平台={platform} cookie={cookie or '游客'} 显示={','.join(sorted(show_cats))}", 'gray'))
-    if args.dump_raw:
-        print(c(f"[*] gift/member 原始消息将追加写入: {args.dump_raw}", 'gray'))
+    if args.debug:
+        print(c(f"[*] 全部消息(含未识别)将追加写入: {args.debug}", 'gray'))
 
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
-        asyncio.run(listen(args.url, kwargs, show_cats, args.debug, args.dump_raw))
+        asyncio.run(listen(args.url, kwargs, show_cats, args.debug))
     except KeyboardInterrupt:
         pass
 
