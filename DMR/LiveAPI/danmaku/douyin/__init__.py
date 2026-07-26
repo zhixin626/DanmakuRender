@@ -18,6 +18,8 @@ import logging
 import random
 import websocket
 from google.protobuf import json_format
+
+from DMR.Login.cookiemgr import load_cookie_dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from DMR.LiveAPI.douyin import douyin_utils
@@ -171,8 +173,7 @@ class Douyin:
         else:
             try:
                 if douyin_dm_cookies.endswith('.json'):
-                    with open(douyin_dm_cookies, 'r', encoding='utf-8') as f:
-                        cookies = json.load(f)
+                    cookies = load_cookie_dict(douyin_dm_cookies)
                 else:
                     cookies = cookiestr2dict(douyin_dm_cookies)
                 self.headers = douyin_utils.get_headers(extra_cookies=cookies)
@@ -187,7 +188,11 @@ class Douyin:
             async with session.get(
                     douyin_utils.build_request_url(f"https://live.douyin.com/webcast/room/web/enter/?web_rid={room_id}"),
                     headers=self.headers, timeout=5) as resp:
-                room_info = json.loads(await resp.text())['data']['data'][0]
+                result = json.loads(await resp.text())
+                rooms = (result.get('data') or {}).get('data') or []
+                if not rooms:
+                    raise RuntimeError(f"抖音接口异常: status={resp.status}, code={result.get('status_code')}, msg={result.get('status_msg') or result.get('message')}, keys={list(result)}")
+                room_info = rooms[0]
                 USER_UNIQUE_ID = DouyinDanmakuUtils.get_user_unique_id()
                 VERSION_CODE = 180800 # https://lf-cdn-tos.bytescm.com/obj/static/webcast/douyin_live/7697.782665f8.js -> a.ry
                 WEBCAST_SDK_VERSION = "1.0.14-beta.0" # https://lf-cdn-tos.bytescm.com/obj/static/webcast/douyin_live/7697.782665f8.js -> ee.VERSION

@@ -39,8 +39,7 @@ nav {
 
 .nav-links a { margin-left: 20px; font-weight: bold; }
 
-/* 导航里的按钮(重启/退出)长得和链接一样：去掉按钮默认外观，套上链接的橙色/加粗/间距。
-   仍是 <button>，所以 JS 里的 disabled(防重复点)照常有效。 */
+/* 导航里的按钮使用与链接一致的外观。 */
 .nav-links button {
     background: none; border: none; padding: 0; cursor: pointer;
     font-size: inherit; font-weight: bold; margin-left: 20px;
@@ -57,7 +56,13 @@ nav {
 
 h1, h2, h3 { margin-top: 0; }
 
-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+/*
+ * 数据表统一保持单行；内容超过卡片宽度时，由外层容器横向滚动，
+ * 避免不同页面各自决定是否折行而造成行高和列宽不一致。
+ */
+.table-scroll { width: 100%; overflow-x: auto; }
+.table-scroll > table { min-width: 100%; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; white-space: nowrap; }
 th, td { text-align: left; padding: 12px; border-bottom: 1px solid var(--border-color); }
 th { color: var(--secondary-color); }
 

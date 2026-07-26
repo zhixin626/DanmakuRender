@@ -8,6 +8,7 @@ from pathlib import Path
 
 from DMR.utils import replace_keywords
 from DMR.utils.cover import generate_cover
+from DMR.Login.cookiemgr import load_cookie_dict, PLATFORM_PREFIXES
 
 try:
     from tqdm import tqdm
@@ -62,8 +63,7 @@ class _AcFunClient:
         if not os.path.exists(cookie_file):
             return False
         try:
-            with open(cookie_file, 'r', encoding='utf-8') as f:
-                cookies = json.load(f)
+            cookies = load_cookie_dict(cookie_file)
             self.session.cookies.update(cookies)
             return True
         except Exception as e:
@@ -330,8 +330,12 @@ class acfun:
         cookie_file = f'.login_info/{account}.json'
 
         if not self._client._load_cookies(cookie_file) or not self._client._validate_session():
+            # account 配置里通常带 "A站_" 前缀（对应 .login_info 文件名），
+            # 但 acfun_login.py 的命令行参数只认不带前缀的裸账号名，这里还原一下
+            acfun_prefix = PLATFORM_PREFIXES['acfun']
+            bare_account = account[len(acfun_prefix):] if account.startswith(acfun_prefix) else account
             raise RuntimeError(
-                f'Cookie 无效或已过期，请重新运行 acfun_login.py --account {account}\n'
+                f'Cookie 无效或已过期，请重新运行 python DMR/Login/acfun_login.py {bare_account}\n'
                 f'  cookie 文件: {cookie_file}'
             )
         self._client._cookie_file = cookie_file

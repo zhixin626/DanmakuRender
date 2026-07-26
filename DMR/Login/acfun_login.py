@@ -8,21 +8,24 @@ acfun_login.py
     pip install playwright
     playwright install chromium
 
-用法示例：
-    python acfun_login.py                              # 默认输出到 .login_info/acfun_cookies.json
-    python acfun_login.py --account 佐佐酱小号         # 指定账号名
-    python acfun_login.py --output .login_info/acfun_cookies.json
-    python acfun_login.py --browser firefox
+用法示例（在项目根目录下运行）：
+    python DMR/Login/acfun_login.py 主账号          # 保存到 .login_info/A站_主账号.json
+    python DMR/Login/acfun_login.py 佐佐酱小号       # 指定账号名
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Optional, Sequence
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from DMR.Login.cookiemgr import save_cookie_file
 
 LOGIN_URL = 'https://www.acfun.cn/login'
 
@@ -38,14 +41,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description='打开浏览器，手动登录 AcFun 后提取并保存 Cookie',
     )
-    parser.add_argument('--account', default='acfun',
-                        help='账号名，决定 cookie 文件名（默认 acfun）')
-    parser.add_argument('--output', type=Path, default=None,
-                        help='cookie 输出路径，默认 .login_info/{account}_cookies.json')
-    parser.add_argument('--browser', choices=['chromium', 'firefox', 'webkit'],
-                        default='chromium', help='浏览器引擎（默认 chromium）')
-    parser.add_argument('--headless', action='store_true',
-                        help='无头模式（不推荐，无法手动登录）')
+    parser.add_argument('account',
+                        help='账号名，决定 cookie 文件名 (.login_info/A站_<账号名>.json)')
     return parser.parse_args(argv)
 
 
@@ -65,11 +62,8 @@ async def capture_cookies(args: argparse.Namespace) -> int:
         )
         return 1
 
-    output: Path = args.output or Path(f'.login_info/{args.account}.json')
-
     async with async_playwright() as p:
-        browser_factory = getattr(p, args.browser)
-        browser = await browser_factory.launch(headless=args.headless)
+        browser = await p.chromium.launch(headless=False)
         context = await browser.new_context()
         page = await context.new_page()
 
@@ -87,11 +81,11 @@ async def capture_cookies(args: argparse.Namespace) -> int:
 
         # 提取 acfun.cn 下所有 cookie
         storage = await context.storage_state()
-        cookies: Dict[str, str] = {
-            c['name']: c['value']
-            for c in storage['cookies']
+        all_cookies = [
+            c for c in storage['cookies']
             if 'acfun.cn' in c.get('domain', '')
-        }
+        ]
+        cookies = {c['name']: c['value'] for c in all_cookies}
 
         await context.close()
         await browser.close()
@@ -111,11 +105,7 @@ async def capture_cookies(args: argparse.Namespace) -> int:
     if not picked:
         picked = cookies
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        json.dumps(picked, ensure_ascii=False, indent=2),
-        encoding='utf-8',
-    )
+    output = save_cookie_file('acfun', args.account, picked, all_cookies, expiry_keys=REQUIRED_KEYS)
 
     print(f'[OK]  已保存 {len(picked)} 个 cookie 到：{output.resolve()}')
     print(f'      保存字段：{", ".join(sorted(picked.keys()))}')

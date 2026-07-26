@@ -7,6 +7,7 @@ import time
 import json
 import yaml
 import subprocess
+import math
 
 
 def _abspath(p):
@@ -69,7 +70,9 @@ from datetime import datetime
 
 from DMR.utils import *
 from DMR.utils.console_buffer import get_console_lines, subscribe as console_subscribe, unsubscribe as console_unsubscribe
-from DMR.utils.session_record import read_all_records
+from DMR.utils.session_record import encode_dt, humanize_dt
+from DMR.Login import CookieManager
+from DMR.EmojiPack import bilibili as emoji_bilibili, douyin as emoji_douyin, common as emoji_common
 
 class WebApi:
     def __init__(
@@ -98,6 +101,8 @@ class WebApi:
         # 强制使用高强度随机密钥，每次启动自动生成，极大提高安全性
         # 注意：这意味着每次重启程序后，所有已登录用户都需要重新登录
         self.secret_key = secrets.token_hex(32)
+        # 本次进程启动的唯一ID：前端轮询 /api/instance，发现ID变了(=程序已重启完成)就自动刷新页面
+        self.instance_id = secrets.token_hex(8)
         self.logger = logging.getLogger(__name__)
         self.stoped = True
 
@@ -142,6 +147,12 @@ class WebApi:
             session.pop('logged_in', None)
             return redirect(url_for('login'))
 
+        @app.route('/api/instance')
+        def api_instance():
+            # 不需登录：只返回本次进程启动的随机ID，供前端检测「程序是否已重启完成」以自动刷新页面。
+            # 无任何敏感信息，且刻意不加登录校验——这样即便重启后登录密钥变了、session 失效，也能检测到。
+            return {'id': self.instance_id}
+
         @app.route('/')
         @self.login_required
         def record():   # 录制页(首页)：正在录制的任务
@@ -179,6 +190,18 @@ class WebApi:
                 result = result.strip().strip('"\'').strip()
             if not taskname or not hold_id:
                 return 'missing task/hold_id', 400
+            # 提交前校验，当场打回错误：render/merge 回传的必须是真实存在的视频文件，
+            # 否则错误路径会流进管线，在下游的上传/合并处炸出难排查的失败
+            info = (getattr(self.engine, 'task_dict', {}) or {}).get(taskname) if self.engine else None
+            ev = getattr(info.get('class'), 'event_class', None) if info else None
+            hold = (getattr(ev, 'held_tasks', {}) or {}).get(hold_id)
+            if hold is None:
+                return '挂起任务不存在或已被处理，请刷新页面', 400
+            if hold.get('stage') in ('render', 'merge') and result not in ('done', '__ignore__'):
+                if not result or not os.path.isfile(result):
+                    return f'文件不存在: {result}', 400
+                if not isvideo(result.lower()):
+                    return f'不是视频文件: {result}', 400
             self.send_queue.put(PipeMessage(
                 source='webservice', target=f'replay/{taskname}', event='resume',
                 data={'hold_id': hold_id, 'result': result},
@@ -294,6 +317,57 @@ class WebApi:
             enabled = bool((request.get_json(silent=True) or {}).get('enabled', True))
             return dmr.toggle_task(os.path.basename(filename), enabled)
 
+        def _resolve_config_path(dmr, filename):
+            """按文件名找到配置文件的实际磁盘路径：任务配置 or 全局配置，找不到返回 None。"""
+            fname = os.path.basename(filename)
+            path = dmr.config.find_task_file(fname)
+            if path is None and fname == os.path.basename(dmr.config.global_config_path):
+                path = dmr.config.global_config_path
+            return path
+
+        @app.route('/api/config/content/<filename>')
+        @self.login_required
+        def config_content_api(filename):
+            """读取配置文件原始 YAML 文本，供网页「编辑」弹窗展示。"""
+            dmr = getattr(self.engine, 'dmr', None)
+            if dmr is None:
+                return {'ok': False, 'message': '引擎未就绪'}, 503
+            path = _resolve_config_path(dmr, filename)
+            if not path or not os.path.exists(path):
+                return {'ok': False, 'message': '找不到该配置文件'}, 404
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception as e:
+                return {'ok': False, 'message': f'读取失败: {e}'}, 500
+            return {'ok': True, 'content': content}
+
+        @app.route('/api/config/save/<filename>', methods=['POST'])
+        @self.login_required
+        def config_save_api(filename):
+            """保存编辑后的 YAML 文本到磁盘。不在这里热应用——写回磁盘后交给现有的
+            变更检测/查看改动/应用/撤销机制处理，跟外部直接改文件效果一样。"""
+            dmr = getattr(self.engine, 'dmr', None)
+            if dmr is None:
+                return {'ok': False, 'message': '引擎未就绪'}, 503
+            fname = os.path.basename(filename)
+            if fname.startswith('example-'):
+                return {'ok': False, 'message': '示例文件不支持保存修改'}, 400
+            content = (request.get_json(silent=True) or {}).get('content', '')
+            try:
+                yaml.safe_load(content)
+            except yaml.YAMLError as e:
+                return {'ok': False, 'message': f'YAML 格式错误: {e}'}, 400
+            path = _resolve_config_path(dmr, filename)
+            if not path:
+                return {'ok': False, 'message': '找不到该配置文件'}, 404
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+            except Exception as e:
+                return {'ok': False, 'message': f'保存失败: {e}'}, 500
+            return {'ok': True, 'message': '已保存'}
+
         # ---- 配置变更：提醒(红点) + 查看改动 + 手动应用 + 撤销 + 推迟（不自动热重载）----
         @app.route('/api/config/pending')
         @self.login_required
@@ -351,6 +425,74 @@ class WebApi:
             cnt = sum(1 for s in dmr.config.get_pending_changes() if dmr.config.defer(s['filename']))
             return {'ok': True, 'message': f'已推迟 {cnt} 个文件到重启'}
 
+        # ---- Cookie 续期 + 表情包检查：已并入配置页(config_list.html 的 Cookie/Emoji 卡片)，
+        #      这里只保留 /cookies 旧地址重定向到配置页，避免老书签 404 ----
+        @app.route('/cookies')
+        @self.login_required
+        def cookies_list():
+            return redirect(url_for('config_list'))
+
+        @app.route('/api/cookies/list')
+        @self.login_required
+        def cookies_list_api():
+            return {'cookies': CookieManager().list_cookies()}
+
+        @app.route('/api/cookies/renew/<filename>', methods=['POST'])
+        @self.login_required
+        def cookies_renew_api(filename):
+            ok, message = CookieManager().renew(os.path.basename(filename))
+            return {'ok': ok, 'message': message}
+
+        # ---- 表情包检查：查缺失 -> 前端展示 -> 用户确认后再下载 ----
+        # 目前只有B站/抖音有对应的检查脚本，斗鱼列出来但没有 check/download 支持
+        EMOJI_PLATFORMS = [
+            {'platform': 'bilibili', 'label': 'B站', 'dir': emoji_bilibili.PACK_DIR, 'supported': True},
+            {'platform': 'douyin',   'label': '抖音', 'dir': emoji_douyin.PACK_DIR,  'supported': True},
+            {'platform': 'douyu',    'label': '斗鱼', 'dir': os.path.join('emoji_pack', 'douyu'), 'supported': False},
+        ]
+
+        @app.route('/api/emoji/list')
+        @self.login_required
+        def emoji_list_api():
+            return {'emojis': [{
+                'platform': p['platform'], 'label': p['label'],
+                'dir': _abspath(p['dir']), 'count': emoji_common.count_pack(p['dir']),
+                'supported': p['supported'],
+            } for p in EMOJI_PLATFORMS]}
+
+        @app.route('/api/emoji/check', methods=['POST'])
+        @self.login_required
+        def emoji_check_api():
+            body = request.get_json(silent=True) or {}
+            platform = body.get('platform')
+            try:
+                if platform == 'bilibili':
+                    result = emoji_bilibili.check()
+                elif platform == 'douyin':
+                    result = emoji_douyin.check()
+                else:
+                    return {'ok': False, 'message': f'未知平台: {platform}'}, 400
+                return {'ok': True, **result}
+            except Exception as e:
+                return {'ok': False, 'message': str(e)}
+
+        @app.route('/api/emoji/download', methods=['POST'])
+        @self.login_required
+        def emoji_download_api():
+            body = request.get_json(silent=True) or {}
+            platform = body.get('platform')
+            items = body.get('items') or []
+            try:
+                if platform == 'bilibili':
+                    result = emoji_bilibili.download(items)
+                elif platform == 'douyin':
+                    result = emoji_douyin.download(items)
+                else:
+                    return {'ok': False, 'message': f'未知平台: {platform}'}, 400
+                return {'ok': True, **result}
+            except Exception as e:
+                return {'ok': False, 'message': str(e)}
+
         @app.route('/api/upload_tasks/<uuid>/stop', methods=['POST'])
         @self.login_required
         def upload_task_stop(uuid):
@@ -406,32 +548,48 @@ class WebApi:
                 return {'status': 'success', 'message': f'{taskname} 已收到手动开播指令'}
             return {'status': 'error', 'message': 'Downloader not available'}, 500
 
+        @app.route('/api/tasks/<taskname>/check_live', methods=['POST'])
+        @self.login_required
+        def api_task_check_live(taskname):
+            dl = _get_downloader()
+            if dl:
+                ok, message = dl.cmd_check_live(taskname)
+                return {'status': 'success' if ok else 'error', 'message': message}
+            return {'status': 'error', 'message': 'Downloader not available'}, 500
+
         @app.route('/api/tasks/<taskname>/pipeline')
         @self.login_required
         def api_task_pipeline(taskname):
-            """该任务所有未删除的会话记录（output_dir 下 .session_*.json，liveevents 内存的忠实镜像）。
-            读磁盘 json 而非内存：录制结束、甚至重启后，只要文件还在就能查看。"""
+            """该任务在内存里的全部会话状态（liveevents 的 state_dict/session_data 现场序列化）。
+            组处理完释放内存后即消失；重启后为空——与四个队列的行为一致。"""
             info = (getattr(self.engine, 'task_dict', {}) or {}).get(taskname) if self.engine else None
             ev = getattr(info.get('class'), 'event_class', None) if info else None
             groups = []
             if ev is not None:
-                out_dir = str(getattr(ev, 'src_path', '') or '')
-                for rec in read_all_records(out_dir):
-                    sd = rec.get('session_data') or {}
+                now_str = datetime.now().isoformat(timespec='seconds')
+                session_data = getattr(ev, 'session_data', None) or {}
+                state_dict = getattr(ev, 'state_dict', None) or {}
+                # 取两者并集：session_data 在【开播时】就建好，state_dict 要等【第一个分段录完】才建。
+                # 只遍历 state_dict 的话，开播后到切出首段之前这里会是空的（分段多长就空多久）。
+                group_ids = list(dict.fromkeys(list(session_data.keys()) + list(state_dict.keys())))
+                for group_id in group_ids:
+                    state_list = state_dict.get(group_id) or []
+                    sd = humanize_dt(encode_dt(session_data.get(group_id) or {}))
                     rows = []
-                    for i, seg in enumerate(rec.get('state') or []):
+                    for i, seg in enumerate(list(state_list)):
                         row = {'seg': i + 1}
                         for vt, slot in (seg or {}).items():
-                            f = slot.get('file') or {}
+                            f = slot.get('file')
+                            p = getattr(f, 'path', None) if f is not None else None
                             row[vt] = {
                                 'status': slot.get('status'),
-                                'file': os.path.basename(f['path']) if f.get('path') else None,
+                                'file': os.path.basename(p) if p else None,
                             }
                         rows.append(row)
                     groups.append({
-                        'group_id':    rec.get('group_id'),
+                        'group_id':    str(group_id),
                         'is_live_end': sd.get('is_live_end'),
-                        'updated_at':  rec.get('updated_at'),
+                        'updated_at':  now_str,
                         'session':     sd,
                         'segments':    rows,
                     })
@@ -507,6 +665,14 @@ class WebApi:
     def get_tasks_data(self):
         # Get Recording Tasks
         recording_tasks = []
+        def _remaining_seconds(deadline):
+            if deadline is None:
+                return None
+            try:
+                return max(0, int(math.ceil(float(deadline) - time.monotonic())))
+            except (TypeError, ValueError):
+                return None
+
         if self.engine and 'downloader' in self.engine.plugin_dict:
             downloader = self.engine.plugin_dict['downloader']['class']
             if downloader:
@@ -545,6 +711,10 @@ class WebApi:
                         'status': status,
                         'duration': duration,
                         'live_duration': live_duration,
+                        'next_check_remaining': _remaining_seconds(
+                            getattr(task, 'next_check_deadline', None)),
+                        'stop_wait_remaining': _remaining_seconds(
+                            getattr(task, 'stop_confirm_deadline', None)),
                         'force_offline_time': getattr(task, 'force_offline_time', '') or '',
                         'output_dir': _abspath(getattr(task, 'output_dir', '')),
                     })

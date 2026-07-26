@@ -6,14 +6,64 @@
         <title>DanmakuRender 5</title>
         <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
         <style>
+          /* ===== 顶栏：导航项(录制/队列/日志/配置)和电源按钮统一为同尺寸矩形，默认无背景、hover 才显示 =====
+             这里的 .nav-links a / .nav-links .power-btn 会盖掉 style.css 里 .nav-links a{margin-left:20px}
+             和 .nav-links button{...} 的旧间距规则，间距改由 .nav-links 的 gap 统一控制。 */
+          .nav-links { display: flex; align-items: center; gap: 12px; }
+          .nav-links a,
+          .nav-links .power-btn {
+            display: inline-flex; align-items: center; justify-content: center;
+            box-sizing: border-box; height: 34px; width: 68px; padding: 0 12px; margin: 0;
+            border: none; background: none; border-radius: 6px; position: relative;
+            font-family: inherit; font-size: 1rem; font-weight: bold; color: var(--accent-color);
+            text-decoration: none; cursor: pointer; transition: background 0.15s;
+          }
+          /* opacity:1 !important 抵消全局 button:hover{opacity:0.7}，让 <button> 和 <a> 的 hover 表现一致 */
+          .nav-links a:hover,
+          .nav-links .power-btn:hover { background: rgba(255,255,255,0.1); text-decoration: none; opacity: 1 !important; }
+
+          /* 状态提示浮在 header 自身的下内边距里(header 是 padding:1rem 0)，
+             绝对定位不占布局，所以文字出现/消失时页面不会跳，也不撑高顶栏。
+             right 与 nav 的左右内边距(20px)对齐。 */
+          header { position: relative; }
+          #restart-status {
+            position: absolute; right: 20px; bottom: 4px;
+            font-size: 0.6rem; line-height: 1; color: var(--accent-color);
+          }
+
+          /* 红点改成落在矩形按钮的右上角内侧(原来是贴着纯文字外侧的 -11px) */
           .nav-dot {
             display: none;
             width: 8px; height: 8px;
             background: #ff4d4f;
             border-radius: 50%;
             position: absolute;
-            top: -3px; right: -11px;
+            top: 4px; right: 6px;
           }
+
+          .power-menu {
+            position: relative; display: inline-flex; flex-direction: column; align-items: center;
+            margin-left: 0;
+          }
+          .power-dropdown {
+            display: none;
+            position: absolute; top: 100%; right: 0; margin-top: 6px;
+            background: var(--card-bg, #1e1e1e); border: 1px solid var(--border-color, #333);
+            border-radius: 8px; padding: 6px; z-index: 100;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+          }
+          /* 下拉项为文字预留统一宽度。 */
+          .power-dropdown .power-item {
+            display: flex; align-items: center; justify-content: center;
+            box-sizing: border-box; height: 34px; width: 68px;
+            padding: 0 10px; margin: 0; background: none; border: none; border-radius: 6px;
+            font-family: inherit; font-size: 0.95rem; font-weight: bold; white-space: nowrap;
+            color: var(--accent-color); text-decoration: none; cursor: pointer; transition: background 0.15s;
+          }
+          .power-dropdown .power-item:hover { background: rgba(255,255,255,0.1); text-decoration: none; opacity: 1 !important; }
+          .power-dropdown .power-item-danger { color: #ff6b6b; }
+          .power-dropdown .power-item:disabled { opacity: 0.5; cursor: default; }
+          .power-dropdown .power-item:disabled:hover { background: none; opacity: 0.5 !important; }
         </style>
     </head>
     <body>
@@ -25,11 +75,29 @@
                     <a href="{{ url_for('process') }}" style="position:relative;">队列<span class="nav-dot" id="dot-failed"></span></a>
                     <a href="{{ url_for('logs_page') }}" style="position:relative;">日志<span class="nav-dot" id="dot-logs"></span></a>
                     <a href="{{ url_for('config_list') }}" style="position:relative;">配置<span class="nav-dot" id="dot-config"></span></a>
-                    <a href="{{ url_for('logout') }}" style="position:relative;">注销</a>
-                    <button id="btn-restart" onclick="triggerRestart()">重启</button>
-                    <button id="btn-shutdown" onclick="triggerShutdown()" style="color:#ff6b6b;">退出</button>
+                    <div class="power-menu" id="power-menu">
+                        <button class="power-btn" id="btn-power" title="系统操作" aria-label="打开系统操作菜单" onclick="togglePowerMenu(event)">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                <circle cx="12" cy="5" r="1.8"/>
+                                <circle cx="12" cy="12" r="1.8"/>
+                                <circle cx="12" cy="19" r="1.8"/>
+                            </svg>
+                        </button>
+                        <div class="power-dropdown" id="power-dropdown">
+                            <button class="power-item" id="item-restart" onclick="triggerRestart()" title="等待所有任务空闲后重启">
+                                <span>重启</span>
+                            </button>
+                            <a href="{{ url_for('logout') }}" class="power-item" title="注销当前登录">
+                                <span>注销</span>
+                            </a>
+                            <button class="power-item power-item-danger" id="item-shutdown" onclick="triggerShutdown()" title="立即退出程序（会打断正在录制的任务）">
+                                <span>退出</span>
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </nav>
+            <span id="restart-status" role="status" aria-live="polite"></span>
         </header>
         <script>
         // ===== 统一轮询：切到后台标签暂停，切回前台立即刷新一次并恢复轮询 =====
@@ -49,46 +117,69 @@
             if (el) el.style.display = show ? 'inline-block' : 'none';
         }
 
-        // 把重启按钮置为永久「已设置重启」绿色态（幂等，可重复调用）。
-        // triggerRestart 成功时调一次；各页面轮询拿到 restart_pending=true 时也调，保证刷新后仍保持。
+        // ===== 进程实例检测：程序重启后自动刷新页面 =====
+        // 记住本次进程的启动ID，轮询发现ID变了(=程序已重启完成、新进程起来了)就 reload。
+        // 走 /api/instance(不需登录)，所以即使重启后登录密钥变了、旧 session 失效也能可靠检测；
+        // reload 后若确实需要重新登录，浏览器会自然跳到登录页——总之不用手动 F5 了。
+        var _instanceId = null;
+        function checkInstance() {
+            return fetch('/api/instance', { cache: 'no-store' })
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    if (!d || !d.id) return;
+                    if (_instanceId === null) { _instanceId = d.id; return; }  // 首次记录，不刷新
+                    if (d.id !== _instanceId) location.reload();               // 进程换了 → 自动刷新
+                })
+                .catch(function () {
+                    if (localStorage.getItem('restart_pending') === '1') {
+                        setRestartStatus('正在重启');
+                    }
+                });
+        }
+        startPolling(checkInstance, 2000);
+
+        // ===== 电源菜单：点图标开合，点外面关闭 =====
+        function togglePowerMenu(e) {
+            e.stopPropagation();
+            const dd = document.getElementById('power-dropdown');
+            dd.style.display = (dd.style.display === 'block') ? 'none' : 'block';
+        }
+        function closePowerMenu() {
+            document.getElementById('power-dropdown').style.display = 'none';
+        }
+        document.addEventListener('click', function (e) {
+            const menu = document.getElementById('power-menu');
+            if (menu && !menu.contains(e.target)) closePowerMenu();
+        });
+
+        // 重启请求的状态统一显示在顶栏下方。
+        function setRestartStatus(text) {
+            const status = document.getElementById('restart-status');
+            if (!status) return;
+            status.textContent = text || '';   // 绝对定位的空 span 本就不可见,无需再切 visibility
+        }
+
         function setRestartPending() {
-            const btn = document.getElementById('btn-restart');
-            if (!btn || btn.dataset.restartSet === '1') return;
-            btn.dataset.restartSet = '1';
-            localStorage.setItem('restart_pending', '1');   // 跨页面记住，切页时立即恢复绿色态，避免闪烁
-            btn.textContent = '✓ 已设置重启';
-            btn.style.color = '#4caf50';
-            btn.title = '等待所有任务空闲后重启';
-            btn.disabled = false;
-            btn.onclick = null;
-            btn.style.cursor = 'default';
+            localStorage.setItem('restart_pending', '1');
+            setRestartStatus('已设置重启');
         }
         window.setRestartPending = setRestartPending;
 
-        // 把重启按钮从「已设置重启」复原成可点的「重启」（程序真重启后新进程报 restart_pending=false 时调）。
-        // 守卫 restartSet==='1'：只在已置位时才复原，避免刚点击到服务端置位之间的极短窗口被误复原。
+        // 新进程启动后清除状态栏提示。
         function clearRestartPending() {
-            const btn = document.getElementById('btn-restart');
-            if (!btn || btn.dataset.restartSet !== '1') return;
-            btn.dataset.restartSet = '0';
             localStorage.removeItem('restart_pending');
-            btn.textContent = '重启';
-            btn.style.color = '';
-            btn.title = '';
-            btn.disabled = false;
-            btn.onclick = triggerRestart;
-            btn.style.cursor = '';
+            setRestartStatus('');
         }
         window.clearRestartPending = clearRestartPending;
 
-        // 切页/刷新时立即恢复「已设置重启」绿色态，赶在首次轮询前，避免按钮闪烁
+        // 切页或刷新时立即恢复状态栏提示。
         if (localStorage.getItem('restart_pending') === '1') setRestartPending();
 
         // 导航红点：config/failed 为待办型(数量>0亮)；logs_err 为新消息型(localStorage 记已读)
         function updateNavBadges(n) {
             if (!n) return;
             if (n.restart_pending) setRestartPending();
-            else clearRestartPending();   // 重启完成→自动复原按钮，不必手动刷新
+            else clearRestartPending();
             _toggleDot('dot-config', (n.config || 0) > 0);
             _toggleDot('dot-failed', (n.failed || 0) > 0);
             var err = n.logs_err || 0;
@@ -117,30 +208,25 @@
 
         function triggerRestart() {
             if (!confirm('确定要在所有任务完成后重启程序吗？')) return;
-            const btn = document.getElementById('btn-restart');
-            btn.disabled = true;
-            btn.textContent = '等待中...';
-            btn.style.color = '#aaa';
+            closePowerMenu();
             fetch('/api/restart', { method: 'POST' })
-                .then(r => r.json())
-                .then(data => {
-                    // 设置成功后按钮永久保持「已设置重启」绿色态（刷新后由 updateNavBadges 还原）
-                    setRestartPending();
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
                 })
+                .then(() => setRestartPending())
                 .catch(e => {
                     alert('请求失败: ' + e);
-                    btn.disabled = false;
-                    btn.textContent = '重启';
-                    btn.style.color = '#f0a500';
                 });
         }
 
         function triggerShutdown() {
             if (!confirm('确定要立即退出 DMR 程序吗？正在进行的录制会被中断！')) return;
-            const btn = document.getElementById('btn-shutdown');
-            btn.disabled = true;
-            btn.textContent = '退出中...';
-            btn.style.color = '#aaa';
+            closePowerMenu();
+            const item = document.getElementById('item-shutdown');
+            const label = item.querySelector('span');
+            item.disabled = true;
+            label.textContent = '退出中...';
             fetch('/api/shutdown', { method: 'POST' })
                 .then(r => r.json())
                 .then(data => {
@@ -149,9 +235,8 @@
                 })
                 .catch(e => {
                     alert('请求失败: ' + e);
-                    btn.disabled = false;
-                    btn.textContent = '退出';
-                    btn.style.color = '#ff6b6b';
+                    item.disabled = false;
+                    label.textContent = '退出';
                 });
         }
         </script>

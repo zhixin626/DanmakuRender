@@ -1,9 +1,15 @@
 {% extends "base.html" %}
 
 {% block content %}
+<style>
+    .ar-row { margin: 10px 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .ar-missing-list { max-height: 240px; overflow-y: auto; margin: 10px 0; font-size: 0.9em; color: #999; }
+    .ar-missing-list div { padding: 2px 0; }
+    .emoji-result-block { border: 1px solid var(--border-color, #333); border-radius: 4px; padding: 10px 14px; margin-top: 10px; }
+</style>
 <div class="card">
     <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h2>配置文件管理</h2>
+        <h2>Config</h2>
         <div>
             <button id="btn-apply-all" style="display:none;color:#fff;background:#1a8917;border-color:#1a8917;" onclick="applyAll()">全部应用</button>
             <button id="btn-revert-all" style="display:none;color:#fff;background:#c0392b;border-color:#c0392b;" onclick="revertAll()">全部撤销</button>
@@ -11,6 +17,7 @@
         </div>
     </div>
 
+    <div class="table-scroll">
     <table>
         <thead>
             <tr>
@@ -24,6 +31,46 @@
             <tr><td colspan="4" style="color:#999;">加载中...</td></tr>
         </tbody>
     </table>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Cookie</h2>
+    <div class="table-scroll">
+    <table>
+        <thead>
+            <tr>
+                <th>平台</th>
+                <th>账号</th>
+                <th>过期时间</th>
+                <th>状态</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody id="cookies-tbody">
+            <tr><td colspan="5" style="color:#999;">加载中...</td></tr>
+        </tbody>
+    </table>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Emoji</h2>
+    <div class="table-scroll">
+    <table>
+        <thead>
+            <tr>
+                <th>平台</th>
+                <th>表情包个数</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody id="emoji-tbody">
+            <tr><td colspan="3" style="color:#999;">加载中...</td></tr>
+        </tbody>
+    </table>
+    </div>
+    <div id="emoji-results"></div>
 </div>
 
 <div id="diff-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center;" onclick="if(event.target===this)closeDiff()">
@@ -32,7 +79,8 @@
         <pre id="diff-body" style="margin:0;padding:10px 14px;overflow:auto;font-family:Consolas,monospace;font-size:0.82rem;line-height:1.45;flex:1;background:#141414;"></pre>
         <div style="padding:8px 14px;border-top:1px solid #333;display:flex;justify-content:space-between;">
             <div>
-                <button id="diff-apply-btn" onclick="applyFromDiff()" style="display:none;color:#fff;background:#1a8917;border-color:#1a8917;">应用</button>
+                <!-- title 挂在外层 span 上：按钮 disabled 时不响应鼠标事件，tooltip 不一定弹得出来 -->
+                <span id="diff-apply-wrap" style="display:none;"><button id="diff-apply-btn" onclick="applyFromDiff()" style="color:#fff;background:#1a8917;border-color:#1a8917;">应用</button></span>
                 <button onclick="revertFromDiff()" style="color:#fff;background:#c0392b;border-color:#c0392b;">撤销</button>
                 <button id="diff-defer-btn" onclick="deferFromDiff()" style="display:none;color:#fff;background:#555;border-color:#555;">忽略</button>
                 <button id="diff-undefer-btn" onclick="undeferFromDiff()" style="display:none;color:#fff;background:#0066cc;border-color:#0066cc;">取消忽略</button>
@@ -42,15 +90,33 @@
     </div>
 </div>
 
+<div id="edit-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center;" onclick="if(event.target===this)closeEdit()">
+    <div style="background:#1b1b1b;border:1px solid #444;border-radius:8px;width:820px;max-width:94vw;max-height:86vh;display:flex;flex-direction:column;">
+        <div style="padding:10px 14px;border-bottom:1px solid #333;color:#ddd;">编辑配置 - <span id="edit-title" style="color:#6f9"></span></div>
+        <textarea id="edit-body" spellcheck="false" style="margin:0;padding:10px 14px;flex:1;min-height:400px;background:#141414;color:#ddd;border:none;outline:none;font-family:Consolas,monospace;font-size:0.82rem;line-height:1.45;resize:vertical;"></textarea>
+        <div id="edit-error" style="display:none;color:#e05555;padding:0 14px 8px;font-size:0.85rem;white-space:pre-wrap;"></div>
+        <div style="padding:8px 14px;border-top:1px solid #333;display:flex;justify-content:space-between;">
+            <button onclick="saveEdit()" style="color:#fff;background:#1a8917;border-color:#1a8917;">保存</button>
+            <button onclick="closeEdit()">取消</button>
+        </div>
+    </div>
+</div>
+
 <script>
     var diffFile = null;
-    // opts: {canApply, canDefer, canUndefer} —— 控制弹窗里「应用 / 忽略 / 取消忽略」的显隐
+    // opts: {canApply, applyDisabled, canDefer, canUndefer} —— 控制弹窗里「应用 / 忽略 / 取消忽略」的显隐
+    // applyDisabled: global 配置无法热生效，按钮照常显示但置灰，hover 说明要重启
     function openDiff(filename, opts) {
         opts = opts || {};
         diffFile = filename;
         var box = document.getElementById('diff-body');
         document.getElementById('diff-title').textContent = filename;
-        document.getElementById('diff-apply-btn').style.display = opts.canApply ? '' : 'none';
+        var applyWrap = document.getElementById('diff-apply-wrap');
+        var applyBtn = document.getElementById('diff-apply-btn');
+        applyWrap.style.display = opts.canApply ? '' : 'none';
+        applyBtn.disabled = !!opts.applyDisabled;
+        applyWrap.title = opts.applyDisabled ? '全局配置无法热生效，请重启程序来应用' : '';
+        applyBtn.style.cursor = opts.applyDisabled ? 'not-allowed' : '';
         document.getElementById('diff-defer-btn').style.display = opts.canDefer ? '' : 'none';
         document.getElementById('diff-undefer-btn').style.display = opts.canUndefer ? '' : 'none';
         box.textContent = '加载中...';
@@ -96,6 +162,48 @@
         closeDiff();
         undeferConfig(fn);  // 取消忽略
     }
+
+    var editFile = null;
+    function openEdit(filename) {
+        editFile = filename;
+        document.getElementById('edit-title').textContent = filename;
+        var errBox = document.getElementById('edit-error');
+        errBox.style.display = 'none';
+        var box = document.getElementById('edit-body');
+        box.value = '加载中...';
+        document.getElementById('edit-overlay').style.display = 'flex';
+        fetch('/api/config/content/' + encodeURIComponent(filename))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (!d.ok) { alert(d.message || '读取失败'); closeEdit(); return; }
+                box.value = d.content || '';
+            })
+            .catch(function (e) { alert('读取失败: ' + e); closeEdit(); });
+    }
+    function closeEdit() {
+        document.getElementById('edit-overlay').style.display = 'none';
+        editFile = null;
+    }
+    function saveEdit() {
+        if (!editFile) return;
+        var fn = editFile;
+        var content = document.getElementById('edit-body').value;
+        fetch('/api/config/save/' + encodeURIComponent(fn), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: content })
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                var errBox = document.getElementById('edit-error');
+                if (!d.ok) { errBox.textContent = d.message || '保存失败'; errBox.style.display = 'block'; return; }
+                closeEdit();
+                refreshConfigList();
+            })
+            .catch(function (e) {
+                var errBox = document.getElementById('edit-error');
+                errBox.textContent = '请求失败: ' + e; errBox.style.display = 'block';
+            });
+    }
 </script>
 
 <script>
@@ -134,28 +242,41 @@
             ? pathCell(c.path, c.filename)
             : '<span style="text-decoration:line-through;color:#c00;">' + esc(c.filename) + '</span>';
 
-        // 变更状态：有改动按 STATUS_META 着色；停用/已删的不适用显示 —
-        var meta = STATUS_META[c.status];
-        var changeCell = meta
-            ? '<span style="color:' + meta.color + ';font-weight:bold;">● ' + meta.text + '</span>'
-            : ((c.exists && c.enabled) || c.is_global ? '<span style="color:#999;">已同步</span>' : '—');
-
         var isPending = (c.status === 'new' || c.status === 'modified' || c.status === 'deleted');
+        var isClickable = isPending || c.status === 'deferred';
+        // global 配置也显示「应用」，但置灰不可点(只能重启生效)——比整个按钮消失更好解释
+        var canApply = isPending;
+        var applyDisabled = isPending && c.is_global;
 
-        // 行里只留「查看」一个入口，应用/撤销/忽略/取消忽略都在查看弹窗里操作。
-        // 用 data 属性告诉弹窗该显示哪些按钮：canApply(任务可热应用) / defer(可忽略) / undefer(已忽略可取消)
-        function changeOps(canApply) {
-            if (!isPending && c.status !== 'deferred') return [];
+        // 变更状态：有改动/已忽略时点这行文字就能查看改动详情（原来单独的「查看」链接去掉了，
+        // 应用/撤销/忽略/取消忽略都在弹窗里操作）；「已同步」/「—」没有改动可看，不可点。
+        var meta = STATUS_META[c.status];
+        var changeText = meta ? ('● ' + meta.text) : ((c.exists && c.enabled) || c.is_global ? '已同步' : '—');
+        var changeColor = meta ? meta.color : '#999';
+        var changeCell;
+        if (isClickable) {
             var attrs = ' data-fn="' + fnAttr + '"';
             if (canApply) attrs += ' data-apply="1"';
+            if (applyDisabled) attrs += ' data-apply-disabled="1"';
             if (isPending) attrs += ' data-defer="1"';
             if (c.status === 'deferred') attrs += ' data-undefer="1"';
-            return ['<a href="javascript:void(0);" class="op-diff"' + attrs + ' style="color:#6f42c1;">查看</a>'];
+            changeCell = '<a href="javascript:void(0);" class="op-diff"' + attrs +
+                ' style="color:' + changeColor + ';font-weight:bold;text-decoration:underline;cursor:pointer;" title="点击查看改动详情">' + changeText + '</a>';
+        } else {
+            changeCell = '<span style="color:' + changeColor + ';' + (meta ? 'font-weight:bold;' : '') + '">' + changeText + '</span>';
         }
+
+        // 「编辑」：直接改磁盘上的 YAML 原文，保存后交给现有的变更检测/查看改动/应用/撤销机制接管，
+        // 跟你自己用编辑器改文件效果一样；示例文件不允许改。
+        var editOp = (c.exists && c.filename.indexOf('example-') !== 0)
+            ? '<button class="op-edit" data-fn="' + fnAttr + '" style="color:#000;border-color:#4ea1ff;">编辑</button>'
+            : '';
 
         // global 全局配置：蓝色「● 已启用」(hover 提示必须启用)，无启用/停用开关(隐形占位对齐)，只能重启生效
         if (c.is_global) {
-            var gOps = ['<button disabled style="visibility:hidden;">停用</button>'].concat(changeOps(false));
+            var gOps = [];
+            if (editOp) gOps.push(editOp);
+            gOps.push('<button disabled style="visibility:hidden;">停用</button>');
             return '<tr style="background:rgba(78,161,255,0.07);">' +
                 '<td>' + nameCell + '</td>' +
                 '<td><span title="全局配置必须启用" style="color:#4ea1ff;font-weight:bold;">● 已启用</span></td>' +
@@ -171,12 +292,12 @@
                 : '<span style="color:#888;">○ 未启用</span>');
 
         var ops = [];
+        if (editOp) ops.push(editOp);
         if (c.exists) {
             ops.push(c.enabled
                 ? '<button class="op-toggle" data-fn="' + fnAttr + '" data-en="0" style="color:#000;border-color:#dc3545;">停用</button>'
                 : '<button class="op-toggle" data-fn="' + fnAttr + '" data-en="1" style="color:#000;border-color:#4caf50;">启用</button>');
         }
-        ops = ops.concat(changeOps(isPending));   // 任务可热应用 → 查看弹窗里带「应用」
 
         return '<tr>' +
             '<td>' + nameCell + '</td>' +
@@ -196,10 +317,15 @@
         });
     }
 
+    var _configFetchSeq = 0;   // 请求序号：撤销/应用等操作触发的刷新，和 1.5s 定时轮询可能并发，
+                                // 谁的响应后到就该以谁为准——不加这个的话，旧请求的响应可能在新请求之后才回来，
+                                // 把刚撤销好的最新状态重新覆盖回撤销前的样子（就是「有时候撤销了但页面还显示已修改」那个 bug）。
     function refreshConfigList() {
+        var seq = ++_configFetchSeq;
         return fetch('/api/config/list')
             .then(function (r) { return r.json(); })
             .then(function (data) {
+                if (seq !== _configFetchSeq) return;   // 已经有更新的请求发出去了，这次的结果是过期数据，丢弃
                 var tbody = document.getElementById('config-tbody');
                 var configs = sortConfigs(data.configs || []);
                 lastConfigs = configs;
@@ -296,10 +422,229 @@
         if (!t.dataset || !t.dataset.fn) return;
         if (t.classList.contains('op-toggle'))    toggleConfig(t.dataset.fn, t.dataset.en === '1');
         else if (t.classList.contains('op-diff')) openDiff(t.dataset.fn, {
-            canApply: t.dataset.apply === '1', canDefer: t.dataset.defer === '1', canUndefer: t.dataset.undefer === '1'
+            canApply: t.dataset.apply === '1', applyDisabled: t.dataset.applyDisabled === '1',
+            canDefer: t.dataset.defer === '1', canUndefer: t.dataset.undefer === '1'
         });
+        else if (t.classList.contains('op-edit')) openEdit(t.dataset.fn);
     });
 
     startPolling(refreshConfigList, 1500);
+</script>
+
+<script>
+    // ===================== Cookie 续期 =====================
+    // esc() 复用上面 Config 脚本里定义的同名函数；STATUS_META/buildRow 与 Config 冲突，这里改名。
+    var PLATFORM_META = {
+        'bilibili': 'B站',
+        'acfun':    'AcFun',
+        'douyin':   '抖音',
+        'unknown':  '未知',
+    };
+    var COOKIE_STATUS_META = {
+        'valid':         { text: '有效',     color: '#1a8917' },
+        'expiring_soon': { text: '即将过期', color: '#e08e00' },
+        'expired':       { text: '已过期',   color: '#c00'    },
+        'unknown':       { text: '未知',     color: '#888'    },
+    };
+    var LOGIN_SCRIPTS = { 'acfun': 'acfun_login.py', 'douyin': 'douyin_login.py' };
+
+    function fmtTime(ts) {
+        if (!ts) return '未知';
+        var d = new Date(ts * 1000);
+        return '<div style="white-space:nowrap;">' + d.toLocaleDateString() + '</div>' +
+               '<div style="white-space:nowrap;color:#999;">' + d.toLocaleTimeString() + '</div>';
+    }
+
+    function buildCookieRow(c) {
+        var meta = COOKIE_STATUS_META[c.status] || COOKIE_STATUS_META['unknown'];
+        var statusCell = '<span style="white-space:nowrap;color:' + meta.color + ';font-weight:bold;">● ' + meta.text + '</span>';
+
+        var opsCell;
+        if (c.platform === 'bilibili') {
+            opsCell = '<button class="op-renew" data-fn="' + esc(c.filename) + '">更新</button>';
+        } else if (LOGIN_SCRIPTS[c.platform]) {
+            opsCell = '<code style="white-space:nowrap;color:#ccc;">python DMR/Login/' + LOGIN_SCRIPTS[c.platform] + ' ' + esc(c.account) + '</code>';
+        } else {
+            opsCell = '—';
+        }
+
+        return '<tr>' +
+            '<td style="white-space:nowrap;">' + esc(PLATFORM_META[c.platform] || c.platform) + '</td>' +
+            '<td style="white-space:nowrap;">' + esc(c.account) + '</td>' +
+            '<td>' + fmtTime(c.expires_at) + '</td>' +
+            '<td>' + statusCell + '</td>' +
+            '<td>' + opsCell + '</td>' +
+            '</tr>';
+    }
+
+    function refreshCookiesList() {
+        return fetch('/api/cookies/list')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var tbody = document.getElementById('cookies-tbody');
+                var cookies = data.cookies || [];
+                if (cookies.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="color:#999;">暂无 cookie 文件。</td></tr>';
+                } else {
+                    tbody.innerHTML = cookies.map(buildCookieRow).join('');
+                }
+            })
+            .catch(function (e) { console.error('刷新 cookie 列表失败:', e); });
+    }
+
+    function renewCookie(filename) {
+        if (!confirm('确定更新 ' + filename + ' 吗？')) return;
+        fetch('/api/cookies/renew/' + encodeURIComponent(filename), { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) { alert(d.message || (d.ok ? '更新成功' : '更新失败')); refreshCookiesList(); })
+            .catch(function (e) { alert('请求失败: ' + e); });
+    }
+
+    document.getElementById('cookies-tbody').addEventListener('click', function (e) {
+        var t = e.target;
+        if (!t.dataset || !t.dataset.fn) return;
+        if (t.classList.contains('op-renew')) renewCookie(t.dataset.fn);
+    });
+
+    startPolling(refreshCookiesList, 5000);
+
+    // ===================== Emoji 列表 =====================
+    var emojiMissing = {};   // platform -> 该平台最近一次检查出的缺失列表，确认下载时用
+    var emojiChecking = {};   // platform -> true，检查中；列表每5秒轮询重绘，靠这个状态让按钮重绘后还是"检查中"
+
+    function buildEmojiRow(e) {
+        var opsCell;
+        if (!e.supported) {
+            opsCell = '<span style="color:#999;">暂无脚本</span>';
+        } else if (emojiChecking[e.platform]) {
+            opsCell = '<button class="op-emoji-check" data-platform="' + esc(e.platform) + '" disabled>检查中...</button>';
+        } else {
+            opsCell = '<button class="op-emoji-check" data-platform="' + esc(e.platform) + '">检查更新</button>';
+        }
+        var folderBtn = '<button title="打开文件夹" onclick=\'openPath(' + JSON.stringify(e.dir) + ',"folder")\' style="background:none;border:none;cursor:pointer;font-size:16px;margin-right:6px;padding:0;vertical-align:middle;">📁</button>';
+        return '<tr>' +
+            '<td style="white-space:nowrap;">' + folderBtn + esc(e.label) + '</td>' +
+            '<td>' + e.count + '</td>' +
+            '<td>' + opsCell + '</td>' +
+            '</tr>';
+    }
+
+    function refreshEmojiList() {
+        return fetch('/api/emoji/list')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var tbody = document.getElementById('emoji-tbody');
+                var emojis = data.emojis || [];
+                tbody.innerHTML = emojis.length
+                    ? emojis.map(buildEmojiRow).join('')
+                    : '<tr><td colspan="3" style="color:#999;">暂无数据。</td></tr>';
+            })
+            .catch(function (e) { console.error('刷新表情包列表失败:', e); });
+    }
+
+    document.getElementById('emoji-tbody').addEventListener('click', function (e) {
+        var t = e.target;
+        if (t.classList.contains('op-emoji-check')) runEmojiCheck(t.dataset.platform, t);
+    });
+
+    function resetEmojiResult(platform) {
+        var el = document.getElementById('emoji-result-' + platform);
+        if (el) el.remove();
+        delete emojiMissing[platform];
+    }
+
+    function renderEmojiResult(platform, data) {
+        emojiMissing[platform] = data.missing || [];
+
+        var scopeNote = '';
+        if (data.cookie_used) {
+            scopeNote = ' <span style="color:#666;">（使用cookie：' + esc(data.cookie_used) + '）</span>';
+        }
+        var summaryHtml = (PLATFORM_META[platform] || platform) + '：本地已有 ' + data.existing_count + ' 个，接口共 ' +
+            data.unique_count + ' 个，缺失 <b>' + emojiMissing[platform].length + '</b> 个' + scopeNote;
+        var listHtml = emojiMissing[platform].map(function (m) { return '<div>' + esc(m.name) + '</div>'; }).join('');
+
+        var actionsHtml;
+        if (emojiMissing[platform].length > 0) {
+            actionsHtml =
+                '<button class="op-emoji-download" data-platform="' + esc(platform) + '">更新（下载缺失的 ' + emojiMissing[platform].length + ' 个）</button>' +
+                '<button class="op-emoji-dismiss" data-platform="' + esc(platform) + '">取消</button>';
+        } else {
+            actionsHtml = '<span style="color:#1a8917;">已是最新，无需下载。</span>' +
+                '<button class="op-emoji-dismiss" data-platform="' + esc(platform) + '">关闭</button>';
+        }
+
+        var el = document.getElementById('emoji-result-' + platform);
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'emoji-result-' + platform;
+            el.className = 'emoji-result-block';
+            document.getElementById('emoji-results').appendChild(el);
+        }
+        el.innerHTML = '<div>' + summaryHtml + '</div>' +
+            '<div class="ar-missing-list">' + listHtml + '</div>' +
+            '<div class="ar-row">' + actionsHtml + '</div>';
+    }
+
+    document.getElementById('emoji-results').addEventListener('click', function (e) {
+        var t = e.target;
+        var platform = t.dataset && t.dataset.platform;
+        if (!platform) return;
+        if (t.classList.contains('op-emoji-download')) doEmojiDownload(platform, t);
+        else if (t.classList.contains('op-emoji-dismiss')) resetEmojiResult(platform);
+    });
+
+    function runEmojiCheck(platform, btn) {
+        if (emojiChecking[platform]) return;   // 已经在查了，忽略重复点击
+        resetEmojiResult(platform);
+        emojiChecking[platform] = true;
+        btn.disabled = true;
+        btn.textContent = '检查中...';
+        // 后端最坏情况(B站多房间依次超时)也就 60s 左右能返回；这里给 70s 只是兜底，
+        // 万一请求真卡死也不会把按钮永久锁死。
+        var controller = new AbortController();
+        var timeoutId = setTimeout(function () { controller.abort(); }, 70000);
+        fetch('/api/emoji/check', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform: platform }),
+            signal: controller.signal,
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (!d.ok) { alert(d.message || '检查失败'); return; }
+                renderEmojiResult(platform, d);
+            })
+            .catch(function (e) {
+                alert(e.name === 'AbortError' ? '检查超时，请稍后重试' : ('请求失败: ' + e));
+            })
+            .finally(function () {
+                clearTimeout(timeoutId);
+                delete emojiChecking[platform];
+                refreshEmojiList();   // 用最新数据重绘这一行，按钮恢复可点
+            });
+    }
+
+    function doEmojiDownload(platform, btn) {
+        var items = emojiMissing[platform] || [];
+        if (!confirm('确定下载这 ' + items.length + ' 个缺失表情吗？')) return;
+        btn.disabled = true; btn.textContent = '下载中...';
+        fetch('/api/emoji/download', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform: platform, items: items })
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (!d.ok) { alert(d.message || '下载失败'); return; }
+                var msg = '完成：新增 ' + d.downloaded + ' 个';
+                if (d.failed && d.failed.length) msg += '，失败 ' + d.failed.length + ' 个（' + d.failed.map(function(f){return f.name;}).join('、') + '）';
+                alert(msg);
+                resetEmojiResult(platform);
+                refreshEmojiList();
+            })
+            .catch(function (e) { alert('请求失败: ' + e); })
+            .finally(function () { btn.disabled = false; btn.textContent = '更新'; });
+    }
+
+    startPolling(refreshEmojiList, 5000);
 </script>
 {% endblock %}

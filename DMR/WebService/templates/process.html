@@ -4,28 +4,28 @@
 <!-- 四个阶段队列：每个文件按「当前阶段」只出现一次（互斥）。
      进行中(带%/倒计时) + 已完成子集；内容全部由 JS 轮询 /api/tasks 构建，空则不显示。 -->
 <div class="card">
+    <h2>人工处理队列</h2>
+    <div id="held-tasks" class="table-scroll"></div>
+</div>
+
+<div class="card">
     <h2>渲染队列</h2>
-    <div id="render-queue"></div>
+    <div id="render-queue" class="table-scroll"></div>
 </div>
 
 <div class="card">
     <h2>合并队列</h2>
-    <div id="merge-queue"></div>
+    <div id="merge-queue" class="table-scroll"></div>
 </div>
 
 <div class="card">
     <h2>上传队列</h2>
-    <div id="upload-queue"></div>
+    <div id="upload-queue" class="table-scroll"></div>
 </div>
 
 <div class="card">
     <h2>清理队列</h2>
-    <div id="clean-queue"></div>
-</div>
-
-<div class="card">
-    <h2>人工处理队列</h2>
-    <div id="held-tasks"></div>
+    <div id="clean-queue" class="table-scroll"></div>
 </div>
 
 <script>
@@ -134,7 +134,10 @@
         fetch('/api/resume', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({task: task, hold_id: hid, result: result}),
-        }).then(function(r) { if (r.ok) { refreshTasks(); } else { alert('提交失败'); } });
+        }).then(function(r) {
+            if (r.ok) { refreshTasks(); }
+            else { r.text().then(function(t) { alert('提交失败: ' + t); }); }
+        });
     }
     function ignoreHold(task, hid) {
         if (!confirm('忽略后这段将从管线里摘除、不再参与后续合并/上传/清理（硬盘文件不动）。确定？')) return;

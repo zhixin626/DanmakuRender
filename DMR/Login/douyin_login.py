@@ -1,28 +1,30 @@
 """
-douyin_cookie_fetcher.py
+douyin_login.py
 用 Playwright 打开浏览器，手动登录抖音后自动提取并保存 Cookie。
 
 依赖安装（仅需一次）：
     pip install playwright
-    playwright install chromium      # 或 firefox / webkit
+    playwright install chromium
 
-用法示例：
-    python douyin_cookie_fetcher.py                          # 默认输出 cookies.json
-    python douyin_cookie_fetcher.py --output my_cookies.json
-    python douyin_cookie_fetcher.py --browser firefox
-    python douyin_cookie_fetcher.py --include-all            # 保存所有 cookie，不过滤
+用法示例（在项目根目录下运行）：
+    python DMR/Login/douyin_login.py 账号名          # 保存到 .login_info/抖音_账号名.json
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, unquote, urlparse
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from DMR.Login.cookiemgr import save_cookie_file
 
 # ---------------------------------------------------------------------------
 # 内联自 cookie_utils.py
@@ -76,10 +78,12 @@ def _parse_cookie_header(cookie_header: str) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 DEFAULT_URL = "https://www.douyin.com/"
-DEFAULT_OUTPUT = Path("cookies.json")
+DEFAULT_BROWSER = "chromium"
 
 REQUIRED_KEYS = {"msToken", "ttwid", "odin_tt", "passport_csrf_token"}
 SUGGESTED_KEYS = REQUIRED_KEYS | {"sid_guard", "sessionid", "sid_tt"}
+# 真正代表登录会话有效期的字段；msToken/ttwid 等是风控令牌，可能比登录会话短命得多，不能拿来算过期时间
+SESSION_KEYS = {"sid_guard", "sessionid", "sid_tt"}
 DEFAULT_AUXILIARY_KEYS = {
     "_waftokenid",
     "s_v_web_id",
@@ -108,34 +112,11 @@ FALLBACK_TIMEOUT_MS = 300_000
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Launch a browser, guide manual login, then dump Douyin cookies.",
+        description="打开浏览器，手动登录抖音后提取并保存 Cookie",
     )
     parser.add_argument(
-        "--url",
-        default=DEFAULT_URL,
-        help=f"Login page to open (default: {DEFAULT_URL})",
-    )
-    parser.add_argument(
-        "--browser",
-        choices=["chromium", "firefox", "webkit"],
-        default="chromium",
-        help="Playwright browser engine (default: chromium)",
-    )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Run browser headless (not recommended for manual login)",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"JSON file to write collected cookies (default: {DEFAULT_OUTPUT})",
-    )
-    parser.add_argument(
-        "--include-all",
-        action="store_true",
-        help="Store every cookie from douyin.com instead of the recommended subset",
+        "account",
+        help="账号名，决定 cookie 文件名 (.login_info/抖音_<账号名>.json)",
     )
     return parser.parse_args(argv)
 
@@ -355,8 +336,8 @@ async def capture_cookies(args: argparse.Namespace) -> int:
         return 1
 
     async with async_playwright() as p:
-        browser_factory = getattr(p, args.browser)
-        browser = await browser_factory.launch(headless=args.headless)
+        browser_factory = getattr(p, DEFAULT_BROWSER)
+        browser = await browser_factory.launch(headless=False)
         context = await browser.new_context()
         page = await context.new_page()
 
@@ -384,15 +365,12 @@ async def capture_cookies(args: argparse.Namespace) -> int:
         print("\n[INFO] 浏览器已启动，请在弹出的窗口中完成抖音登录。")
         print("[INFO] 登录成功后回到本终端，按 Enter 键继续...\n")
 
-        await _wait_for_login_confirmation(page, args.url)
+        await _wait_for_login_confirmation(page, DEFAULT_URL)
 
         # 从浏览器存储提取 douyin.com 下的所有 cookie
         storage = await context.storage_state()
-        cookies: Dict[str, str] = {
-            cookie["name"]: cookie["value"]
-            for cookie in storage["cookies"]
-            if cookie["domain"].endswith("douyin.com")
-        }
+        raw_cookies = [c for c in storage["cookies"] if c["domain"].endswith("douyin.com")]
+        cookies: Dict[str, str] = {c["name"]: c["value"] for c in raw_cookies}
         cookies = _sanitize_cookies(cookies)
 
         # 补充 msToken（可能不在 storage_state 里）
@@ -406,14 +384,10 @@ async def capture_cookies(args: argparse.Namespace) -> int:
         await context.close()
         await browser.close()
 
-    picked = cookies if args.include_all else _filter_cookies(cookies)
-    picked = _sanitize_cookies(picked)
+    picked = _sanitize_cookies(_filter_cookies(cookies))
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(picked, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    print(f"[INFO] 已保存 {len(picked)} 个 cookie 到：{args.output.resolve()}")
+    output = save_cookie_file("douyin", args.account, picked, raw_cookies, expiry_keys=SESSION_KEYS)
+    print(f"[INFO] 已保存 {len(picked)} 个 cookie 到：{output.resolve()}")
 
     missing = REQUIRED_KEYS - picked.keys()
     if missing:
