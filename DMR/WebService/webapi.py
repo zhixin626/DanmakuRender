@@ -779,7 +779,6 @@ class WebApi:
                         'files': [{'path': _abspath(f.path)} for f in task.get('files', [])],
                         'account': task.get('args', {}).get('account', 'Unknown'),
                         'engine': task.get('engine', 'Unknown'),
-                        'is_sync': bool(task.get('stream_queue')),
                         'status': task.get('status', 'waiting'),
                         'progress': task.get('progress'),
                     })

@@ -1,6 +1,21 @@
 {% extends "base.html" %}
 
 {% block content %}
+<style>
+    .table-scroll {
+        overflow-x: hidden;
+    }
+    .table-scroll table {
+        white-space: normal;
+        table-layout: auto;
+    }
+    .table-scroll th,
+    .table-scroll td,
+    .table-scroll a {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+</style>
 <!-- 四个阶段队列：每个文件按「当前阶段」只出现一次（互斥）。
      进行中(带%/倒计时) + 已完成子集；内容全部由 JS 轮询 /api/tasks 构建，空则不显示。 -->
 <div class="card">
@@ -100,9 +115,8 @@
             act = '<table><thead><tr><th>任务</th><th>文件</th><th>上传至</th><th>进度/信息</th><th>操作</th></tr></thead><tbody>';
             a.forEach(t => {
                 const files = (t.files || []).map(f => `<div>${pathCell(f.path)}</div>`).join('');
-                let info = t.is_sync ? '<span style="color:var(--secondary-color)">同步上传中...</span>'
-                    : (t.status === 'waiting' ? '<span style="color:#666">等待中...</span>'
-                    : (t.progress ? `上传中 ${t.progress}` : '上传中...'));
+                let info = t.status === 'waiting' ? '<span style="color:#666">等待中...</span>'
+                    : (t.progress ? `上传中 ${t.progress}` : '上传中...');
                 act += `<tr><td>${escHtml(t.task)}</td><td>${files}</td><td>${escHtml(t.account)} (${escHtml(t.engine)})</td><td>${info}</td>` +
                        `<td><button onclick="stopUploadTask('${t.uuid}')" style="background-color:#dc3545;">停止</button></td></tr>`;
             });
@@ -157,9 +171,10 @@
             const info = h.info || {}, hid = h.hold_id, tk = h.task, stage = h.stage;
             let body = '', form = '';
             if (stage === 'render') {
-                const isDm = !!info.ass;   // 转码任务没有弹幕文件，不显示「弹幕 ass」行，措辞改「转码」
+                const dmFile = info.danmaku || info.ass;   // info.ass 仅兼容旧的挂起任务
+                const isDm = !!dmFile;
                 body = '<div>源 flv：' + pathCell(info.flv) + '</div>' +
-                       (isDm ? '<div>弹幕 ass：' + pathCell(info.ass) + '</div>' : '') +
+                       (isDm ? '<div>弹幕文件：' + pathCell(dmFile) + '</div>' : '') +
                        '<div style="color:#c00">错误：' + escHtml(info.error || '') + '</div>';
                 form = mp4Form(tk, hid, (isDm ? '渲染' : '转码') + '好后填入 mp4 路径');
             } else if (stage === 'merge') {
