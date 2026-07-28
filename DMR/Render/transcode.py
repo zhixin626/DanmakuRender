@@ -14,24 +14,27 @@ from DMR.utils import *
 
 class Transcoder(BaseRender):
     def __init__(self,
-                 hwaccel_args: list,
+                 hwaccel,
                  vencoder: str,
                  vencoder_args: list,
                  aencoder: str,
                  aencoder_args: list,
                  output_resize: str,
-                 advanced_render_args: dict=None,
                  ffmpeg: str = None,
                  debug=False,
                  **kwargs
                  ):
-        self.hwaccel_args = hwaccel_args if hwaccel_args is not None else []
+        hwaccel_value = 'auto' if hwaccel is True else str(hwaccel)
+        self.hwaccel_args = (
+            ['-hwaccel', hwaccel_value]
+            if hwaccel not in (None, False, '', 'false', 'off', 'none')
+            else []
+        )
         self.vencoder = vencoder
         self.vencoder_args = vencoder_args
         self.aencoder = aencoder
         self.aencoder_args = aencoder_args
         self.output_resize = output_resize
-        self.advanced_render_args = advanced_render_args if isinstance(advanced_render_args, dict) else {}
         self.ffmpeg = ffmpeg if ffmpeg else ToolsList.get('ffmpeg')
         self.debug = debug
 

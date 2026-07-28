@@ -1,9 +1,9 @@
-"""渲染专用脚本（离线批量）：对文件夹里的 视频+同名.ass 逐个渲染弹幕版 / 转码。
+"""渲染专用脚本（离线批量）：对文件夹里的视频和同名 JSONL/ASS 渲染或转码。
 
 引擎选择与主管线一致（见 liveevents._check_for_render）：
-  - 配置 render_args.dmrender.emoji: true 时用彩色 emoji 引擎
-    （EmojiDmRender → DMR/Render/emoji_render_mt.py 多核精灵渲染）；
-  - 否则用普通 dmrender（libass 单遍烧录）；
+  - render_args.overlay.engine 选择 dmrender / emoji_dmrender；
+  - JSONL 由 LayoutCompiler 依次生成每段 RenderPlan，并维护跨段 track；
+  - 同名 ASS 仍作为旧文件兼容输入；
   - --emoji / --no-emoji 可强制覆盖配置。
 
 用法：
@@ -11,6 +11,7 @@
                           [--output_dir 路径] [--transcode] [--emoji | --no-emoji]
 """
 import argparse
+import json
 import os
 import sys
 import logging
@@ -34,10 +35,14 @@ def resolve_render_args(config, input_dir, mode):
         if not out_dir:
             continue
         if os.path.normcase(os.path.abspath(out_dir)) == target:
-            ra = (tconf.get('render_args') or {}).get(mode)
+            root = tconf.get('render_args') or {}
+            key = 'transcode' if mode == 'transcode' else 'overlay'
+            ra = root.get(key)
             if ra:
                 return ra, f'任务「{taskname}」'
-    ra = config.global_config.get('render_args', {}).get(mode) or {}
+    root = config.global_config.get('render_args', {})
+    key = 'transcode' if mode == 'transcode' else 'overlay'
+    ra = root.get(key) or {}
     return ra, '全局配置(未匹配到任务)'
 
 
@@ -48,7 +53,10 @@ def build_tasks(videos, mode, render_args, output_dir_arg):
     suffix = '（转码后）' if mode == 'transcode' else '（弹幕版）'
 
     for vname in videos:
-        danmu = os.path.splitext(vname)[0] + '.ass'
+        base = os.path.splitext(vname)[0]
+        jsonl = base + '.jsonl'
+        legacy_ass = base + '.ass'
+        danmu = jsonl if exists(jsonl) else legacy_ass
         filename = os.path.splitext(os.path.basename(vname))[0] + f'{suffix}.{fmt}'
         output_dir = output_dir_arg or (os.path.dirname(vname) + suffix)
         output = join(output_dir, filename)
@@ -57,9 +65,28 @@ def build_tasks(videos, mode, render_args, output_dir_arg):
             ignores.append((vname, f'已存在渲染产物 {output}，跳过.'))
             continue
         if mode != 'transcode' and not exists(danmu):
-            ignores.append((vname, '不存在匹配的弹幕文件，跳过.'))
+            ignores.append((vname, '不存在匹配的 JSONL 或 ASS 弹幕文件，跳过.'))
             continue
-        tasks.append({'video': vname, 'danmaku': danmu, 'output': output})
+        segment_start = None
+        if jsonl == danmu:
+            try:
+                with open(jsonl, 'r', encoding='utf-8') as fp:
+                    segment_start = float(json.loads(fp.readline())['segment_start_time'])
+            except Exception:
+                pass
+        tasks.append({
+            'video': vname,
+            'danmaku': danmu,
+            'output': output,
+            'segment_start': segment_start,
+        })
+    # “同一分钟(2)”按文件名排序可能排在无后缀文件之前。JSONL 输入必须
+    # 依物理起点编译，否则 track 会倒序消费。
+    tasks.sort(key=lambda item: (
+        item['segment_start'] is None,
+        item['segment_start'] if item['segment_start'] is not None
+        else os.path.getmtime(item['video']),
+    ))
     return tasks, ignores
 
 
@@ -82,7 +109,7 @@ def main():
     logging.getLogger().addHandler(console_handler)
 
     config = Config(args.config)
-    mode = 'transcode' if args.transcode else 'dmrender'
+    mode = 'transcode' if args.transcode else 'danmaku_render'
 
     input_dir = args.input_dir or config.global_config.get('downloader_args', {}).get('output_dir', '直播回放')
     inp = input(f'请输入视频文件夹路径 (回车使用默认路径 {input_dir}): \n')
@@ -91,9 +118,9 @@ def main():
 
     # 按输入文件夹自动匹配任务配置(任务的 emoji 开关/渲染参数随之生效)
     render_args, source = resolve_render_args(config, input_dir, mode)
-    assert render_args, f'请在 global.yml 中配置 render_args.{mode} 的参数'
+    assert render_args, '请在 global.yml 中配置 render_args 的渲染参数'
 
-    # 引擎选择:与主管线同规则(dmrender.emoji 开关),命令行可强制覆盖
+    # 引擎选择与主管线使用同一配置结构。
     if mode == 'transcode':
         use_emoji = False
     elif args.emoji:
@@ -101,7 +128,7 @@ def main():
     elif args.no_emoji:
         use_emoji = False
     else:
-        use_emoji = bool(render_args.get('emoji'))
+        use_emoji = render_args.get('engine', 'dmrender') == 'emoji_dmrender'
 
     engine_name = 'transcode' if mode == 'transcode' else ('emoji_dmrender' if use_emoji else 'dmrender')
     print(f'渲染参数来源: {source} → 渲染引擎: {engine_name}')
@@ -131,11 +158,16 @@ def main():
     selected = [tasks[i] for i in task_idx]
     total = len(selected)
     n_ok = n_fail = 0
+    layout_state = None
     for seq, task in enumerate(selected, 1):
+        resolution = FFprobe.get_resolution(task['video'])
         video = VideoInfo(
             path=task['video'],
             dm_file_id=task['danmaku'],
-            duration=FFprobe.get_duration(task['video']),   # 供引擎回报进度百分比
+            # JSONL布局和渲染必须共用视频包PTS时间线；直播FLV的
+            # format.duration 可能短于最后一个实际视频包。
+            duration=FFprobe.get_timeline_duration(task['video']),
+            resolution=resolution,
         )
         output = task['output']
         os.makedirs(os.path.dirname(output), exist_ok=True)
@@ -147,11 +179,51 @@ def main():
             print(f'\r{_label} 进度 {pct}%   ', end='', flush=True)
 
         try:
-            target_render = TargetRender(**render_args)
-            status, info = target_render.render_one(video=video, output=output,
-                                                    progress_cb=on_progress)
+            target_args = render_args
+            render_kwargs = {}
+            layout_result = None
+            if mode != 'transcode':
+                layout_keys = {
+                    'include_events',
+                    'danmaku', 'gift', 'superchat', 'member',
+                    'r2l', 'slide_left', 'slide_right',
+                }
+                target_args = {
+                    key: value for key, value in render_args.items()
+                    if key != 'engine' and key not in layout_keys
+                }
+                if engine_name == 'dmrender':
+                    for key in (
+                        'emoji_pack', 'emoji_font', 'workers',
+                        'chunks_per_worker',
+                    ):
+                        target_args.pop(key, None)
+                if task['danmaku'].lower().endswith('.jsonl'):
+                    from DMR.Render.layout_compiler import LayoutCompiler
+                    layout_result = LayoutCompiler(
+                        render_args,
+                        engine=engine_name,
+                        engine_config=render_args,
+                    ).compile(
+                        video=video,
+                        events_path=task['danmaku'],
+                        previous_state=layout_state,
+                        work_dir=os.path.dirname(output) or None,
+                    )
+                    layout_state = layout_result.next_state
+                    render_kwargs['render_plan'] = layout_result.render_plan_path
+            target_render = TargetRender(**target_args)
+            status, info = target_render.render_one(
+                video=video,
+                output=output,
+                progress_cb=on_progress,
+                **render_kwargs,
+            )
         except Exception as e:
             status, info = False, e
+        finally:
+            if 'layout_result' in locals() and layout_result is not None:
+                layout_result.cleanup()
         print()   # 进度行换行
 
         if status:

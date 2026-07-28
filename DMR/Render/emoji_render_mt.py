@@ -4,8 +4,9 @@
 
 用法:
     python emoji_render_mt.py <输入.flv> <输入.ass> <输出.mp4>
-        [--workers 4] [--segmul 3] [--vb 8M] [--ab 160K] [--no-hwaccel]
+        [--workers 4] [--chunks-per-worker 3] [--vb 8M] [--ab 160K] [--no-hwaccel]
         [--emoji-font 路径] [--emoji-pack 表情目录] [--emoticon-dir 纯表情目录]
+        [--render-plan LayoutCompiler生成的JSON]
         [--resize 1280x720|0.5]
 
 特性:
@@ -23,6 +24,11 @@ import urllib.parse
 import urllib.request
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+try:
+    from .plan_ass import render_plan_to_ass
+except ImportError:
+    from plan_ass import render_plan_to_ass
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -222,15 +228,21 @@ def render_segment(cfg):
         if key in cache: return cache[key]
         toks = tokenize(text, active_pack)
         has_png = any(k == "png" for k, _ in toks)
-        # 内容宽
+        # 每个 token 只测量/加载一次，排版与实际绘制复用同一个宽度。
+        prepared_tokens = []
         content_w = 0
         for kind, pl in toks:
             if kind == "png":
-                content_w += load_png(pl).width
+                prepared = load_png(pl)
+                token_w = prepared.width
             elif kind == "emoji":
-                content_w += int(ef.getlength(pl) * ef_scale)
+                prepared = None
+                token_w = max(1, int(ef.getlength(pl) * ef_scale))
             else:
-                content_w += int(tf.getlength(pl))
+                prepared = None
+                token_w = max(0, int(tf.getlength(pl)))
+            prepared_tokens.append((kind, pl, prepared, token_w))
+            content_w += token_w
         # 内容相对基线的上下范围:文字 [-asc,+desc];表情居中于 png_center
         ptop = png_center - png_h // 2; pbot = png_center + (png_h - png_h // 2)
         top_txt = max(asc, (-ptop if has_png else 0))
@@ -254,26 +266,26 @@ def render_segment(cfg):
         Hs = top_ext + bot_ext
         spr = Image.new("RGBA", (max(int(total_w), 1), int(Hs)), (0, 0, 0, 0))
         d = ImageDraw.Draw(spr); x = content_x
-        for kind, pl in toks:
+        for kind, pl, prepared, token_w in prepared_tokens:
             if kind == "png":
-                im = load_png(pl)
+                im = prepared
                 spr.alpha_composite(im, (int(x), baseline + ptop))   # 完整贴入,绝不越界裁切
-                x += im.width
+                x += token_w
             elif kind == "emoji":
                 if ef_scale == 1.0:
                     d.text((x, baseline), pl, font=ef, embedded_color=True, anchor="ls")
-                    x += int(ef.getlength(pl))
+                    x += token_w
                 else:   # 位图字体:按原生 strike 渲染后缩放贴入
                     ew = max(1, int(ef.getlength(pl)))
                     tmp = Image.new("RGBA", (ew, e_asc + e_desc), (0, 0, 0, 0))
                     ImageDraw.Draw(tmp).text((0, e_asc), pl, font=ef, embedded_color=True, anchor="ls")
-                    tmp = tmp.resize((max(1, int(ew * ef_scale)), max(1, int((e_asc + e_desc) * ef_scale))), Image.LANCZOS)
+                    tmp = tmp.resize((token_w, max(1, int((e_asc + e_desc) * ef_scale))), Image.LANCZOS)
                     spr.alpha_composite(tmp, (int(x), baseline - int(round(e_asc * ef_scale))))
-                    x += tmp.width
+                    x += token_w
             else:
                 d.text((x, baseline), pl, font=tf, fill=tuple(rgb) + (255,),
                        stroke_width=OUT, stroke_fill=(0, 0, 0, 255), anchor="ls")
-                x += int(tf.getlength(pl))
+                x += token_w
         tbo = baseline + desc   # 文字底(\an1锚点)距精灵顶的偏移,定位用
         if pill:
             # 药丸描边(只描边,中间透明):高=fs+2pv,竖直居中于文字行(与 libass 药丸位置一致)
@@ -361,8 +373,12 @@ def render_segment(cfg):
             for ev in active:
                 sY, sU, sV, A, w, h, tbo, lbo = ev["_spr"]
                 p = (t - ev["s"]) / (ev["e"] - ev["s"])
-                xa = int(round(ev["x0"] + (ev["x1"] - ev["x0"]) * p)) - lbo   # 内容左缘对齐到 \move 的 x
-                ya = int(round(ev["y0"]) - tbo)   # 文字底对齐到 \move 的 y,精灵高度变化不影响文字位置
+                if ev.get("anchor") == "top_left":
+                    xa = int(round(ev["x0"] + (ev["x1"] - ev["x0"]) * p))
+                    ya = int(round(ev["y0"]))
+                else:
+                    xa = int(round(ev["x0"] + (ev["x1"] - ev["x0"]) * p)) - lbo
+                    ya = int(round(ev["y0"]) - tbo)
                 sx0 = max(0, -xa); sy0 = max(0, -ya); dx0 = max(0, xa); dy0 = max(0, ya)
                 cw = min(w - sx0, W - dx0); ch = min(h - sy0, H - dy0)
                 if cw <= 0 or ch <= 0: continue
@@ -650,7 +666,8 @@ def main():
     for t in (FFMPEG, FFPROBE):
         if not check_tool(t):
             log.error("找不到 %s,请确认已安装并加入 PATH(或放到脚本目录)。", t); sys.exit(1)
-    workers = int(opt("--workers", 4)); segmul = int(opt("--segmul", 3))
+    workers = int(opt("--workers", 4))
+    chunks_per_worker = int(opt("--chunks-per-worker", 3))
     vb = opt("--vb", "8M"); ab = opt("--ab", "160K")
     vencoder = opt("--vencoder", "h264_nvenc")
     aencoder = opt("--aencoder", "aac")
@@ -679,6 +696,30 @@ def main():
     import av
     c = av.open(flv); v = c.streams.video[0]
     W, H = v.codec_context.width, v.codec_context.height
+    render_plan_data = None
+    render_plan_duration = 0.0
+    if "--render-plan" in sys.argv:
+        with open(ass, "r", encoding="utf-8") as fp:
+            render_plan_data = json.load(fp)
+        if int(render_plan_data.get("schema", 0)) != 1:
+            log.error("不支持的 RenderPlan schema: %s", render_plan_data.get("schema"))
+            sys.exit(1)
+        try:
+            render_plan_duration = max(
+                0.0,
+                float(render_plan_data.get("duration", 0) or 0),
+            )
+        except (TypeError, ValueError):
+            render_plan_duration = 0.0
+        generated_ass = os.path.join(work, "render_plan.ass")
+        render_plan_to_ass(
+            render_plan_data,
+            generated_ass,
+            include_raster_text=False,
+            width=W,
+            height=H,
+        )
+        ass = generated_ass
     # 输出帧率：--fps 优先；否则取源的标称帧率(guessed_rate，干净的 60)而非 average_rate
     # (直播是可变帧率，average 会算成 62 这种)。配合解码滤镜里 fps 放在 subtitles 之前，
     # 让 libass 在均匀的 CFR 时间轴上逐帧画弹幕 → 滚动弹幕顺滑，且几乎不增加耗时。
@@ -724,6 +765,14 @@ def main():
                 dur = int(d.stdout.strip().splitlines()[-1]) / fps
             except Exception:
                 dur = 0
+    if render_plan_duration > 0:
+        if dur > 0 and abs(render_plan_duration - dur) >= 0.05:
+            log.debug(
+                "使用RenderPlan统一媒体时长: 探测%.3fs -> 计划%.3fs",
+                dur,
+                render_plan_duration,
+            )
+        dur = render_plan_duration
     total = int(dur * fps) if dur else 0
 
     # 输出分辨率(--resize: "宽x高" 或缩放系数);与原分辨率相同则视为不缩放
@@ -745,68 +794,141 @@ def main():
             break
     textfont = resolve_font(fontname, bold)
     out_res = f" 输出{resize_str}" if resize_str else ""
-    log.info("输入: %s %dx%d@%.0ffps 时长%s%s | 并行%d路 段x%d 硬解%s",
-             os.path.basename(flv), W, H, fps, fmt(dur), out_res, workers, segmul, use_hwaccel)
+    total_chunks = workers * chunks_per_worker
+    log.info("输入: %s %dx%d@%.0ffps 时长%s%s | 并行%d路 每路%d块 共%d块 硬解%s",
+             os.path.basename(flv), W, H, fps, fmt(dur), out_res,
+             workers, chunks_per_worker, total_chunks, use_hwaccel)
     log.debug("文字字体: %s%s -> %s | emoji字体: %s | 表情包: %d个",
               fontname, "(粗)" if bold else "", os.path.basename(textfont),
               os.path.basename(emoji_font), len(pack))
 
     header = [l for l in txt if not l.startswith("Dialogue")]
-    dia_textonly = []; emoji_all = []
-    drop_pill = False   # 标记:下一条 libass 药丸行(紧跟刚入精灵的弹幕)要丢弃,改在精灵里重画
-    pending_emoticon = None
-    for l in txt:
-        if l.startswith(EMOTICON_PREFIX):
-            try:
-                meta = json.loads(l[len(EMOTICON_PREFIX):].strip())
-                path = emoticon_store.resolve(meta)
-                name = str(meta.get("name") or "")
-                if name.startswith("[") and name.endswith("]"):
-                    name = name[1:-1]
-                pending_emoticon = {
-                    "meta": meta,
-                    # 空 dict 也有意义：表明这是纯 emoticon，但资源补齐失败，禁止回退默认 pack。
-                    "pack": ({name.lower(): path} if name and path else {}),
-                }
-            except Exception as e:
-                log.warning("忽略损坏的 DMR_EMOTICON 注释: %s", e)
-                pending_emoticon = {"meta": {}, "pack": {}}
-            continue
-        if not l.startswith("Dialogue"):
-            continue
-        event_emoticon = pending_emoticon
+    dia_textonly = []
+    emoji_all = []
+    if render_plan_data is not None:
+        try:
+            for planned in render_plan_data.get("events") or []:
+                if planned.get("mode") != "raster":
+                    continue
+                path_points = planned.get("path") or []
+                if len(path_points) < 2:
+                    continue
+                visual = planned.get("visual") or {}
+                style = visual.get("style") or {}
+                image_pack = {}
+                for token, asset in (visual.get("images") or {}).items():
+                    local_path = asset.get("path")
+                    if not local_path and asset.get("url"):
+                        local_path = emoticon_store.resolve(asset)
+                    name = str(token).strip()
+                    if name.startswith("[") and name.endswith("]"):
+                        name = name[1:-1]
+                    if name and local_path:
+                        image_pack[name.lower()] = local_path
+                color = str(style.get("color", "#FFFFFF")).lstrip("#")
+                if len(color) != 6:
+                    color = "FFFFFF"
+                pill = visual.get("pill")
+                if pill:
+                    pill_color = str(pill.get("color", "#FFC0CB")).lstrip("#")
+                    if len(pill_color) != 6:
+                        pill_color = "FFC0CB"
+                    pill = {
+                        "color": [
+                            int(pill_color[0:2], 16),
+                            int(pill_color[2:4], 16),
+                            int(pill_color[4:6], 16),
+                        ],
+                        "pad": int(pill.get("padding", pill.get("pad", 0)) or 0),
+                        "border": max(1, int(pill.get("border", 2) or 1)),
+                    }
+                emoji_all.append({
+                    "s": float(path_points[0][0]),
+                    "e": float(path_points[-1][0]),
+                    "x0": float(path_points[0][1]),
+                    "y0": float(path_points[0][2]),
+                    "x1": float(path_points[-1][1]),
+                    "text": str(visual.get("text", "")).translate(_STRIP),
+                    "rgb": [
+                        int(color[0:2], 16),
+                        int(color[2:4], 16),
+                        int(color[4:6], 16),
+                    ],
+                    "op": float(style.get("opacity", 0.8) or 0.8),
+                    "pill": pill,
+                    # images 非空却没有解析出本地文件时传空 dict，禁止错误地
+                    # 回退到同名的通用 emoji_pack 图片。
+                    "emoticon_pack": (
+                        image_pack if visual.get("images") else None
+                    ),
+                    "anchor": "top_left",
+                    "bounds": planned.get("bounds") or {},
+                })
+            for line in txt:
+                if not line.startswith("Dialogue"):
+                    continue
+                fields = line.split(",", 9)
+                dia_textonly.append((ass_time(fields[1]), ass_time(fields[2]), line))
+        except Exception as exc:
+            log.error("读取 RenderPlan 失败: %s", exc)
+            sys.exit(1)
+    else:
+        # 旧 ASS 兼容：没有显式计划时，仍从 ASS 注释和 Dialogue 解析图片事件。
+        drop_pill = False
         pending_emoticon = None
-        f = l.split(",", 9)
-        st, et = ass_time(f[1]), ass_time(f[2])
-        effect = f[8].strip() if len(f) > 8 else ""
-        if effect == "pilldraw":          # asswriter 写的 libass 药丸描边行
-            if drop_pill:
-                drop_pill = False; continue          # 属于走精灵的弹幕 → 丢弃(精灵里按真实宽重画)
-            dia_textonly.append((st, et, l)); continue   # 纯文字/普通弹幕的药丸 → 交 libass 画
-        # 普通弹幕用默认 pack；纯 emoticon 只用注释绑定的专属图片，绝不回退根 pack。
-        event_pack = event_emoticon["pack"] if event_emoticon is not None else None
-        active_pack = pack if event_pack is None else event_pack
-        # 只有含 emoji/表情(需 emoji 引擎)的弹幕才走精灵;纯文字(含纯文字药丸)留给 libass
-        if f[3] == "R2L" and has_special(f[9], active_pack):
-            name = f[4].strip() if len(f) > 4 else ""
-            pill = parse_pill(name)
-            body = f[9]; mv = re.search(r"\\move\(([^)]*)\)", body)
-            if mv:
-                x0, y0, x1, y1 = [float(x) for x in mv.group(1).split(",")[:4]]
-                cm = re.search(r"\\1c&H([0-9A-Fa-f]{6})&", body)
-                rgb = [int(cm.group(1)[4:6],16), int(cm.group(1)[2:4],16), int(cm.group(1)[0:2],16)] if cm else [255,255,255]
-                am = re.search(r"\\alpha&H([0-9A-Fa-f]{2})&", body)
-                aa = int(am.group(1),16) if am else 0x39
-                text = re.sub(r"\{[^}]*\}", "", body)
-                text = text.replace("\\N", " ").replace("\\n", " ").replace("\\h", " ").strip().translate(_STRIP)
-                emoji_all.append(dict(
-                    s=st, e=et, x0=x0, y0=y0, x1=x1, text=text,
-                    rgb=rgb, op=(255-aa)/255, pill=pill,
-                    emoticon_pack=event_pack,
-                ))
-                if pill: drop_pill = True   # 这条带药丸 → 紧随其后的 libass 药丸行要丢弃
+        for l in txt:
+            if l.startswith(EMOTICON_PREFIX):
+                try:
+                    meta = json.loads(l[len(EMOTICON_PREFIX):].strip())
+                    path = emoticon_store.resolve(meta)
+                    name = str(meta.get("name") or "")
+                    if name.startswith("[") and name.endswith("]"):
+                        name = name[1:-1]
+                    pending_emoticon = {
+                        "meta": meta,
+                        "pack": ({name.lower(): path} if name and path else {}),
+                    }
+                except Exception as e:
+                    log.warning("忽略损坏的 DMR_EMOTICON 注释: %s", e)
+                    pending_emoticon = {"meta": {}, "pack": {}}
                 continue
-        dia_textonly.append((st, et, l))
+            if not l.startswith("Dialogue"):
+                continue
+            event_emoticon = pending_emoticon
+            pending_emoticon = None
+            f = l.split(",", 9)
+            st, et = ass_time(f[1]), ass_time(f[2])
+            effect = f[8].strip() if len(f) > 8 else ""
+            if effect == "pilldraw":
+                if drop_pill:
+                    drop_pill = False
+                    continue
+                dia_textonly.append((st, et, l))
+                continue
+            event_pack = event_emoticon["pack"] if event_emoticon is not None else None
+            active_pack = pack if event_pack is None else event_pack
+            if f[3] == "R2L" and has_special(f[9], active_pack):
+                name = f[4].strip() if len(f) > 4 else ""
+                pill = parse_pill(name)
+                body = f[9]
+                mv = re.search(r"\\move\(([^)]*)\)", body)
+                if mv:
+                    x0, y0, x1, y1 = [float(x) for x in mv.group(1).split(",")[:4]]
+                    cm = re.search(r"\\1c&H([0-9A-Fa-f]{6})&", body)
+                    rgb = [int(cm.group(1)[4:6],16), int(cm.group(1)[2:4],16), int(cm.group(1)[0:2],16)] if cm else [255,255,255]
+                    am = re.search(r"\\alpha&H([0-9A-Fa-f]{2})&", body)
+                    aa = int(am.group(1),16) if am else 0x39
+                    text = re.sub(r"\{[^}]*\}", "", body)
+                    text = text.replace("\\N", " ").replace("\\n", " ").replace("\\h", " ").strip().translate(_STRIP)
+                    emoji_all.append(dict(
+                        s=st, e=et, x0=x0, y0=y0, x1=x1, text=text,
+                        rgb=rgb, op=(255-aa)/255, pill=pill,
+                        emoticon_pack=event_pack,
+                    ))
+                    if pill:
+                        drop_pill = True
+                    continue
+            dia_textonly.append((st, et, l))
     emoticon_store.save()
     log.debug("特殊弹幕(emoji/表情): %d 行", len(emoji_all))
 
@@ -822,7 +944,7 @@ def main():
             sub_dia.append((ass_time(sf[1]), ass_time(sf[2]), l))
         log.debug("字幕: %d 行", len(sub_dia))
 
-    seg_time = max(20.0, dur / max(1, workers * segmul)) if dur else 120.0
+    seg_time = max(20.0, dur / max(1, workers * chunks_per_worker)) if dur else 120.0
     log.debug("切段中（每段约 %s）...", fmt(seg_time))
     seg_in = ["-fflags", "+genpts+discardcorrupt", "-i", flv, "-map", "0:v"]
     def seg_out(ext):
@@ -1059,15 +1181,23 @@ def main():
         log.error("渲染失败的分段: %s | 中间文件保留在: %s (可重跑;若反复失败,把对应 cfg_NNN.json / 该段报错发我)",
                   bad, work)
         sys.exit(1)
-    if audio_rc != 0 or (audio_proc and not os.path.exists(fixed_audio)):
+    if audio_proc and (
+        audio_rc != 0
+        or not os.path.exists(fixed_audio)
+        or not audio_codec(fixed_audio)
+    ):
         detail = ""
         try:
             detail = open(audio_log_path, encoding="utf-8", errors="replace").read().strip()
         except Exception:
             pass
-        log.error("音频时间轴修复失败%s | 中间文件保留在: %s",
-                  f": {detail[-500:]}" if detail else "", work)
-        sys.exit(1)
+        # A truncated live fragment can expose an AAC stream in its header but
+        # contain no decodable audio packets.  The video is still renderable;
+        # fall back to a video-only result instead of mapping an empty M4A.
+        log.warning("音频时间轴修复未产生有效音轨，改为输出无音轨视频%s",
+                    f": {detail[-500:]}" if detail else "")
+        audio_proc = None
+        fixed_audio = None
 
     dones = sorted(glob.glob(os.path.join(work, "done_*.ts")))
     with open(os.path.join(work, "concat.txt"), "w", encoding="utf-8") as fo:
@@ -1082,14 +1212,17 @@ def main():
             FFMPEG, "-v", "error", "-y",
             "-i", full, "-i", fixed_audio,
             "-map", "0:v", "-map", "1:a:0",
-            "-c", "copy", "-shortest", out_mp4,
+            "-c", "copy", "-shortest",
         ]
     else:
         mux_cmd = [
             FFMPEG, "-v", "error", "-y",
             "-i", full, "-map", "0:v",
-            "-c:v", "copy", out_mp4,
+            "-c:v", "copy",
         ]
+    if render_plan_duration > 0:
+        mux_cmd += ["-t", f"{render_plan_duration:.6f}"]
+    mux_cmd.append(out_mp4)
     r = subprocess.run(mux_cmd)
     dt = time.time() - t0
     if r.returncode == 0:
@@ -1100,6 +1233,7 @@ def main():
                  fmt(dur), fmt(dt), avg, out_mp4)
     else:
         log.error("混音失败,中间文件保留在: %s", work)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

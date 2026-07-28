@@ -7,15 +7,12 @@
 的 font fallback),再乘标定系数,误差约 2~3%。详见 test/width_probe.py。
 """
 import os
+from functools import lru_cache
 
 __all__ = ["TextMeasurer", "pill_path", "make_pill_line", "CALIB"]
 
 # libass 在 Fontsize=S 时的实际字宽 ≈ PIL@S × 0.747(实测,字形无关的线性系数)
 CALIB = 0.747
-
-# 含 emoji 的行不走 libass,由 emoji 精灵引擎按 fs×0.735(emoji_render_mt.SCALE)绘制;
-# 测宽字体建在 fs×0.747 上,所以这类行按比例折算,和精灵实画宽度对齐
-_SPRITE_RATIO = 0.735 / 0.747
 
 # Windows 默认字体回退链(按系统大致回退顺序):正文 → 符号 → 历史字符(楔形等) → emoji
 _WIN_FALLBACK = [
@@ -23,10 +20,10 @@ _WIN_FALLBACK = [
     r"C:\Windows\Fonts\seguihis.ttf",   # Segoe UI Historic(楔形文字等冷门脚本)
     r"C:\Windows\Fonts\seguiemj.ttf",   # Segoe UI Emoji
 ]
-_EMOJI_FONT_BASENAME = 'seguiemj.ttf'   # 精灵引擎默认的 emoji 字体,emoji 码点测宽必须用它
+_EMOJI_FONT_BASENAME = 'seguiemj.ttf'   # Unicode Emoji 测宽优先使用的字体
 
 # ---- 以下两张表与 emoji_render_mt.py 的 is_emoji / _STRIP 保持一致(改任一处要同步另一处) ----
-# 渲染前会被精灵引擎删掉的组合/修饰码点:测宽同样先删,口径对齐
+# 组合/修饰码点不单独占用步进宽，测宽时移除。
 _EMOJI_STRIP = {0x200D: None, 0x20E3: None}                  # ZWJ、keycap 封闭符
 _EMOJI_STRIP.update({c: None for c in range(0xFE00, 0xFE10)})     # 变体选择符
 _EMOJI_STRIP.update({c: None for c in range(0x1F3FB, 0x1F400)})   # 肤色修饰符
@@ -50,6 +47,7 @@ class TextMeasurer:
         self.calib = calib
         self.cache_limit = int(cache_limit)
         self._cache = {}
+        self._font_by_cp = {}
         px = max(1, round(self.fontsize * calib))
 
         # 主字体路径(matplotlib 解析字体名;失败则兜底雅黑)
@@ -72,24 +70,24 @@ class TextMeasurer:
                 continue
             seen.add(ap)
             try:
-                f = ImageFont.truetype(p, px)
+                f = ImageFont.truetype(ap, px)
             except Exception:
                 continue
-            self.chain.append((f, self._coverage(p)))
+            self.chain.append((f, self._coverage(ap)))
         if not self.chain:
             self.chain.append((ImageFont.load_default(), None))
         self._default = self.chain[0][0]
-        # emoji 码点专用字体:精灵引擎用 Segoe UI Emoji 绘制,测宽必须同款。
-        # 不能走回退链——Segoe UI Symbol 也覆盖大量 emoji 码点(Win7 黑白版),
-        # 但字距窄得多(💃: Symbol 1.0em vs Emoji 1.37em),会导致占位偏短、弹幕提前消失
+        # Emoji 码点优先使用 Segoe UI Emoji。不能直接采用回退链中的第一个
+        # 覆盖字体：Segoe UI Symbol 也覆盖大量 Emoji，但字距通常明显更窄。
         self._emoji_font = next(
             (f for f, _ in self.chain
              if os.path.basename(getattr(f, 'path', '') or '').lower() == _EMOJI_FONT_BASENAME),
             None)
 
     @staticmethod
+    @lru_cache(maxsize=32)
     def _coverage(path):
-        """字体覆盖的码点集合;拿不到则返回 None(视为全覆盖)。"""
+        """字体覆盖的码点集合；跨实例缓存，避免每个视频段重复解析字体 cmap。"""
         try:
             from fontTools.ttLib import TTFont
             tt = TTFont(path, fontNumber=0, lazy=True)
@@ -97,54 +95,59 @@ class TextMeasurer:
             for tb in tt["cmap"].tables:
                 cov |= set(tb.cmap.keys())
             tt.close()
-            return cov
+            return frozenset(cov)
         except Exception:
             return None
 
     def _font_for(self, cp):
-        # emoji 码点直选精灵引擎同款字体(见 __init__ 里 _emoji_font 的注释)
-        if self._emoji_font is not None and _is_emoji_cp(cp):
-            return self._emoji_font
-        for f, cov in self.chain:
-            if cov is None or cp in cov:
-                return f
-        return self._default
+        cached = self._font_by_cp.get(cp)
+        if cached is not None:
+            return cached
 
-    def measure(self, text, sprite_bound=True):
-        """预测渲染后的像素宽。
-        sprite_bound=True(默认,R2L 滚动弹幕口径):含 emoji 的行会走精灵引擎、按 0.735 字号绘制,
-        测出的宽按比例折算;False(SC/礼物盒子口径):整行始终由 libass 渲染,不折算。"""
+        # Emoji 码点直选专用字体，避免被更靠前的 Symbol 字体截获。
+        if self._emoji_font is not None and _is_emoji_cp(cp):
+            font = self._emoji_font
+        else:
+            font = next(
+                (candidate for candidate, cov in self.chain if cov is None or cp in cov),
+                self._default,
+            )
+
+        # 常见字符会跨大量弹幕反复出现；缓存选择结果，避免每次重新遍历字体覆盖表。
+        if len(self._font_by_cp) >= 8192:
+            self._font_by_cp.clear()
+        self._font_by_cp[cp] = font
+        return font
+
+    def measure(self, text):
+        """预测 libass 渲染后的像素宽。
+
+        emoji_dmrender 的精灵行由 EmojiWidthMeasurer 测量；这里专注于普通
+        ASS 文字，以及 SC/礼物盒子中的 libass 文字。
+        """
         if not text:
             return 0
-        # 精灵引擎渲染前会删掉 ZWJ/变体选择符/肤色等组合码点,测宽先做同样的删除
+        # 组合/修饰码点在当前渲染链中不单独占用步进宽，测宽时统一移除。
         text = text.translate(_EMOJI_STRIP)
         if not text:
             return 0
-        key = (text, sprite_bound)
-        cached = self._cache.get(key)
+        cached = self._cache.get(text)
         if cached is not None:
             return cached
         total = 0.0
-        has_emoji = False
         i, n = 0, len(text)
         while i < n:                       # 按"连续同字体"分段,整段 getlength
             cp = ord(text[i])
-            if _is_emoji_cp(cp):
-                has_emoji = True
             f = self._font_for(cp)
             j = i + 1
             while j < n and self._font_for(ord(text[j])) is f:
                 j += 1
             total += f.getlength(text[i:j])
             i = j
-        # 含 emoji 的行由精灵引擎按 0.735 字号绘制(而非 libass 的 0.747 口径),按比例折算;
-        # 向上取整,保持"占位不小于实画"的安全方向
-        if sprite_bound and has_emoji:
-            total = total * _SPRITE_RATIO + 1
         w = int(round(total))
         if len(self._cache) >= self.cache_limit:   # 带上限,长直播也不爆内存
             self._cache.clear()
-        self._cache[key] = w
+        self._cache[text] = w
         return w
 
     def _char_w(self, ch):
@@ -176,9 +179,11 @@ class TextMeasurer:
         if not text:
             return text
         text = text.translate(_EMOJI_STRIP)
-        if self.measure(text, sprite_bound=False) <= budget_px:
+        if self.measure(text) <= budget_px:
             return text
-        budget = budget_px - self._char_w(ellipsis)
+        # `ellipsis` may be either a single glyph ("…") or a string ("...").
+        # Measure the complete marker instead of passing it through ord().
+        budget = budget_px - self.measure(ellipsis)
         out, cur_w = '', 0.0
         for ch in text:
             w = self._char_w(ch)

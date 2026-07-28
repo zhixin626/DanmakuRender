@@ -141,9 +141,11 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         ret_msgs = []
         if not self.config['common_event_args'].get('auto_render'):
             return ret_msgs
-        render_args = self.config['render_args']['dmrender']
-        # 配置 dmrender.emoji=true 时改用彩色 emoji 渲染引擎
-        render_mode = 'emoji_dmrender' if render_args.get('emoji') else 'dmrender'
+        render_args = self.config['render_args']['overlay']
+        render_mode = render_args.get('engine', 'dmrender')
+        if render_mode not in ('dmrender', 'emoji_dmrender'):
+            self.logger.warning('未知弹幕渲染后端 %s，回退 dmrender', render_mode)
+            render_mode = 'dmrender'
         if render_args.get('output_name'):
             filename = replace_keywords(render_args['output_name'], video, replace_invalid=True) + \
                     f".{render_args.get('format','mp4')}"
@@ -194,7 +196,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # onLiveEnd 时（下播事件那拍）不必重复跑。
         if group_id in self.ended_dict and clean_trigger != 'onLiveEnd':
             ret_msgs += self._check_for_clean(group_id, trigger='onLiveEnd')
-        self._free_state_memory()
+        ret_msgs += self._free_state_memory()
         return ret_msgs
 
     def _check_for_upload(self, group_id:str):
@@ -503,7 +505,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         src = (self.state_dict[group_id][seg_idx].get('src_video_pre') or {}).get('file')
         info = {
             'flv'  : getattr(src, 'path', None),
-            'ass'  : getattr(src, 'dm_file_id', None),
+            'danmaku': getattr(src, 'dm_file_id', None),
             'vtype': vtype,
             'error': str(message.data if message.data is not None else message.msg),
         }
@@ -663,23 +665,23 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             pass
 
     def _collect_session_data(self, group_id: str):
-        """onLiveEnd 时把礼物统计（读完即删 gifts.jsonl）和开播/下播/时长写进 session_data[group_id]，
+        """onLiveEnd 时从本场分段 JSONL 汇总礼物，并写入开播/下播/时长，
         供上传格式化标题用。"""
-        # 礼物统计：只要 礼物/SC/上舰 任一开启了记录(record.enable)就生成
         da = self.config['download_args'].get('danmaku_args', {})
-        gift_record   = (da.get('gift')      or {}).get('record') or {}
-        sc_record     = (da.get('superchat') or {}).get('record') or {}
-        member_record = (da.get('member')    or {}).get('record') or {}
-        any_record = (gift_record.get('enable', False)
-                      or sc_record.get('enable', False)
-                      or member_record.get('enable', False))
-        if any_record:
+        statistics = da.get('statistics') or {}
+        if statistics.get('enable', False):
             try:
+                jsonl_paths = []
+                for video_state in self.state_dict.get(group_id, []):
+                    source = (video_state.get('src_video_pre') or {}).get('file')
+                    path = getattr(source, 'dm_file_id', None)
+                    if path and str(path).lower().endswith('.jsonl'):
+                        jsonl_paths.append(path)
                 raw_stat = generate_gift_statistics(
-                    jsonl_paths=[str(self.src_path) + '/gifts.jsonl'],
+                    jsonl_paths=jsonl_paths,
                     stat_path=str(self.src_path) + '/gifts_statistics.jsonl',
-                    rank_top=gift_record.get('rank_top_n', 3),
-                    delete_after_process=True,
+                    rank_top=statistics.get('rank_top_n', 3),
+                    event_types=statistics.get('types'),
                 )
                 if raw_stat:
                     names_str = ",".join(
@@ -844,10 +846,17 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.held_tasks = {h: v for h, v in self.held_tasks.items() if v['group_id'] != group_id}
 
     def _free_state_memory(self):
+        ret_msgs = []
         # 正常回收：某场的全部异步工作（渲染/转码/上传/清理/合并）都到终态后释放它。
         for group_id in list(self.ended_dict.keys()):
             if self._group_is_done(group_id):
                 self.logger.info(f'视频组{group_id}处理完成，视频信息已被释放.')
+                ret_msgs.append(PipeMessage(
+                    source=self.name,
+                    target='render',
+                    event='layout_end',
+                    data={'track_key': f'{self.name}:{group_id}'},
+                ))
                 self._free_group(group_id)
 
         # 超时兜底：到不了终态的组（含挂起等人工的）超过 state_timeout_hours 强制回收。
@@ -856,18 +865,36 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         for group_id in list(self.ended_dict.keys()):
             if time.time() - self.ended_dict[group_id] > timeout_h * 3600:
                 self.logger.info(f'视频组{group_id}处理超时（>{timeout_h}h），视频信息将被释放.')
+                ret_msgs.append(PipeMessage(
+                    source=self.name,
+                    target='render',
+                    event='layout_end',
+                    data={'track_key': f'{self.name}:{group_id}'},
+                ))
                 self._free_group(group_id)
+        return ret_msgs
 
     def onExit(self, *args, **kwargs) -> None:
         self.logger.info(f'{self.name}: 任务结束.')
+        group_ids = set(self.state_dict) | set(self.ended_dict) | set(self.session_data)
+        ret_msgs = [
+            PipeMessage(
+                source=self.name,
+                target='render',
+                event='layout_end',
+                data={'track_key': f'{self.name}:{group_id}'},
+            )
+            for group_id in group_ids
+        ]
         # 退出即整体释放：清掉全部 per-group 内存记账（对齐 _free_group 清的那几样）
         self.state_dict.clear()
         self.ended_dict.clear()
         self.session_data.clear()
         self.held_tasks.clear()
-        return PipeMessage(
+        ret_msgs.append(PipeMessage(
             source=self.name,
             target='downloader',
             event='stoptask',
             data=self.name,
-        )
+        ))
+        return ret_msgs

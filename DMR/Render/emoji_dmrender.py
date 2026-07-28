@@ -15,10 +15,14 @@ from DMR.utils import *
 _MT_SCRIPT = abspath(join(dirname(__file__), "emoji_render_mt.py"))
 
 
-def _detect_platform(ass_path):
+def _detect_platform(source_path):
     """从 ASS 头(Title 里的直播URL)判断平台,用于选 emoji_pack 子目录"""
     try:
-        head = open(ass_path, encoding="utf-8").read(2000)
+        head = open(source_path, encoding="utf-8").read(2000)
+        if '"platform":"bilibili"' in head or '"platform": "bilibili"' in head: return "bilibili"
+        if '"platform":"douyin"' in head or '"platform": "douyin"' in head: return "douyin"
+        if '"platform":"douyu"' in head or '"platform": "douyu"' in head: return "douyu"
+        if '"platform":"huya"' in head or '"platform": "huya"' in head: return "huya"
         if "bilibili.com" in head: return "bilibili"
         if "douyin.com" in head: return "douyin"
         if "douyu.com" in head: return "douyu"
@@ -43,7 +47,7 @@ class EmojiDmRender(BaseRender):
                  emoji_pack: str = None,
                  emoji_font: str = None,
                  workers: int = 3,
-                 segmul: int = 3,
+                 chunks_per_worker: int = 3,
                  hwaccel: bool = True,
                  ffmpeg: str = None,
                  debug=False,
@@ -56,7 +60,7 @@ class EmojiDmRender(BaseRender):
         self.emoji_pack = emoji_pack   # 填了就直接用该路径;留空(None)时默认 ./emoji_pack/<平台>
         self.emoji_font = emoji_font
         self.workers = int(workers)
-        self.segmul = int(segmul)
+        self.chunks_per_worker = int(chunks_per_worker)
         self.hwaccel = hwaccel
         self.debug = debug
         self.logger = logging.getLogger(__name__)
@@ -87,9 +91,11 @@ class EmojiDmRender(BaseRender):
     def render_one(self, video: VideoInfo, output: str, progress_cb=None, **kwargs):
         if not exists(video.path):
             raise RuntimeError(f"不存在视频文件 {video.path}，跳过渲染.")
+        render_plan = kwargs.get("render_plan")
         danmaku = kwargs.get("danmaku") or video.dm_file_id
-        if not danmaku or not exists(danmaku):
-            raise RuntimeError(f"不存在弹幕文件 {danmaku}，跳过渲染.")
+        input_path = render_plan or danmaku
+        if not input_path or not exists(input_path):
+            raise RuntimeError(f"不存在渲染输入 {input_path}，跳过渲染.")
 
         valid_output = safe_filename(output)
         if valid_output != output:
@@ -101,14 +107,15 @@ class EmojiDmRender(BaseRender):
         ab = self._arg_value(self.aencoder_args, "-b:a", "160K")
 
         # 表情包路径:配置填了就直接用;没填则默认 ./emoji_pack/<平台>(与下载/输出的 ./ 相对路径风格统一)
-        platform = _detect_platform(danmaku)
+        platform = _detect_platform(getattr(video, "dm_file_id", None) or input_path)
         if self.emoji_pack:
             pack = self.emoji_pack
         else:
             pack = join("./emoji_pack", platform) if platform else "./emoji_pack"
 
-        cmd = [sys.executable, _MT_SCRIPT, video.path, danmaku, output,
-               "--workers", str(self.workers), "--segmul", str(self.segmul),
+        cmd = [sys.executable, _MT_SCRIPT, video.path, input_path, output,
+               "--workers", str(self.workers),
+               "--chunks-per-worker", str(self.chunks_per_worker),
                "--vencoder", self.vencoder, "--aencoder", self.aencoder,
                "--vb", str(vb), "--ab", str(ab)]
         # 与 DmRender 一致：完整透传编码器参数列表。子进程收到 --venc-args/--aenc-args 就用完整列表，
@@ -118,12 +125,16 @@ class EmojiDmRender(BaseRender):
         if self.aencoder_args:
             cmd += ["--aenc-args", json.dumps(list(self.aencoder_args))]
         if isdir(pack):
-            cmd += ["--emoji-pack", pack,
-                    "--emoticon-dir", join(pack, "emoticon")]
+            cmd += ["--emoji-pack", pack]
+        # 平台 emoticon 与本地表情包是两套来源。即使 pack 目录尚不存在，
+        # 也要给平台图片一个可创建、可复用的缓存目录。
+        cmd += ["--emoticon-dir", join(pack, "emoticon")]
         if self.emoji_font:
             cmd += ["--emoji-font", self.emoji_font]
         if self.output_resize:
             cmd += ["--resize", str(self.output_resize)]
+        if render_plan:
+            cmd += ["--render-plan"]
         if not self.hwaccel:
             cmd += ["--no-hwaccel"]
 
