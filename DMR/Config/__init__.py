@@ -114,8 +114,14 @@ class Config():
             taskname = filename_to_taskname(config_path)
             replay_config = {}
 
-            common_args = _replay_config.get('common_event_args')
-            if not common_args: return None
+            # common_event_args 与其它配置块保持相同的三层继承关系：
+            # default.yml -> global.yml -> 单任务配置。任务文件只需要写与全局不同的开关。
+            common_args = merge_dict(
+                self.global_config.get('common_event_args') or {},
+                _replay_config.get('common_event_args') or {},
+            )
+            if not common_args:
+                return None
             replay_config['common_event_args'] = deepcopy(common_args)
 
             global_download_args = self.global_config['download_args']
@@ -141,8 +147,12 @@ class Config():
                             target = upload_arg.get('target', 'bilibili')
                             if not global_upload_args.get(target):
                                 raise ValueError(f'不存在可用的上传目标 {target}.')
-                            upload_config = deepcopy(global_upload_args[target])
-                            upload_config.update(upload_arg)
+                            # 上传配置也递归合并，任务可以只覆盖 cover_args、
+                            # extra_kwargs 等嵌套配置中的个别字段。
+                            upload_config = merge_dict(
+                                deepcopy(global_upload_args[target]),
+                                upload_arg,
+                            )
                             replay_config['upload_args'][upload_file_types].append(upload_config)
 
             if common_args.get('auto_clean'):
@@ -159,8 +169,10 @@ class Config():
                                 continue
                             if not global_clean_args.get(method):
                                 raise ValueError(f'不存在可用的清理方法 {method}.')
-                            clean_config = deepcopy(global_clean_args[method])
-                            clean_config.update(clean_arg)
+                            clean_config = merge_dict(
+                                deepcopy(global_clean_args[method]),
+                                clean_arg,
+                            )
                             replay_config['clean_args'][clean_file_types].append(clean_config)
 
             # merge_args / bark_args：顶层独立配置块（全局默认 + 任务覆盖）

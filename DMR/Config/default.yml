@@ -1,12 +1,15 @@
-# ######################
-# 此文件非必要不修改！
-# ######################
+# 程序内置的完整配置基线，不建议用户直接修改。
+# 配置按 default.yml -> global.yml -> 任务 *.yml 的顺序递归覆盖：
+# - default.yml：列出程序支持的完整结构、默认值和说明；
+# - global.yml：只写这台机器或所有任务共用的覆盖项；
+# - 任务配置：只写主播、平台和流程特有的覆盖项。
+# 字段省略表示继承；显式写 ~ 表示把该字段覆盖为 null；列表会整体替换。
 
-# 第三方工具路径，设置为空将会自动选择
-executable_tools_path: 
-  ffmpeg: "C:/ffmpeg/bin/ffmpeg.exe"
-  ffprobe: "C:/ffmpeg/bin/ffprobe.exe"
-  biliup: "C:/biliup_rs/biliup.exe"
+# 第三方工具路径。留空时自动查找或安装；仅在自动检测不正确时覆盖
+executable_tools_path:
+  ffmpeg: ~
+  ffprobe: ~
+  biliup: ~
 
 # DMR引擎参数
 dmr_engine_args:
@@ -16,9 +19,23 @@ dmr_engine_args:
   # 任务配置文件所在目录（目录下每个 *.yml 即一个任务，global.yml 除外；是否启用看文件内 enable 字段）
   config_path: ./configs
 
-# 下载器核心参数
-downloader_kernel_args:
-  test: ~
+# 下载器插件目前没有独立核心参数，保留空字典供插件初始化
+downloader_kernel_args: {}
+
+# 各任务的流程开关。可在 global.yml 设置公共流程，再由单个任务覆盖
+common_event_args:
+  # 生成带弹幕视频；使用 render_args.overlay
+  auto_render: false
+  # 生成纯净转码视频；使用 render_args.transcode
+  auto_transcode: false
+  # 把任务指定的视频类型交给上传器
+  auto_upload: false
+  # 上传/流程结束后执行任务指定的清理规则
+  auto_clean: false
+  # 同一场直播结束后按 merge_args 合并录制分段
+  auto_merge: false
+  # 已完成或挂起的流程状态在内存中保留多久（小时），防止长期运行无限增长
+  state_timeout_hours: 72
 
 # 默认下载参数
 download_args:
@@ -69,15 +86,40 @@ download_args:
         bili_watch_cookies: .login_info/bili_watch_cookies.json
       # 高级视频录制参数（请确保你明白这些参数的含义后再修改）
       advanced_args:
-        # 默认分辨率，此选项用于在程序无法获取流分辨率时指定默认分辨率用于弹幕录制
+        # 无法从直播流获得分辨率时的兜底值，不会强制缩放实际视频
         default_resolution: [1920, 1080]
-        # 开播检测间隔，每隔这段时间检测一次是否开播
+        # 未开播时的常规检测间隔（秒）
         start_check_interval: 60
-        # 下播检测间隔，在主播下播但是未超过延迟下播时间时使用
+        # 疑似下播、等待 stop_wait_time 期间的检测间隔（秒）
         stop_check_interval: 60
-        # 录制组编号，可用于多任务协同，详情请参考文档
+        # 根据现实时间动态覆盖检测间隔。ranges 按顺序匹配，
+        # 可用于临近常用开播时间时提高检测频率
+        check_policy:
+          enabled: false
+          ranges: []
+          # 示例：
+          # ranges:
+          #   - {start: '19:50', end: '20:10', interval: 10}
+        # 仅在指定时间窗口内录制；空列表表示全天允许
+        record_windows:
+          ranges: []
+          # 示例：[{start: '10:00', end: '17:00'}]
+        # 到达此时刻后把本场直播视为下播；留空表示关闭
+        force_offline_time: ~
+        # 程序启动时发现主播已在播，是否把它视作一场直播的开头
+        trust_onair_at_startup: true
+        # 视频流异常后的重试等待：[初始秒数, 每次递增秒数, 最大秒数]
+        # 也可填写单个数字，表示固定等待
+        restart_interval: [0, 10, 60]
+        # 文件名替换后的最大长度
+        max_fn_length: 80
+        # 小于该体积（MB）的视频与配套 JSONL 会被丢弃；~ 表示不检查
+        min_video_size: 1
+        # 小于该时长（秒）的视频与配套 JSONL 会被丢弃；~ 表示不检查
+        min_video_duration: ~
+        # 录制组编号，可用于多任务协同；留空时每场直播自动生成
         group_id: ~
-        # ffmpeg取流参数(仅ffmpeg下载引擎生效)
+        # ffmpeg 取流参数（仅 ffmpeg 下载引擎生效）
         ffmpeg_stream_args: [ '-rw_timeout','10000000',
                               '-analyzeduration','15000000',
                               '-probesize','50000000',
@@ -88,6 +130,8 @@ download_args:
         ffmpeg_output_args: ~
         # 禁用下载速度慢时自动重启(仅ffmpeg下载引擎生效)
         disable_lowspeed_interrupt: false
+        # pyrequests 录制 B 站时强制使用原始流地址
+        bili_force_origin: true
         # streamlink 额外输入参数
         # 可用参数列表请参考 https://streamlink.github.io/cli.html
         # 一个典型的使用方法是添加一个--twitch-api-header参数，用于取消twitch直播流的广告
@@ -96,15 +140,19 @@ download_args:
           "--twitch-disable-ads",     # 去广告，去掉、跳过嵌入的广告流
           "--twitch-disable-reruns",  # 如果该频道正在重放回放，不打开流
         ]
+        # streamlink 画质名称，留空使用 best
+        streamlink_quality: ~
 
     # ============ 弹幕参数 ============
     danmaku_args:
-      # 是否录制弹幕
+      # 是否连接弹幕服务器并为每段视频生成同名 JSONL
       enable: True
-      # 弹幕录制格式，只能选择ass
-      format: ass
+      # 只记录程序已识别且在此列出的事件类型；未知消息和 raw 永不写入正式文件
+      record_types: [danmaku, gift, superchat, member]
       # 弹幕流选项
       stream_option:
+        # B站弹幕连接使用的 Cookie 文件；留空时按平台默认方式连接
+        bilibili_dm_cookie_path: ~
         # 用于获取抖音弹幕流的cookies，用于特殊情况下录制抖音弹幕(https://github.com/SmallPeaches/DanmakuRender/issues/258)
         # 格式：'__ac_nonce=xxx; __ac_signature=xxx; sessionid=xxx'
         # 特别提醒，使用此方法传入参数会在日志文件中明文显示，如果需要共享日志文件请确保删除了敏感信息！
@@ -112,114 +160,15 @@ download_args:
         douyin_dm_cookies: ~
       # 高级弹幕录制参数（请确保你明白这些参数的含义后再修改）
       advanced_args:
-        # 弹幕延迟补偿(秒)，将弹幕强行提前
-        dm_delay_fixed: 6
         # 弹幕超时自动重启（秒），超过一段时间无弹幕会自动重启弹幕录制，0表示关闭
         dm_auto_restart: 300
-        # 额外弹幕流输入
-        # 部分主播可能同时在平台同时开播，可以用这个同时录制多个直播间的弹幕到一个视频
-        # 应该设置为一个列表（不包括原来录制的房间），例如：['https://live.bilibili.com/123456', 'https://live.bilibili.com/654321']
-        dm_extra_inputs: []
-        # 弹幕文件最小录制时间（秒），小于此录制时间的弹幕文件将被删除
-        # 此功能可用于删除因为录制错误导致的许多空弹幕文件
-        dm_file_min_time: 30
-
-      # —— 普通弹幕 ——
-      danmaku:
-        render:
-          # 是否渲染普通弹幕
-          enable: True
-          # 弹幕上下间距（行距），0-1表示视频高度的倍数，大于1表示像素
-          margin_h: 6
-          # 弹幕左右间距（即弹幕密度，越大越稀），-1表示允许叠加，0-1表示视频宽度的倍数，大于1表示像素
-          margin_w: 0.05
-          # 弹幕占屏幕高度的最大比例（屏幕上半部分有多少用来显示弹幕）
-          dmrate: 0.4
-          # 弹幕字体
-          font: Microsoft YaHei
-          # 弹幕字体大小
-          fontsize: 36
-          # 弹幕距离屏幕顶端的距离（像素）
-          dst: 20
-          # 弹幕滚动速度：走完一屏宽度所需的秒数（越小越快）。全场弹幕同速，长短弹幕不再有快慢差。
-          # 实际存活时间会略长于此值，因为弹幕还要走完自身宽度才完全离场。
-          dmduration: 16
-          # 弹幕不透明度
-          opacity: 0.8
-          # 自适应弹幕大小（把设置的弹幕大小按1080P标准缩放）
-          auto_fontsize: True
-          # 弹幕描边颜色(6位十六进制)
-          outlinecolor: '000000'
-          # 弹幕描边宽度
-          outlinesize: 1.0
-          # 文本模板，使用方法请参考文档，留空(~)按原文显示
-          template: ~
-          # VIP 名单：可写 [uid,...] 或 {uid: 药丸色} 或 [[uid,色],...]，留空不启用
-          vip_lists: ~
-        filter:
-          # 关键字过滤，含任一关键字的弹幕被过滤，例如：[菜, fw]
-          keywords: ~
-          # 用户名过滤，用户名完全相同才过滤，例如：[虎牙小助手, TwitchBot]
-          username: ~
-          # 最大弹幕宽度，超过则过滤。带单位：'100%'=屏幕宽度的百分比(可>100%)、'1920px'=像素、'30char'=字符数；0或~=不限制
-          max_length: 0
-
-      # —— 礼物 ——
-      gift:
-        filter:
-          # 最小礼物价格（人民币元），低于此价格的礼物不渲染；~表示不按价格过滤
-          min_cny: ~
-        render:
-          # 是否渲染礼物框
-          enable: True
-          # 礼物框停留时长（秒）
-          duration: 10
-          # 最新一条礼物框的底边位置（屏幕高度比例，0~1），旧的向上堆叠
-          anchor_y_ratio: 0.88
-          # 礼物框第二行文案模板（第一行固定为用户名）
-          template: '送出{gift_name}({gift_price}{price_unit})x{gift_count}'
-          # 礼物框外观（颜色 #RRGGBB / 不透明度 0~1）
-          box:
-            top_bg: '#F0A8D4'
-            top_opacity: 0.7
-            bot_bg: '#F8C8E8'
-            bot_opacity: 0.7
-            name_color: '#000000'
-            cont_color: '#000000'
-            text_border_color: '#FFFFFF'
-        record:
-          # 是否把礼物记入营收统计(gifts.jsonl)
-          enable: False
-          # 营收榜统计前几名
-          rank_top_n: 3
-
-      # —— 醒目留言 SC ——
-      superchat:
-        render:
-          # 是否渲染 SC
-          enable: True
-          # 最新一条 SC 的底边位置（屏幕高度比例，0~1），旧 SC 向上堆叠
-          # 与礼物框 gift.render.anchor_y_ratio 分开，避免上下重叠
-          anchor_y_ratio: 0.93
-          # SC 框外观（背景/名字色由平台按价格档位决定，这里只控不透明度与描边）
-          top_opacity: 0.7
-          bottom_opacity: 0.3
-          name_border_width: 0
-          content_border_width: 1
-        record:
-          # 是否把 SC 记入营收统计
-          enable: False
-
-      # —— 上舰 / 开通会员 ——（与礼物共用右侧框样式）
-      member:
-        render:
-          # 是否渲染上舰框
-          enable: True
-          # 上舰框第二行文案模板（第一行固定为用户名）
-          template: '开通{member_name}({member_price}元)x{member_count}{member_unit}'
-        record:
-          # 是否把上舰记入营收统计
-          enable: False
+        # 为正确处理分段边界，最近若干秒事件暂存在内存，正常停止会全部写入
+        event_tail_window: 15
+      # 当前进程的本场直播结束时，从分段 JSONL 生成营收统计
+      statistics:
+        enable: False
+        types: [gift, superchat, member]
+        rank_top_n: 3
 
   # 视频下载
   videos:
@@ -272,86 +221,178 @@ download_args:
     # 此参数将直接传入下载引擎，可以用来设置一些特殊的下载参数
     extra_args: []
 
+  # 监视本地目录，把外部程序写入的视频当作录制分段送入后续流程
+  virtual:
+    # 外部视频所在目录
+    input_dir: ~
+    # DMR 接管后的视频输出目录
+    output_dir: ~
+    # 匹配视频文件名的模式
+    video_pattern: ~
+    # 从文件名提取主播、标题和时间的信息
+    info_pattern:
+      name: ~
+      title: ~
+      time_str: ~
+      time_format: ~
+      danmaku: true
+    # 文件出现后等待写入稳定的时间（秒）
+    segment_wait_time: 3
+    # 没有新分段多久后判定一场输入结束（秒）
+    stop_wait_time: 10
+    # 只接收此时间之后的文件；留空表示程序启动时间
+    start_time: ~
+    advanced_video_args:
+      # 小于该体积（MB）的文件不进入后续流程
+      min_video_size: 1
+      # 小于该时长（秒）的文件不进入后续流程
+      min_video_duration: ~
+    # 附加到 VideoInfo 的自定义信息
+    extra_info: ~
+
 # 渲染器核心参数
 render_kernel_args:
-  # 指定同时执行的渲染任务数，默认1
-  # 一般情况下此值不应该超过5（最好是不修改）
+  # 同时执行的渲染/转码任务数。每个 emoji_dmrender 任务内部还会启用 workers 并行，
+  # 因此通常保持 1；显存、CPU 和磁盘足够时再提高
   nrenders: 1
 
 # 渲染器默认参数
 render_args:
-  # 弹幕渲染
-  dmrender:
-    # 渲染输出文件夹，默认为在录制输出文件夹后面加上“弹幕版”
-    output_dir: ~
-    # 渲染文件名称，默认在录制文件后面加上“弹幕版”
-    output_name: ~
-    # 生成的视频文件格式，默认mp4
-    format: mp4
-    # 硬件解码参数，默认由FFmpeg自动判断，如果出现问题可以设为空
-    hwaccel_args: [-hwaccel, auto]
-    # 视频编码器，NVIDIA设置为h264_nvenc，AMD设置为h264_amf，Apple用户设置为h264_videotoolbox，CPU设置为libx264
-    vencoder: h264_nvenc
-    # 视频编码器参数，默认恒定码率15Mbps
-    vencoder_args: [-b:v, 15M]
-    # 音频编码器
-    aencoder: aac
-    # 音频编码器参数，默认恒定码率320Kbps
-    aencoder_args: [-b:a, 320K]
-    # ===== 彩色 emoji / 表情渲染(可选) =====
-    # 设为 true 改用 EmojiDmRender 引擎:libass 烧普通弹幕 + 彩色 emoji/方括号表情贴图(多核并行)。
-    # 注意:此引擎仅支持 nvenc 等接受 nv12 输入的编码器,且暂不支持 output_resize。
-    emoji: false
-    # 表情包目录:[xxx]弹幕表情替换成 目录/xxx.png。
-    # 留空(~)自动用 ./emoji_pack/<平台>(平台从弹幕识别:bilibili/douyin/douyu);也可显式指定如 ./emoji_pack/bilibili
-    emoji_pack: ~
-    # emoji 字体(留空用系统 Segoe UI Emoji);可换 Noto/Twemoji 等 ttf
-    emoji_font: ~
-    # 并行路数(建议4~6)与 段倍率(段数=路数×段倍率,负载均衡)
-    workers: 4
-    segmul: 3
-    # 输出重缩放，会把输出重缩放到指定分辨率，可以设置为'WxH'直接指定输出分辨率，例如'3840x2160'（4K）
-    # 也可以指定为当前视频的大小倍数，例如'1.5'，这样1080P视频将会被放大到2880x1620（这个也符合了B站的4K视频标准）
-    output_resize: ~
-    # 高级渲染参数
-    # 请确保你明白这些参数的含义后再修改
-    advanced_render_args:
-      # 直接定义video filter，这里的{DANMAKU}代表弹幕文件路径
-      # 注意设置filter_complex之后将会禁用fps等其他有关filter的选项
-      filter_complex: subtitles=filename='{DANMAKU}'
-  # 原视频转码
+  # 纯净转码：不读取 JSONL，也不叠加弹幕
   transcode:
-    # 渲染输出文件夹，默认为在录制输出文件夹后面加上“转码后”
+    # 留空时在原视频目录生成“转码后”文件
     output_dir: ~
-    # 渲染文件名称，默认在录制文件后面加上“转码后”
     output_name: ~
-    # 生成的视频文件格式，默认mp4
+    # 输出容器
     format: mp4
-    # 硬件解码参数，默认由FFmpeg自动判断，如果出现问题可以设为空
-    hwaccel_args: [-hwaccel, auto]
-    # 视频编码器，NVIDIA设置为h264_nvenc，AMD设置为h264_amf，Apple用户设置为h264_videotoolbox，CPU设置为libx264
+    # 失败后的重试次数
+    retry: 3
+    # FFmpeg 硬件解码器。auto/true 表示自动；false/~ 表示关闭；
+    # 也可填写 cuda、qsv 等明确名称
+    hwaccel: auto
+    # 视频编码器，例如 h264_nvenc、hevc_nvenc、h264_amf、libx264 或 copy
     vencoder: h264_nvenc
-    # 视频编码器参数，默认恒定码率15Mbps
     vencoder_args: [-b:v, 15M]
-    # 音频编码器
+    # 音频编码器，例如 aac 或 copy
     aencoder: aac
-    # 音频编码器参数，默认恒定码率320Kbps
     aencoder_args: [-b:a, 320K]
-    # 输出重缩放，会把输出重缩放到指定分辨率，可以设置为'WxH'直接指定输出分辨率，例如'3840x2160'（4K）
-    # 也可以指定为当前视频的大小倍数，例如'1.5'，这样1080P视频将会被放大到2880x1620（这个也符合了B站的4K视频标准）
-    output_resize: 1.5
-    # 高级渲染参数
-    # 请确保你明白这些参数的含义后再修改
-    advanced_render_args: ~
-  # 自定义ffmpeg调用
-  rawffmpeg:
-    # 输出文件类型，可选src_video或者dm_video
-    output_dtype: ~
-    # 命令行参数，可以使用关键字替换
-    # 为保证安全调用，请使用参数列表的形式，例如：['{FFMPEG}', '-i', '{SRC_VIDEO}', '-c', 'copy', '{OUTPUT}']
-    cmds: ~
+    # 输出尺寸：~ 保持原尺寸；1.5 表示按比例缩放；也可写 3840x2160
+    output_resize: ~
 
-# 上传器核心参数
+  # 弹幕叠加：先由 LayoutCompiler 把 JSONL 编译成渲染计划，再交给渲染引擎
+  overlay:
+    # dmrender：纯 libass，适合纯文字；emoji_dmrender：支持 Unicode/内联/平台表情
+    engine: dmrender
+    # 留空时在原视频目录生成“弹幕版”文件
+    output_dir: ~
+    output_name: ~
+    format: mp4
+    retry: 3
+    hwaccel: auto
+    vencoder: h264_nvenc
+    vencoder_args: [-b:v, 15M]
+    aencoder: aac
+    aencoder_args: [-b:a, 320K]
+    # ~ 保持原尺寸；数字表示缩放倍率；WxH 表示目标分辨率
+    output_resize: ~
+
+    # 以下四项只供 emoji_dmrender 使用
+    # 表情包目录；留空时按 JSONL 平台使用 ./emoji_pack/<platform>
+    emoji_pack: ~
+    # Pillow 绘制表情弹幕使用的字体；留空时自动选择
+    emoji_font: ~
+    # 并行渲染进程数
+    workers: 3
+    # 每个进程再切多少段；总分段数 = workers × chunks_per_worker
+    chunks_per_worker: 3
+
+    # 参与布局和渲染的事件。未列出的事件仍保留在 JSONL，但不会进入 RenderPlan
+    include_events: [danmaku, gift, superchat, member]
+
+    # 普通滚动弹幕自身的文字、过滤和 VIP 格式
+    danmaku:
+      font: Microsoft YaHei
+      # 字号为视频像素口径
+      fontsize: 36
+      # 文字不透明度，范围 0~1
+      opacity: 0.8
+      outline_color: '#000000'
+      outline_size: 1px
+      # VIP 用户 UID 映射；值留空时使用程序默认 VIP 格式
+      # 示例：{'123456': ~}
+      vip_users: ~
+      # 包含任一关键词/用户名完全匹配时过滤；~ 表示不启用
+      filter_keywords: ~
+      filter_users: ~
+      # 最大弹幕宽度：0/~ 不限制；支持 60char、1920px、100%
+      max_width: 0
+
+    # 礼物事件自身的内容、持续时间和药丸外观
+    gift:
+      # 完成滑入后停留的秒数；进入/退出动画时长由程序内部统一控制
+      duration: 10
+      # 按人民币总价过滤，低于该值不渲染；~ 表示不过滤
+      min_price_cny: ~
+      template: '送出 {gift_name}{gift_count_suffix}'
+      top_opacity: 0.7
+      bottom_opacity: 0.3
+      corner_radius: 40px
+      box_border_width: 1px
+      box_border_opacity: 0.45
+      name_border_width: 0px
+      content_border_width: 1px
+
+    # SC 停留时长由事件价格对应的平台持续时间决定，这里只配置外观
+    superchat:
+      top_opacity: 0.7
+      bottom_opacity: 0.3
+      corner_radius: 40px
+      box_border_width: 1px
+      box_border_opacity: 0.45
+      name_border_width: 0px
+      content_border_width: 1px
+
+    # 舰长/会员事件自身的内容、持续时间和药丸外观
+    member:
+      duration: 10
+      template: '开通 {member_name}{member_count_suffix}'
+      top_opacity: 0.7
+      bottom_opacity: 0.3
+      corner_radius: 40px
+      box_border_width: 1px
+      box_border_opacity: 0.45
+      name_border_width: 0px
+      content_border_width: 1px
+
+    # R2L 轨道：目前只承载 danmaku。它位于两侧药丸的上层
+    r2l:
+      # 一条弹幕从屏幕右侧完全移动到左侧所需秒数
+      duration: 8
+      # 从 margin_top 以下可供 R2L 使用的垂直比例，范围 0~1
+      vertical_ratio: 0.3
+      margin_top: 10px
+      # 相邻轨道的垂直空隙
+      vertical_gap: 10px
+      # 前后弹幕碰撞计算要求的最小水平空隙
+      horizontal_gap: 15px
+
+    # 左侧药丸轨道：目前只承载 superchat
+    slide_left:
+      # 只接受百分比或像素，例如 25% / 270px
+      width: 18%
+      margin_left: 10px
+      margin_bottom: 10px
+      # 稳定停留时相邻药丸之间的空隙
+      vertical_gap: 10px
+
+    # 右侧药丸轨道：目前承载 gift 和 member
+    slide_right:
+      # 只接受百分比或像素，例如 25% / 270px
+      width: 18%
+      margin_right: 10px
+      margin_bottom: 10px
+      vertical_gap: 10px
+
 uploader_kernel_args:
   # 指定同时执行的上传任务数，默认1
   nuploaders: 1
@@ -360,7 +401,7 @@ uploader_kernel_args:
 upload_args:
   # 上传到B站
   bilibili:
-    # 上传引擎，目前只支持biliuprs
+    # 上传引擎：biliuprs（命令行）或 biliwebapi（网页接口，支持合集和仅记录元数据）
     engine: biliuprs
     # 上传账号名称，程序依靠这个来识别不同的账号，如果打算传不同账号就要设置不同的名称
     account: bilibili
@@ -391,6 +432,15 @@ upload_args:
     tid: 65
     # 封面，指向本地文件地址
     cover: ''
+    # 动态生成封面。任务配置只需覆盖主播名、颜色等不同字段
+    cover_args:
+      is_render_cover: false
+      name: '{STREAMER.NAME}'
+      name_color: '#FFFFFF'
+      time_template: '{stime.month}月{stime.day}日'
+      is_extract_frame: true
+      ratio: 16/9
+      sample_count: 10
     # 标题，可以使用关键字替换
     # 默认的例子：[飞天狙想要努力变胖/直播回放] 晚上七点半比赛 2023年2月24日 （带弹幕版）
     title: '[{STREAMER.NAME}/直播回放] {TITLE} {CTIME.YEAR}年{CTIME.MONTH:02d}月{CTIME.DAY:02d}日'
@@ -416,6 +466,20 @@ upload_args:
     no_reprint: 1
     # 是否尽自己可见? 0-否 1-是
     is_only_self: 0
+    # 以下参数主要由 biliwebapi 使用
+    # 跳过真实上传，只生成/更新本地稿件元数据；适合先合并、后统一上传的流程
+    skip_upload: false
+    # 是否把稿件信息写入本地 metadata 记录
+    record_metadata: false
+    # 是否把新稿件加入指定合集
+    add_to_list: false
+    season_id: ~
+    # 按天或按月查找历史稿件并追加分P；可选 daily / monthly / ~
+    auto_append_period: ~
+    # 免打扰参数
+    no_disturbance: 0
+    # biliwebapi 透传字段，例如 watermark.state
+    extra_kwargs: {}
   
   # 上传到YouTube
   # 此功能使用较复杂，细节请参考文档
@@ -489,6 +553,11 @@ upload_args:
     watermark_position: 3   # 水印位置 0-3
     watermark_signature: false
     cover: ''
+    # 可从视频抽帧并生成封面；任务中的嵌套字段会递归覆盖
+    cover_args:
+      is_extract_frame: true
+      ratio: 16/9
+      sample_count: 10
     tag: []
     dynamic: ''
     title: '[{STREAMER.NAME}/直播回放] {TITLE} {CTIME.YEAR}年{CTIME.MONTH:02d}月{CTIME.DAY:02d}日'
@@ -515,9 +584,13 @@ upload_args:
 
 # 清理器核心参数
 cleaner_kernel_args:
-  test: True
+  # 程序启动时恢复上次异常退出后仍未完成的延迟清理任务
+  resume_pending: true
 
 # 清理器默认参数
+# 这里定义“清理方法”的公共参数；任务配置再以文件类型为键选择 method。
+# 任务清理条目可选 trigger: onRenderEnd / onUploadEnd / onMergeEnd / onLiveEnd；
+# 不写时程序根据已启用流程自动选择最后一个消费阶段。
 clean_args:
   # 移动文件
   move:
@@ -540,6 +613,11 @@ clean_args:
     w_srcpre: True
   # 删除文件
   delete:
+    delay: 172800
+    w_srcfile: False
+    w_srcpre: True
+  # 移入系统回收站，可恢复；任务配置中的 method 写 send2trash
+  send2trash:
     delay: 172800
     w_srcfile: False
     w_srcpre: True
@@ -576,6 +654,9 @@ merge_args:
   # 合并失败的重试次数（用尽后挂起转入 WebUI 人工处理队列）
   retry: 3
 
+# 合并器插件目前没有独立核心参数
+merger_kernel_args: {}
+
 # Bark 推送通知参数（可选）
 bark_args:
   # 是否开启 Bark 推送，默认关闭
@@ -584,7 +665,15 @@ bark_args:
   sound: birdsong
 
 webservice_kernel_args:
-  web_api: True
+  # 是否启动 WebUI/API
+  web_api: true
+  # 监听地址。0.0.0.0 允许局域网访问；只允许本机时使用 127.0.0.1
+  host: 127.0.0.1
+  port: 5000
+  # 是否要求登录。开放到局域网时建议设为 true 并修改账号密码
+  force_login: true
+  username: admin
+  password: admin
   # 打开文件夹用的 AutoHotkey 脚本路径（复用资源管理器窗口）；留空则用系统默认方式打开
   folder_opener_ahk: ~
   # AutoHotkey 可执行程序路径，留空自动探测
