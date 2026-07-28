@@ -2,120 +2,115 @@ import json
 import os
 from collections import Counter
 from datetime import datetime
-from send2trash import send2trash
-def save_gift_to_jsonl(dm, file_path: str):
+
+
+REVENUE_EVENT_TYPES = {"gift", "superchat", "member"}
+
+
+def _number(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def generate_gift_statistics(
+    jsonl_paths,
+    stat_path,
+    start_time=None,
+    rank_top=3,
+    event_types=None,
+):
+    """从当前直播的分段事件 JSONL 汇总礼物、SC 和会员数据。
+
+    输入文件仍属于对应视频分段，不会在统计后删除；统计结果是独立的派生文件。
     """
-    将礼物弹幕信息保存至指定的 JSONL 文件。
-    :param dm: 传入的礼物弹幕对象 (GiftDanmaku)
-    :param file_path: 目标文件路径 (如 "./test文件/gifts.jsonl")
-    """
-    # 1. 确保目标文件夹存在 (Ensure directory exists)
-    directory = os.path.dirname(file_path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
+    selected_types = {
+        str(value).lower() for value in (event_types or REVENUE_EVENT_TYPES)
+    } & REVENUE_EVENT_TYPES
+    entries = []
 
-    # 弹幕类是纯数据，统计的"名字/数量"在这里按类型归一（醒目留言/舰长/礼物各取各的字段）
-    dtype = getattr(dm, 'dtype', 'gift')
-    if dtype == 'superchat':
-        gift_name, count = "醒目留言", 1
-    elif dtype == 'member':
-        gift_name = getattr(dm, 'member_name', '')
-        count     = getattr(dm, 'member_count', 1)
-    else:
-        gift_name = getattr(dm, 'gift_name', '礼物')
-        count     = getattr(dm, 'gift_count', 1)
-    gift_data = {
-        "dtype"          : dtype,
-        "uname"          : getattr(dm, 'uname', '用户'),
-        "gift_name"      : gift_name,
-        "count"          : count,
-        "total_price_cny": getattr(dm, 'price_cny', 0.0),
-    }
+    for path in dict.fromkeys(jsonl_paths or []):
+        if not path or not os.path.isfile(path):
+            continue
+        with open(path, "r", encoding="utf-8") as fp:
+            lines = fp.readlines()
+            last_content_index = max(
+                (index for index, line in enumerate(lines) if line.strip()),
+                default=-1,
+            )
+            for index, raw_line in enumerate(lines):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    # 进程被强杀时，只忽略文件末尾可能残留的半行。
+                    if index == last_content_index:
+                        break
+                    raise
+                if data.get("type") in selected_types:
+                    entries.append(data)
 
-    # 3. 写入文件 (Append mode)
-    # open会创建file_path如果不存在
-    with open(file_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(gift_data, ensure_ascii=False) + "\n")
-
-def generate_gift_statistics(jsonl_paths, stat_path, start_time=None, rank_top=3, delete_after_process=True):
-    """
-    :param start_time: 传入 datetime 对象，作为统计结果的时间戳。如果为 None 则用当前时间。
-    """
-    all_gifts = []
-
-    # 1. 简单的读取逻辑 (Simple Read)
-    for path in jsonl_paths:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        all_gifts.append(json.loads(line))
-
-    if not all_gifts:
+    if not entries:
         return None
 
-    # 2. 分类统计
-    gift_entries   = [g for g in all_gifts if g.get("dtype", "gift") == "gift"]
-    sc_entries     = [g for g in all_gifts if g.get("dtype") == "superchat"]
-    member_entries = [g for g in all_gifts if g.get("dtype") == "member"]
+    gift_entries = [item for item in entries if item["type"] == "gift"]
+    sc_entries = [item for item in entries if item["type"] == "superchat"]
+    member_entries = [item for item in entries if item["type"] == "member"]
 
-    gifts_revenue  = sum((g.get("total_price_cny") or 0) for g in gift_entries)
-    sc_revenue     = sum((g.get("total_price_cny") or 0) for g in sc_entries)
-    member_revenue = sum((g.get("total_price_cny") or 0) for g in member_entries)
-    total_revenue  = gifts_revenue + sc_revenue + member_revenue
-    num_of_sc      = len(sc_entries)
-    num_of_gifters = len({g["uname"] for g in gift_entries})
-    _member_counts = Counter(g.get("gift_name", "未知") for g in member_entries)
-    member_info    = ",".join(f"{count}个{name}" for name, count in _member_counts.items()) if _member_counts else "无"
+    gifts_revenue = sum(_number(item.get("price_cny")) for item in gift_entries)
+    sc_revenue = sum(_number(item.get("price_cny")) for item in sc_entries)
+    member_revenue = sum(_number(item.get("price_cny")) for item in member_entries)
+    total_revenue = gifts_revenue + sc_revenue + member_revenue
+    num_of_sc = len(sc_entries)
+    num_of_gifters = len({item.get("uname", "") for item in gift_entries})
 
-    # 营收汇总一句话：礼物+SC+舰长=总计，没有的类型（对应 entries 为空）就不写那一段；
-    # 只有一段时不再补"=总计"（此时总计和那一段本就相等）
-    _revenue_parts = []
+    member_counts = Counter()
+    for item in member_entries:
+        name = item.get("member_name") or "未知"
+        member_counts[name] += _number(item.get("member_count")) or 1
+    member_info = (
+        ",".join(f"{count:g}个{name}" for name, count in member_counts.items())
+        if member_counts
+        else "无"
+    )
+
+    revenue_parts = []
     if gift_entries:
-        _revenue_parts.append(f"{round(gifts_revenue, 2)}元({num_of_gifters}人)")
+        revenue_parts.append(f"{round(gifts_revenue, 2):g}元({num_of_gifters}人)")
     if sc_entries:
-        _revenue_parts.append(f"{round(sc_revenue, 2)}元({num_of_sc}条SC)")
+        revenue_parts.append(f"{round(sc_revenue, 2):g}元({num_of_sc}条SC)")
     if member_entries:
-        _revenue_parts.append(f"{round(member_revenue, 2)}元({member_info})")
-    revenue_summary = "+".join(_revenue_parts)
-    if len(_revenue_parts) > 1:
-        revenue_summary += f"={round(total_revenue, 2)}元"
+        revenue_parts.append(f"{round(member_revenue, 2):g}元({member_info})")
+    revenue_summary = "+".join(revenue_parts)
+    if len(revenue_parts) > 1:
+        revenue_summary += f"={round(total_revenue, 2):g}元"
 
-    # 所有人的总消费（礼物 + SC 合并计算排行）
     user_totals = Counter()
-    for g in all_gifts:
-        user_totals[g["uname"]] += (g.get("total_price_cny") or 0)
-
+    for item in entries:
+        user_totals[item.get("uname") or "未知"] += _number(item.get("price_cny"))
     top_ranking = [
         {"name": name, "total_value": round(price, 2)}
-        for name, price in user_totals.most_common(rank_top)
+        for name, price in user_totals.most_common(int(rank_top))
     ]
 
-    report_time = start_time if start_time else datetime.now()
-
+    report_time = start_time or datetime.now()
     stat_entry = {
-        "timestamp"      : report_time.strftime("%Y-%m-%d %H:%M:%S"),
-        "gifts_revenue"  : round(gifts_revenue, 2),
-        "num_of_gifters" : num_of_gifters,
-        "sc_revenue"     : round(sc_revenue, 2),
-        "num_of_sc"      : num_of_sc,
-        "member_revenue" : round(member_revenue, 2),
-        "member_info"    : member_info,
-        "total_revenue"  : round(total_revenue, 2),
+        "timestamp": report_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "gifts_revenue": round(gifts_revenue, 2),
+        "num_of_gifters": num_of_gifters,
+        "sc_revenue": round(sc_revenue, 2),
+        "num_of_sc": num_of_sc,
+        "member_revenue": round(member_revenue, 2),
+        "member_info": member_info,
+        "total_revenue": round(total_revenue, 2),
         "revenue_summary": revenue_summary,
-        "top_ranking"    : top_ranking,
+        "top_ranking": top_ranking,
     }
 
-    # 4. 写入文件 (Write to file)
-    os.makedirs(os.path.dirname(stat_path), exist_ok=True)
-    with open(stat_path, "a", encoding="utf-8") as f:
-        f.write("\n" + json.dumps(stat_entry, ensure_ascii=False))
-
-    # 5. 清理文件 (Cleanup)
-    if delete_after_process:
-        for path in jsonl_paths:
-            if os.path.exists(path):
-                send2trash(path)
-
-    # 返回这个字典，方便你在外部直接使用数据 (Return for external use)
+    os.makedirs(os.path.dirname(stat_path) or ".", exist_ok=True)
+    with open(stat_path, "a", encoding="utf-8") as fp:
+        fp.write(json.dumps(stat_entry, ensure_ascii=False) + "\n")
     return stat_entry

@@ -132,6 +132,7 @@ def guess_gift_fields(f):
         'unit_coin':  unit_coin,
         'total_coin': total_coin,
         'battery':    unit_coin / 100,    # 单价 → 电池
+        'unit_price_cny': unit_coin / 1000,  # 单价 → 人民币元
         'price_cny':  total_coin / 1000,  # 本条总额 → 元
         'coin_type':  f.get('10.8'),
         'tid':        f.get('10.9'),
@@ -322,7 +323,7 @@ class Bilibili(DMAPI):
                     unit        = payload.get('unit', '月')            # '月'，或盲盒/续费的 '*8天'
                     price       = (payload.get('price') or 0) / 1000   # 金瓜子 → 元（198000→198, 52800→52.8）
                     action      = '续费' if payload.get('op_type') == 2 else '开通'   # op_type: 1=开通, 2=续费
-                    text = f"{action}{member_name}({price:g}元)×{num}{unit}"
+                    text = f"{action} {member_name}({price:g}元)×{num}{unit}"
                     msgs.append(MemberDanmaku(
                         uname=uname, uid=payload.get('uid', ''), content=text, text=text,
                         member_name=member_name, member_price=price, member_count=num,
@@ -335,11 +336,13 @@ class Bilibili(DMAPI):
                     num = payload.get('num', 0)
                     battery = payload.get('price', 0) / 100       # 金瓜子单价 → 电池(1电池=100金瓜子)
                     total_coin = payload.get('total_coin') or (payload.get('price', 0) * num) or 0
-                    text = f"送出{gift_name}({battery:g}电池)x{num}"
+                    text = f"送出 {gift_name}({battery:g}电池)x{num}"
                     msgs.append(GiftDanmaku(
                         uname=uname, uid=payload.get('sender_uinfo', {}).get('uid') or payload.get('uid', ''),
                         content=text, text=text, gift_name=gift_name, gift_count=num,
-                        gift_price=battery, price_unit='电池', price_cny=total_coin / 1000,
+                        gift_price=battery, price_unit='电池',
+                        unit_price_cny=payload.get('price', 0) / 1000,
+                        price_cny=total_coin / 1000,
                         color='d9a6c4',
                         timestamp=payload.get('timestamp') or payload.get('ts') or datetime.now().timestamp(), raw=j))
 
@@ -354,6 +357,7 @@ class Bilibili(DMAPI):
                         content=text, text=text,
                         gift_name=gift_name, gift_count=num,
                         gift_price=g['battery'], price_unit='电池',
+                        unit_price_cny=g['unit_price_cny'],
                         price_cny=g['price_cny'],   # 用本条总额算，不用连击累计额(会重复计数)
                         color='d9a6c4', face_url=g['face_url'],
                         timestamp=g['timestamp'] or datetime.now().timestamp(), raw=j))

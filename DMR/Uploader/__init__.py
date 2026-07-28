@@ -71,10 +71,7 @@ class Uploader():
                 # Re-submit
                 task['status'] = 'waiting'
                 self.upload_tasks[task['uuid']] = task
-                if task.get('stream_queue'):
-                    threading.Thread(target=self._upload_subprocess, args=(task,), daemon=True).start()
-                else:
-                    self.upload_executors.submit(self._upload_subprocess, task)
+                self.upload_executors.submit(self._upload_subprocess, task)
                 return True
             return False
 
@@ -146,10 +143,6 @@ class Uploader():
             # 这里的msg是liveevents里checkforupload里构造的upload_msg
             # 这里的config是 upload_msg 里的 data
             config = msg.data
-            file = config.get('files')[0]
-            stream_queue = None
-            if hasattr(file, 'stream_queue') and file.stream_queue is not None:
-                stream_queue = file.stream_queue
             task = {
                 'uuid': uuid(),
                 'source': msg.source,
@@ -158,15 +151,11 @@ class Uploader():
                 'engine': config.get('engine', 'biliuprs'),
                 'args': config.get('args', {}),
                 'files': config.get('files'),
-                'stream_queue': stream_queue,
                 'config': config, # task里的config是 upload_msg 里的 data
                 'status': 'waiting',
             }
             self.upload_tasks[task['uuid']] = task
-            if stream_queue:
-                threading.Thread(target=self._upload_subprocess, args=(task,), daemon=True).start()
-            else:
-                self.upload_executors.submit(self._upload_subprocess, task)
+            self.upload_executors.submit(self._upload_subprocess, task)
 
     def _pipeSend(self, event, msg, target='engine', request_id=None, dtype=None, data=None, **kwargs):
         if self.send_queue:
@@ -187,8 +176,6 @@ class Uploader():
             self.upload_tasks.pop(task['uuid'], None)
             if status == 'cancelled':
                 # 手动停止：和失败一样挂到人工处理队列（可重试），故带上 config/extra 让 WebUI 填充标题简介
-                if task.get('stream_queue'):
-                    task['stream_queue'] = None
                 self._pipeSend(
                     event='error',
                     msg=f"上传已被手动停止: {[f.path for f in task['files']]}",
@@ -199,8 +186,6 @@ class Uploader():
                 )
             elif status == 'error':
                 # 上传失败已交由 liveevents 挂起转人工（见 onUploadError），不再留存 failed_tasks
-                if task.get('stream_queue'):
-                    task['stream_queue'] = None
                 self._pipeSend(
                     event='error',
                     msg=f"上传视频 {[f.path for f in task['files']]} 时出现错误:{desc}",
@@ -269,10 +254,7 @@ class Uploader():
                 return
 
             files = task['files']
-            stream_queue = task.get('stream_queue', None)
             retry = upload_args.get('retry', 0)
-            if stream_queue:
-                retry = 0       # 流式上传无法重试
             status = info = None
             extra = None        # 引擎失败时可能返回的第三元素（如 biliwebapi 带回生成的封面路径）
 
@@ -282,18 +264,12 @@ class Uploader():
 
             while retry >= 0:
                 try:
-                    if stream_queue:
-                        self.logger.info(
-                            f"正在将同步投稿任务交给 {task['engine']} 处理: "
-                            f"{files[0].title} (账号: {upload_args.get('account')})"
-                        )
-                    else:
-                        self.logger.info(
-                            f"正在将投稿任务交给 {task['engine']} 处理: "
-                            f"{[f.path for f in files]} (账号: {upload_args.get('account')})"
-                        )
+                    self.logger.info(
+                        f"正在将投稿任务交给 {task['engine']} 处理: "
+                        f"{[f.path for f in files]} (账号: {upload_args.get('account')})"
+                    )
                     # logging.debug(task)
-                    res = target_uploader.upload(files=files, stream_queue=stream_queue,
+                    res = target_uploader.upload(files=files,
                                                  session=task['config'].get('session'),
                                                  output_dir=task['config'].get('output_dir'),
                                                  progress_cb=on_progress,

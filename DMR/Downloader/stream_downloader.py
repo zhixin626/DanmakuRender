@@ -71,7 +71,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         danmaku_args = danmaku_args if danmaku_args else {}
         self.danmaku_args = danmaku_args
         self.danmaku = danmaku_args.get('enable', True)
-        self.dm_format = danmaku_args.get('format', 'ass')
+        self.dm_format = 'jsonl'
 
         self.stoped = True
         # WebUI 只读取这些单调时钟截止点来显示倒计时；不会因此增加平台请求。
@@ -104,19 +104,24 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             )
             self.send_queue.put(msg)
 
-    def stable_callback(self, time_error):
-        if hasattr(self, 'dmw') and self.dmw:
-            self.dmw.time_fix(time_error)
-
-    def segment_callback(self, filename:str):
+    def segment_callback(self, filename: str, next_segment_start_time: float = None):
         if self.room_info is None or not exists(filename):
             self.logger.debug(f'No video file {filename}')
             return
 
-        duration = datetime.now().timestamp()-self.segment_start_time.timestamp()
-        # 如果视频时长小于60秒，尝试使用ffprobe获取视频时长
-        if duration < 60:
-            duration = max(duration, FFprobe.get_duration(filename))
+        callback_time = time.time()
+        wall_duration = callback_time - self.segment_start_time.timestamp()
+        probed_duration = FFprobe.get_duration(filename)
+        # 0 秒同样是无效探测结果；使用现实经过时间兜底，避免把已录制的
+        # FLV 误判为短视频并连同 JSONL 一起删除。
+        duration = probed_duration if probed_duration > 0 else wall_duration
+        # 能由下载引擎在“新文件打开”瞬间上报时优先用它；否则用媒体时长反推，
+        # 避免 streamgears 的轮询延迟（最多约 10 秒）污染 JSONL 分段边界。
+        if next_segment_start_time is None:
+            next_segment_start_time = (
+                self.segment_start_time.timestamp() + duration
+                if duration >= 0 else callback_time
+            )
 
         video_info = VideoInfo(
             path=filename,
@@ -124,6 +129,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             dtype='src_video',
             group_id=self.sess_id,
             segment_id=self.segment_id,
+            segment_start_time=self.segment_start_time,
             size=os.path.getsize(filename),
             ctime=self.segment_start_time,
             duration=duration,
@@ -147,7 +153,11 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
         if self.danmaku:
             newdmfile = splitext(newfile)[0]+'.'+self.dm_format
-            self.dmw.split(newdmfile)
+            newdmfile = self.dmw.split(
+                newdmfile,
+                next_segment_start_time=next_segment_start_time,
+                open_next=not self.stoped,
+            ) or newdmfile
         else:
             newdmfile = None
 
@@ -168,14 +178,14 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 os.remove(video_info.path)
             if video_info.dm_file_id and exists(video_info.dm_file_id):
                 os.remove(video_info.dm_file_id)
-            self.segment_start_time = datetime.now()
+            self.segment_start_time = datetime.fromtimestamp(next_segment_start_time)
             return
 
         self._pipeSend(event='livesegment', msg=f'视频分段 {newfile} 录制完成.', target=f'replay/{self.taskname}', dtype='VideoInfo', data=video_info)
         new_room_info = retry_safe(self.liveapi.GetRoomInfo)
         if new_room_info:
             self.room_info = new_room_info
-        self.segment_start_time = datetime.now()
+        self.segment_start_time = datetime.fromtimestamp(next_segment_start_time)
         self.segment_id += 1
 
     def start_once(self):
@@ -252,7 +262,10 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self.dmw = None
 
         def danmaku_thread():
-            self.dmw.start(self_segment=not self.video)
+            self.dmw.start(
+                self_segment=not self.video,
+                segment_start_time=self.segment_start_time.timestamp(),
+            )
 
         def video_thread():
             self.downloader.start()
@@ -262,7 +275,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
         if self.danmaku:
             description = f'{self.taskname}的录播弹幕文件, {self.url}, Powered by DanmakuRender: https://github.com/SmallPeaches/DanmakuRender.'
-            danmu_output = join(self.output_dir, f'[正在录制]{self.taskname}-{time.strftime("%Y%m%d-%H%M%S",time.localtime())}-Part%03d.ass')
+            danmu_output = join(self.output_dir, f'[正在录制]{self.taskname}-{time.strftime("%Y%m%d-%H%M%S",time.localtime())}-Part%03d.jsonl')
             self.dmw = DanmakuDownloader(self.url,
                                      danmu_output,
                                      self.segment,
@@ -270,7 +283,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                                      width=self.width,
                                      height=self.height,
                                      danmaku_args=self.danmaku_args)   # 弹幕全部参数(格式/连接/高级/四类型)都在这里
-            futures.append(self.executor.submit(danmaku_thread))
         if self.video:
             self.downloader = downloader_class(
                 stream_url=stream_url,
@@ -282,10 +294,15 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 taskname=self.taskname,
                 advanced_video_args=self.advanced_video_args,
                 segment_callback=self.segment_callback,
-                stable_callback=self.stable_callback,
                 debug=self.debug,
                 **self.kwargs
             )
+
+        # 两个下载器均已构造；让视频和 JSONL 使用同一个第一段现实时间起点。
+        self.segment_start_time = datetime.now()
+        if self.danmaku:
+            futures.append(self.executor.submit(danmaku_thread))
+        if self.video:
             futures.append(self.executor.submit(video_thread))
 
         last_onair_check = time.time()
@@ -710,7 +727,10 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 self.logger.exception(e)
         if self.danmaku and hasattr(self, 'dmw') and self.dmw:
             try:
-                self.dmw.stop()
+                # 视频后端先通过 segment_callback 收尾已有视频；此时仍留在
+                # dm_file 中的临时 JSONL 没有对应视频，应在关闭 writer 后删除。
+                # 纯弹幕任务没有视频，必须保留其当前 JSONL。
+                self.dmw.stop(discard_unpaired=self.video)
             except Exception as e:
                 self.logger.exception(e)
         try:

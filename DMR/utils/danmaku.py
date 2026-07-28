@@ -16,14 +16,20 @@ class BaseDanmaku():
     """所有流式消息的根：只持有任何消息都有的"信封"字段，并支持像字典一样取属性
     （dm['x'] / for k,v in dm）。不假设有发送者——无发送者的系统/未知消息也可直接是 BaseDanmaku，
     解析不了的原始内容统一塞在 raw 里。必传：dtype, raw, timestamp。"""
-    def __init__(self, dtype, raw, timestamp, **kwargs):
+    def __init__(self, dtype, raw=None, timestamp=None, received_at=None, **kwargs):
         self.dtype = dtype
         self.raw   = raw
-        if isinstance(timestamp, datetime):
-            self.timestamp = timestamp.timestamp()   # 绝对时间(秒)
+        timestamp = received_at if received_at is not None else timestamp
+        if timestamp is None:
+            self.timestamp = None
+        elif isinstance(timestamp, datetime):
+            self.timestamp = timestamp.timestamp()
         else:
             self.timestamp = float(timestamp)
-        self.time  = None                   # 相对时间(秒，相对视频起点)，由后续渲染流程赋值
+        # received_at 是唯一用于新 JSONL 时间轴的字段。timestamp 暂留作旧 ASS
+        # 兼容别名，平台 decoder 给出的值会在 DanmakuClient 入队前统一覆盖。
+        self.received_at = self.timestamp
+        self.time  = None
         for key, value in kwargs.items():   # 平台特有字段动态挂上
             self.__dict__[key] = value
 
@@ -65,7 +71,7 @@ class GiftDanmaku(BaseDanmaku):
     必传：uname, uid, content, text, gift_name, gift_count, gift_price, price_unit, price_cny。"""
     def __init__(self, uname, uid, content, text,
                  gift_name, gift_count, gift_price, price_unit, price_cny,
-                 color='ffffff', **kwargs):
+                 unit_price_cny=None, color='ffffff', **kwargs):
         super().__init__(dtype='gift', **kwargs)
         self.uname      = uname
         self.uid        = uid
@@ -76,6 +82,7 @@ class GiftDanmaku(BaseDanmaku):
         self.gift_count = int(gift_count)
         self.gift_price = format_price(gift_price)   # 单个礼物平台币价
         self.price_unit = price_unit                 # 平台币单位(电池/鱼翅/抖币)
+        self.unit_price_cny = format_price(unit_price_cny)  # 单个礼物人民币价
         self.price_cny  = format_price(price_cny)     # 人民币收益(元，总价)
 
 
@@ -105,7 +112,7 @@ class SuperChatDanmaku(BaseDanmaku):
 class MemberDanmaku(BaseDanmaku):
     """开通大航海/会员。dtype 固定 'member'。
     必传：uname, uid, content, text, member_name, member_price, member_count, member_unit, price_cny。
-    （展示文案由 GiftConverter 决定，不在此持有）"""
+    （展示文案由渲染阶段的 LayoutCompiler 决定，不在此持有）"""
     def __init__(self, uname, uid, content, text,
                  member_name, member_price, member_count, member_unit, price_cny,
                  color='ffffff', **kwargs):

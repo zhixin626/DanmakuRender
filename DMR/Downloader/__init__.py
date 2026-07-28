@@ -91,12 +91,8 @@ class Downloader(): # 被上层 class engine()初始化，在 add_plugin()里调
             raise ValueError(f'下载任务 {taskname} 已存在。')
         
         if dltype == 'live':
-            if config.get('sync', False):
-                from .sync_stream_downloader import SyncStreamDownloadTask
-                downloader_task = SyncStreamDownloadTask
-            else:
-                from .stream_downloader import StreamDownloadTask
-                downloader_task = StreamDownloadTask
+            from .stream_downloader import StreamDownloadTask
+            downloader_task = StreamDownloadTask
         elif dltype == 'videos':
             from .video_downloader import VideoDownloadTask
             downloader_task = VideoDownloadTask

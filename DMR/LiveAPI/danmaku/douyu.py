@@ -181,7 +181,7 @@ class Douyu(DMAPI):
                     else:
                         total_price_cny, extra = gift_price * gift_count, f"价值{gift_price}{price_unit}的"
 
-                    text = (f"送出{gift_name}({gift_price:g}{price_unit})x{gift_count}"
+                    text = (f"送出 {gift_name}({gift_price:g}{price_unit})x{gift_count}"
                             if gift_price is not None else f"送出{gift_name}x{gift_count}")
                     msgs.append(GiftDanmaku(
                         timestamp=datetime.now().timestamp(),
@@ -195,6 +195,7 @@ class Douyu(DMAPI):
                         gift_type=price_src,
                         price_unit=price_unit,
                         color='ffffff',
+                        unit_price_cny=gift_price,
                         price_cny=total_price_cny,
                         gfid=gfid,
                         pid=pid,

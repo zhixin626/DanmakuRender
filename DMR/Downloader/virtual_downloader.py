@@ -109,9 +109,12 @@ class VirtualDownloaderTask:
                 if title_match:
                     video_info.title = title_match.group(1)
             if self.info_pattern.get('danmaku'):
-                dm_file = splitext(file_path)[0] + '.ass'
-                if exists(dm_file):
-                    video_info.dm_file_id = dm_file
+                jsonl_file = splitext(file_path)[0] + '.jsonl'
+                legacy_ass = splitext(file_path)[0] + '.ass'
+                if exists(jsonl_file):
+                    video_info.dm_file_id = jsonl_file
+                elif exists(legacy_ass):
+                    video_info.dm_file_id = legacy_ass
             try:
                 time_str_pattern = self.info_pattern.get('time_str')
                 time_format = self.info_pattern.get('time_format')

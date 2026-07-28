@@ -310,12 +310,13 @@ class Douyin:
                     gift_price = int(j['gift']['diamondCount'])
                     gift_count = int(j.get('repeatCount', 1))
                     gift_name = j['gift']['name']
-                    gtext = f"送出{gift_name}({gift_price:g}抖币)x{gift_count}"
+                    gtext = f"送出 {gift_name}({gift_price:g}抖币)x{gift_count}"
                     msgs.append(GiftDanmaku(
                         uname=name, uid=user.get('shortId'),
                         content=gtext, text=gtext,
                         gift_name=gift_name, gift_count=gift_count, gift_price=gift_price,
-                        price_unit='抖币', price_cny=(gift_price * gift_count) / 10,   # 10抖币=1元
+                        price_unit='抖币', unit_price_cny=gift_price / 10,
+                        price_cny=(gift_price * gift_count) / 10,   # 10抖币=1元
                         color='ffffff', timestamp=now, raw=j))
 
                 else:                                              # 理解不了的：采样 + 原样塞进 BaseDanmaku.raw

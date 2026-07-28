@@ -25,7 +25,6 @@ class FFmpegDownloader():
                  header:dict=None,
                  ffmpeg:str=None,
                  segment_callback=None,
-                 stable_callback=None,
                  advanced_video_args:dict=None,
                  debug=False,
                  **kwargs):
@@ -38,7 +37,6 @@ class FFmpegDownloader():
         self.debug = debug
         self.taskname = taskname
         self.segment_callback = segment_callback
-        self.stable_callback = stable_callback
         self.advanced_video_args = advanced_video_args if advanced_video_args else {}
         self.kwargs = kwargs
         self.ffmpeg = ffmpeg if ffmpeg else ToolsList.get('ffmpeg')
@@ -163,27 +161,17 @@ class FFmpegDownloader():
                         else:
                             ffmpeg_low_speed = 0
 
-                        if not self.download_stable:
-                            if speed and speed < 2:
-                                l = line.find('time=')
-                                r = line.find('bitrate') - 1
-                                if l > 0 and r > 0:
-                                    downloaded_duration = line[l+5:r]
-                                try:
-                                    h, m, s = int(downloaded_duration.split(':')[0]), int(downloaded_duration.split(':')[1]), float(downloaded_duration.split(':')[2])
-                                    downloaded_duration_ms = h * 3600 + m * 60 + s
-                                    time_error = downloaded_duration_ms - datetime.now().timestamp() + self.start_time + (speed - 1)
-                                    self.stable_callback(time_error)
-                                    self.download_stable = True
-                                except Exception as e:
-                                    self.logger.debug(e)
-                                    self.download_stable = False
+                        if not self.download_stable and speed and speed < 2:
+                            self.download_stable = True
             
             if 'Opening' in line:
                 fname = line.split('\'')[1]
                 if not fname.startswith('http'):
                     if self.thisfile:
-                        self.segment_callback(self.thisfile)
+                        self.segment_callback(
+                            self.thisfile,
+                            next_segment_start_time=time.time(),
+                        )
                     self.thisfile = fname
 
             if 'dropping it' in line or 'Invalid NAL unit size' in line:

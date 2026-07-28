@@ -11,7 +11,6 @@ import re
 import sys
 import threading
 import time
-import queue
 import copy
 import yaml
 from dataclasses import asdict, dataclass, field, InitVar
@@ -326,7 +325,6 @@ class BiliWebApi:
     def upload(
         self,
         files:list[VideoInfo],
-        stream_queue: queue.SimpleQueue=None,
         session: dict=None,
         progress_cb=None,
         **kwargs,
@@ -364,33 +362,22 @@ class BiliWebApi:
                 self._record_metadata(files[0], self.videos)
             self._upload_pending_cover(self.videos, kwargs)
         # return False, '手动测试上传失败', {'cover': getattr(self, '_gen_cover', None)}
-        if stream_queue is None:
-            n_files = len(files)
-            for fi, file in enumerate(files, 1):
-                if self.stoped:                     # 手动停止：立即中断，不再传后续文件
-                    raise RuntimeError('上传已被手动停止')
-                # upos_stream 回调给的是 (已完成块, 总块)；这里换算成 pct 并带上文件序号交给上层
-                file_cb = (lambda done, total, _i=fi:
-                           progress_cb(int(done / total * 100) if total else 0, _i, n_files)) \
-                          if progress_cb else None
-                status, info = self.upload_file(
-                    filepath=file.path,
-                    lines=kwargs.get('line', 'AUTO'),
-                    videos=self.videos,
-                    submit_api='web',
-                    progress_cb=file_cb,
-                    )
-            # self.submit(submit_api='web', videos=self.videos)
-                
-        else:
-            status, info = self.upload_stream(
-                stream_queue=stream_queue,
-                file_name=files[0].path,
-                total_size=30*1024*1024*1024,
+        n_files = len(files)
+        for fi, file in enumerate(files, 1):
+            if self.stoped:                     # 手动停止：立即中断，不再传后续文件
+                raise RuntimeError('上传已被手动停止')
+            # UPOS 分块上传回调给的是 (已完成块, 总块)；这里换算成 pct 并带上文件序号交给上层
+            file_cb = (lambda done, total, _i=fi:
+                       progress_cb(int(done / total * 100) if total else 0, _i, n_files)) \
+                      if progress_cb else None
+            status, info = self.upload_file(
+                filepath=file.path,
                 lines=kwargs.get('line', 'AUTO'),
                 videos=self.videos,
-                submit_api='web'
-            )
+                submit_api='web',
+                progress_cb=file_cb,
+                )
+        # self.submit(submit_api='web', videos=self.videos)
         # 合集：add_episodes(epid，原作者，仅加入) 与 add_to_list(season_id，加入+排到最前) 二选一，
         # 不要同时开启，否则同一稿件会被重复加入合集。
         if status and is_new and kwargs.get('epid'):
@@ -564,8 +551,8 @@ class BiliWebApi:
         submit_api: Callable[[str], None] = None,
         progress_cb=None,
     ):
-        status, message = self.upload_stream(
-            stream_queue=filepath,
+        status, message = self._upload_path(
+            filepath=filepath,
             file_name=os.path.basename(filepath),
             total_size=os.path.getsize(filepath),
             lines=lines,
@@ -575,9 +562,9 @@ class BiliWebApi:
         )
         return status, message
 
-    def upload_stream(
+    def _upload_path(
         self,
-        stream_queue: queue.SimpleQueue,
+        filepath: str,
         file_name,
         total_size,
         lines='AUTO',
@@ -604,7 +591,7 @@ class BiliWebApi:
                 self._auto_os = self.probe()
             logger.debug(f"线路选择 => {self._auto_os['os']}: {self._auto_os['query']}. time: {self._auto_os.get('cost')}")
         if self._auto_os['os'] == 'upos':
-            upload = self.upos_stream
+            upload = self._upos_upload
         else:
             logger.error(f"NoSearch:{self._auto_os['os']}")
             raise NotImplementedError(self._auto_os['os'])
@@ -636,7 +623,7 @@ class BiliWebApi:
                         break
                 else:
                     logger.warning(f"选择的线路 {self._auto_os['os']} 没有返回对应 endpoint，不做修改")
-        video_part = asyncio.run(upload(stream_queue, file_name, total_size, ret, progress_cb=progress_cb))
+        video_part = asyncio.run(upload(filepath, file_name, total_size, ret, progress_cb=progress_cb))
         if video_part is None:
             # stop_event.set()
             return False, '分P上传失败'
@@ -652,7 +639,7 @@ class BiliWebApi:
         videos.bvid = bvid
         return True, bvid
 
-    async def upos_stream(self, stream_queue, file_name, total_size, ret, progress_cb=None):
+    async def _upos_upload(self, filepath, file_name, total_size, ret, progress_cb=None):
         # print("--------------, ", file_name)
         chunk_size = ret['chunk_size']
         auth = ret["auth"]
@@ -680,12 +667,7 @@ class BiliWebApi:
         #     f"{file_name} - upload_id: {upload_id}, chunks: {chunks}, chunk_size: {chunk_size}, total_size: {total_size}")
         
         
-        if isinstance(stream_queue, (str, os.PathLike)):
-            # 文件路径
-            chunk_generator = self.file_reader_generator(stream_queue, chunk_size)
-        else:
-            # 视频流队列
-            chunk_generator = self.queue_reader_generator(stream_queue, chunk_size, total_size)
+        chunk_generator = self.file_reader_generator(filepath, chunk_size)
         
         n = 0
         st = time.perf_counter()
@@ -829,73 +811,6 @@ class BiliWebApi:
                 if not data:
                     break
                 yield data
-        yield None
-
-    def queue_reader_generator(self, simple_queue: queue.SimpleQueue, chunk_size: int, max_size: int):
-        """
-        从 simple_queue 中读取数据并按 chunk_size 大小分块产出 (yield)
-        当队列中获取到 None 或者数据总量达到 max_size 后，就用 0x00 补齐到 chunk_size
-
-        :param simple_queue: queue.SimpleQueue 实例，数据流会以多个分包 (bytes) 入队，最后以 None 表示结束
-        :param chunk_size: 消费者每次想要获取的数据块大小
-        :param max_size: 需要最终补齐的总大小（单位：字节），必须是 chunk_size 的整数倍
-        :return: 生成器，按 chunk_size 大小分批次产出数据
-        """
-        if max_size % chunk_size != 0:
-            raise ValueError("max_size must be a multiple of chunk_size")
-
-        total_chunks = max_size // chunk_size
-        chunks_yielded = 0
-        current_buffer = bytearray()
-        save_file = None
-        # save_file = f'{int(time.time())}.flv'
-        # save_file = open(save_file, 'wb')
-
-        while chunks_yielded < total_chunks:
-            try:
-                data = simple_queue.get(timeout=300)
-            except queue.Empty:
-                logger.info("数据读取超时，结束当前分P")
-                break
-
-            if data is None:
-                # 数据流结束，用0x00填充剩余的块
-                remaining_chunks = total_chunks - chunks_yielded
-                if remaining_chunks == total_chunks:
-                    # print("空包跳过")
-                    break
-                if len(current_buffer) > 0:
-                    # 处理当前缓冲区中的最后一块数据
-                    padding_size = chunk_size - len(current_buffer)
-                    if padding_size > 0:
-                        current_buffer += b'\x00' * padding_size
-                        logger.info(f"最后一个包差了 {padding_size} 个字节")
-                    yield bytes(current_buffer)
-                    chunks_yielded += 1
-                    remaining_chunks -= 1
-                logger.info(f"数据流结束.")
-                break
-                logger.info(f"还差 {remaining_chunks} 个完整包")
-
-                # 输出剩余的全0块
-                for _ in range(remaining_chunks):
-                    yield b'\x00' * chunk_size
-                    chunks_yielded += 1
-                break
-
-            save_file and save_file.write(data)
-
-            # 将新数据添加到缓冲区
-            current_buffer.extend(data)
-
-            # 输出完整的块
-            while len(current_buffer) >= chunk_size and chunks_yielded < total_chunks:
-                yield bytes(current_buffer[:chunk_size])
-                current_buffer = current_buffer[chunk_size:]
-                chunks_yielded += 1
-
-        # print("本段分p完成")
-        save_file and save_file.close()
         yield None
 
     def get_remote_data(self, bvid):

@@ -136,6 +136,7 @@ class VideoInfo(FileInfo):
                 streamer:StreamerInfo=None,
                 group_id:str=None,
                 segment_id:int=None,
+                segment_start_time:datetime=None,
                 taskname:str=None,
                 dm_video_id:str=None,
                 src_video_id:str=None,
@@ -151,6 +152,7 @@ class VideoInfo(FileInfo):
         self.dm_file_id = dm_file_id
         self.group_id = group_id
         self.segment_id = segment_id
+        self.segment_start_time = segment_start_time
         super().__init__(
                 file_id=file_id,
                 dtype=dtype,
@@ -167,5 +169,6 @@ class VideoInfo(FileInfo):
                 dm_file_id=dm_file_id,
                 group_id=group_id,
                 segment_id=segment_id,
+                segment_start_time=segment_start_time,
                 **kwargs
                 )

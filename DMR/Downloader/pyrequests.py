@@ -102,7 +102,10 @@ class PyRequestsFlvDownloader:
                         self.logger.error(f'{self.taskname} 重命名文件 {self.video_file} 失败!')
                         new_file = self.video_file
                     self.logger.debug(f'{self.taskname} 录制完成: {new_file}')
-                    self.segment_callback(new_file)
+                    self.segment_callback(
+                        new_file,
+                        next_segment_start_time=time.time(),
+                    )
     
     def stop(self):
         self.stoped = True
@@ -127,7 +130,6 @@ class PyRequestsHlsDownloader:
                  header:dict=None,
                  advanced_video_args:dict=None,
                  segment_callback=None,
-                 stable_callback=None,
                  **kwargs):
         
         self.stream_url = stream_url
@@ -139,7 +141,6 @@ class PyRequestsHlsDownloader:
         self.taskname = taskname
         self.url = url
         self.segment_callback = segment_callback
-        self.stable_callback = stable_callback
         self.advanced_video_args = advanced_video_args if advanced_video_args else {}
         self.kwargs = kwargs
 
@@ -212,17 +213,12 @@ class PyRequestsHlsDownloader:
             headfile_uri = m3u8_obj.segment_map[0].absolute_uri + '?' + params_str
             if headfile_name != self.headfile_name:
                 if self.force_origin:
-                    t0 = time.time()
                     headfile_uri_origin = self._convert2origin(headfile_uri)
                     self.headfile = self._find_headfile(headfile_uri_origin)
                     if not self.headfile:
                         self.logger.warning(f'{self.taskname}: 未找到原画头文件: {headfile_name}, 即将回退到非原画模式')
                         self.headfile = self.session.get(headfile_uri).content
                         self.force_origin = False
-                    t1 = time.time()
-                    # 将获取头文件的时间传递给回调函数，让弹幕时间更准确
-                    if self.stable_callback:
-                        self.stable_callback(t0-t1)
                 else:
                     self.headfile = self.session.get(headfile_uri).content
                 self.headfile_name = headfile_name
@@ -351,7 +347,10 @@ class PyRequestsHlsDownloader:
                         self.logger.error(f'{self.taskname} 重命名文件 {self.video_file} 失败!')
                         new_file = self.video_file
                     self.logger.debug(f'{self.taskname} 录制完成: {new_file}')
-                    self.segment_callback(new_file)
+                    self.segment_callback(
+                        new_file,
+                        next_segment_start_time=time.time(),
+                    )
     
     def stop(self):
         self.stoped = True

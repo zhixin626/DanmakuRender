@@ -1,6 +1,7 @@
 from datetime import datetime
 import logging
 import re, asyncio, aiohttp
+import time
 import ssl
 
 # from .youtube import Youtube
@@ -109,6 +110,7 @@ class DanmakuClient:
             # if msg.type == aiohttp.WSMsgType.BINARY:
             #     print("receive到一条二进制数据")
             
+            received_at = time.time()
             result = self.__site_api.decode_msg(msg.data)
 
             if isinstance(result, tuple):
@@ -125,6 +127,9 @@ class DanmakuClient:
 
             # print(ms)
             for m in ms:
+                # 平台时间字段语义不一致，不再用于视频对齐。
+                m.received_at = received_at
+                m.timestamp = received_at  # 旧 ASS 路径的兼容别名
                 await self._dm_queue.put(m)
 
     async def start(self):
