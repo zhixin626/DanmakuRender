@@ -147,7 +147,7 @@ class Config():
                             target = upload_arg.get('target', 'bilibili')
                             if not global_upload_args.get(target):
                                 raise ValueError(f'不存在可用的上传目标 {target}.')
-                            # 上传配置也递归合并，任务可以只覆盖 cover_args、
+                            # 上传配置也递归合并，任务可以只覆盖 cover、
                             # extra_kwargs 等嵌套配置中的个别字段。
                             upload_config = merge_dict(
                                 deepcopy(global_upload_args[target]),

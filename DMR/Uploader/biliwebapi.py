@@ -21,7 +21,7 @@ from urllib import parse
 
 # import aiohttp
 from DMR.utils import VideoInfo, replace_keywords
-from DMR.utils.cover import generate_cover
+from DMR.utils.cover import prepare_cover
 from concurrent.futures.thread import ThreadPoolExecutor
 import concurrent
 import requests.utils
@@ -34,6 +34,26 @@ from .bvid_history import read_period_bvid, write_period_bvid
 
 logger = logging.getLogger(__name__)
 _METADATA_LOCK = threading.RLock()
+
+
+class _UploadEndpointPool:
+    """为同一个 UPOS 上传会话管理可用的上传地址。"""
+
+    def __init__(self, endpoints, upos_uri):
+        object_path = upos_uri.replace('upos://', '').lstrip('/')
+        unique_endpoints = list(dict.fromkeys(filter(None, endpoints)))
+        self._urls = [f"https:{endpoint.rstrip('/')}/{object_path}" for endpoint in unique_endpoints]
+        self._disabled = set()
+        self._lock = threading.Lock()
+
+    def current(self):
+        with self._lock:
+            return next((url for url in self._urls if url not in self._disabled), None)
+
+    def disable(self, url):
+        with self._lock:
+            self._disabled.add(url)
+            return next((candidate for candidate in self._urls if candidate not in self._disabled), None)
 
 
 class _MetadataDumper(yaml.SafeDumper):
@@ -91,6 +111,59 @@ class BiliWebApi:
             cookies = json.load(f)
         return cookies
 
+    @staticmethod
+    def _apply_publish_options(videos, options):
+        """远端稿件刷新后重新应用本次任务的投稿级开关。"""
+        if not options:
+            return videos
+        if 'watermark' in options:
+            videos.watermark = {'state': options['watermark']}
+        if 'space_hidden' in options:
+            videos.space_hidden = options['space_hidden']
+        return videos
+
+    @staticmethod
+    def _append_remote_desc(videos, append_desc, limit=2000):
+        """把本场简介追加到刚刷新的远端简介；超限时保留原简介。"""
+        if not append_desc:
+            return False
+
+        remote_desc = str(videos.desc or '').replace('\r\n', '\n').replace('\r', '\n').rstrip()
+        current_desc = str(append_desc).replace('\r\n', '\n').replace('\r', '\n').strip()
+        if not current_desc:
+            return False
+
+        if remote_desc == current_desc or remote_desc.endswith(f'\n{current_desc}'):
+            logger.info('远端简介已包含本次 append_desc，跳过重复追加')
+            return False
+
+        combined_desc = f'{remote_desc}\n{current_desc}' if remote_desc else current_desc
+        if len(combined_desc) > limit:
+            logger.warning(
+                '简介追加后超过%d字符：远端desc=%d，本次append_desc=%d，合并后=%d；'
+                '放弃追加简介，视频分P仍正常追加',
+                limit, len(remote_desc), len(current_desc), len(combined_desc),
+            )
+            return False
+
+        videos.desc = combined_desc
+        videos.desc_v2 = [{
+            'raw_text': combined_desc,
+            'biz_id': '',
+            'type': 1,
+        }]
+        logger.info(
+            '已追加简介：远端desc=%d，本次append_desc=%d，合并后=%d',
+            len(remote_desc), len(current_desc), len(combined_desc),
+        )
+        return True
+
+    @staticmethod
+    def _part_numbers(existing_count, upload_count):
+        """返回本次上传任务覆盖的分P，例如 p2,p3。"""
+        start = existing_count + 1
+        return ','.join(f'p{number}' for number in range(start, start + upload_count))
+
     def sign(self, param):
         return hashlib.md5(f"{param}{self.appsec}".encode()).hexdigest()
 
@@ -108,25 +181,33 @@ class BiliWebApi:
     def probe(self):
         ret = self._session.get('https://member.bilibili.com/preupload?r=probe', timeout=5).json()
         logger.debug(f"线路:{ret['lines']}")
-        data, auto_os = None, None
-        min_cost = 0
-        if ret['probe'].get('get'):
-            method = 'get'
-        else:
-            method = 'post'
-            data = bytes(int(1024 * 0.1 * 1024))
+        method = 'get' if ret['probe'].get('get') else 'post'
+        data = None if method == 'get' else bytes(int(1024 * 0.1 * 1024))
+        best = None
+
         for line in ret['lines']:
-            start = time.perf_counter()
-            test = self._session.request(method, f"https:{line['probe_url']}", data=data, timeout=30)
-            cost = time.perf_counter() - start
-            # logger.debug(line['query'], cost)
-            if test.status_code != 200:
-                return
-            if not min_cost or min_cost > cost:
-                auto_os = line
-                min_cost = cost
-        auto_os['cost'] = min_cost
-        return auto_os
+            try:
+                start = time.perf_counter()
+                response = self._session.request(
+                    method, f"https:{line['probe_url']}", data=data, timeout=30,
+                )
+                cost = time.perf_counter() - start
+            except requests.RequestException as e:
+                logger.warning("上传线路测速失败，跳过 %s: %s", line['probe_url'], e)
+                continue
+
+            if response.status_code != 200:
+                logger.warning(
+                    "上传线路测速返回 %s，跳过 %s",
+                    response.status_code, line['probe_url'],
+                )
+                continue
+            if best is None or cost < best['cost']:
+                best = {**line, 'cost': cost}
+
+        if best is None:
+            raise RuntimeError('没有可用的B站上传线路')
+        return best
     
     def creditsToDesc_v2(self, desc:str, credits:List[Dict[str, Union[str, int]]]):
         desc_v2 = []
@@ -170,6 +251,8 @@ class BiliWebApi:
             charging_pay=config.get('charging_pay', 0),
             open_subtitle=config.get('open_subtitle', False),
             no_disturbance=config.get('no_disturbance', 0),
+            watermark={'state': config.get('watermark', 0)},
+            space_hidden=config.get('space_hidden', 0),
             extra_kwargs=config.get('extra_kwargs', {}),
         )
         if config.get('dtime') and config['dtime'] >= 14400:
@@ -200,15 +283,18 @@ class BiliWebApi:
         if config.get('source'):
             video.source = replace_keywords(config['source'], video_info)
         # 先只准备本地封面；实际上传由 upload() 在确认不是 skip_upload 后执行。
-        cover_file = generate_cover(video_info.get('path'), config.get('cover_args'),
-                                    stime=video_info.get('stime'), account=config.get('account', ''))
-        # 记下"本次是动态生成的封面本地路径"（静态 config['cover'] 不归我管，不删）：
+        cover_file, generated = prepare_cover(
+            video_info.get('path'),
+            config.get('cover'),
+            stime=video_info.get('stime'),
+            account=config.get('account', ''),
+            context=video_info,
+        )
+        # 只记录本次动态生成的封面；cover.path 指向的静态图片不归我管。
         # 上传成功后删除，失败则把它留给 WebUI 人工处理用。
-        if cover_file:
+        if generated and cover_file:
             cover_file = self._rename_generated_cover(cover_file, video_info, config.get('account'))
-        self._gen_cover = cover_file if cover_file else None
-        if not cover_file and config.get('cover'):
-            cover_file = replace_keywords(config['cover'], video_info)
+        self._gen_cover = cover_file if generated else None
         self._cover_file = cover_file
         return video
 
@@ -330,67 +416,102 @@ class BiliWebApi:
         **kwargs,
     ):
         is_new = False
+        videos = self.videos
         self._gen_cover = None
         self._cover_file = None
+        n_files = len(files)
+        if not n_files:
+            return False, '没有需要上传的视频文件'
         if kwargs.get('skip_upload'):
             # 资料模式不读取远端稿件、不上传封面，也不提交视频。
-            archive_video = self.videoinfo_to_videos(files[0], kwargs, session)
+            template_session = {**(session or {}), 'p_n': self._part_numbers(0, n_files)}
+            archive_video = self.videoinfo_to_videos(files[0], kwargs, template_session)
             if kwargs.get('record_metadata'):
                 self._record_metadata(files[0], archive_video)
             self.videos = None
             return True, '投稿资料已生成，已跳过上传'
         self._gen_cover = None   # 仅 is_new 时由 videoinfo_to_videos 写入；追加上传不生成新封面
-        if not self.videos:
+        if not videos:
             # 周期追加：未显式指定稿件且开启 auto_append_period 时，查历史决定是否追加到已有稿件
             period = kwargs.get('auto_append_period')
             if period in ('monthly', 'daily') and kwargs.get('output_dir'):
                 existing = read_period_bvid(kwargs['output_dir'], (session or {}).get('stime'),
                                             period=period, account=kwargs.get('account'))
                 if existing:
-                    self.videos = Data(bvid=existing)
+                    videos = Data(bvid=existing)
                     logger.info(f"[账号{kwargs.get('account')}] 追加模式({period})：检测到已有稿件 {existing}，将追加")
                 else:
                     logger.info(f"[账号{kwargs.get('account')}] 追加模式({period})：暂无稿件，将创建新稿件")
-        if not self.videos:
+        if not videos:
             is_new = True
-            self.videos = self.videoinfo_to_videos(files[0], kwargs, session)
+            existing_count = 0
         else:
-            self.videos = self.get_remote_data(self.videos.bvid) # 刷新视频信息
+            videos = self.get_remote_data(videos.bvid) # 刷新视频信息
+            if not videos:
+                raise RuntimeError('无法获取远端稿件信息，已停止本次上传')
+            existing_count = len(videos.videos)
+
+        part_numbers = self._part_numbers(existing_count, n_files)
+        template_session = {**(session or {}), 'p_n': part_numbers}
+        if is_new:
+            videos = self.videoinfo_to_videos(files[0], kwargs, template_session)
+        logger.info('本次上传任务对应分P：%s', part_numbers)
         if is_new:
             if kwargs.get('record_metadata'):
                 # 先记录本地封面；投稿成功后会用平台封面地址更新此条记录。
-                self._record_metadata(files[0], self.videos)
-            self._upload_pending_cover(self.videos, kwargs)
+                self._record_metadata(files[0], videos)
+            self._upload_pending_cover(videos, kwargs)
+        formatted_append_desc = None
+        if (
+            not is_new
+            and kwargs.get('auto_append_period') in ('monthly', 'daily')
+            and kwargs.get('append_desc')
+        ):
+            append_context = {**files[0], **template_session}
+            formatted_append_desc = replace_keywords(str(kwargs['append_desc']), append_context)
         # return False, '手动测试上传失败', {'cover': getattr(self, '_gen_cover', None)}
-        n_files = len(files)
+        publish_options = {
+            'watermark': kwargs.get('watermark', 0),
+            'space_hidden': kwargs.get('space_hidden', 0),
+        }
         for fi, file in enumerate(files, 1):
             if self.stoped:                     # 手动停止：立即中断，不再传后续文件
                 raise RuntimeError('上传已被手动停止')
-            # UPOS 分块上传回调给的是 (已完成块, 总块)；这里换算成 pct 并带上文件序号交给上层
+            # UPOS 回调成功上传字节数；这里换算成百分比并带上文件序号交给上层。
             file_cb = (lambda done, total, _i=fi:
                        progress_cb(int(done / total * 100) if total else 0, _i, n_files)) \
                       if progress_cb else None
             status, info = self.upload_file(
                 filepath=file.path,
                 lines=kwargs.get('line', 'AUTO'),
-                videos=self.videos,
+                videos=videos,
                 submit_api='web',
                 progress_cb=file_cb,
+                publish_options=publish_options,
+                # 一次上传任务只追加一段简介；最后一个文件提交时，前面的分P都已成功提交。
+                append_desc=formatted_append_desc if fi == n_files else None,
                 )
-        # self.submit(submit_api='web', videos=self.videos)
+            if status:
+                # upload_file 已经提交到远端；后续分P失败时也保留这个有效稿件状态。
+                videos.bvid = info
+                self.videos = videos
+            else:
+                break
+
+        # self.submit(submit_api='web', videos=videos)
         # 合集：add_episodes(epid，原作者，仅加入) 与 add_to_list(season_id，加入+排到最前) 二选一，
         # 不要同时开启，否则同一稿件会被重复加入合集。
         if status and is_new and kwargs.get('epid'):
-            self.add_episodes(kwargs['epid'], self.videos.bvid, self.videos.title)
+            self.add_episodes(kwargs['epid'], videos.bvid, videos.title)
         if status and is_new and kwargs.get('add_to_list') and kwargs.get('season_id'):
-            self.add_to_list(kwargs['season_id'], self.videos.bvid, self.videos.title)
+            self.add_to_list(kwargs['season_id'], videos.bvid, videos.title)
         # 周期追加：新建稿件成功后，把本周期 bvid 登记到历史，供下次同周期追加
         if status and is_new and kwargs.get('auto_append_period') in ('monthly', 'daily') and kwargs.get('output_dir'):
             write_period_bvid(kwargs['output_dir'], (session or {}).get('stime'),
-                              self.videos.bvid, period=kwargs['auto_append_period'], account=kwargs.get('account'))
+                              videos.bvid, period=kwargs['auto_append_period'], account=kwargs.get('account'))
 
         if status and is_new and kwargs.get('record_metadata'):
-            self._record_metadata(files[0], self.videos, cover_file=self.videos.cover)
+            self._record_metadata(files[0], videos, cover_file=videos.cover)
 
         # 动态生成的封面：上传成功就删本地文件；失败则把路径随返回值带回（留给 WebUI 人工处理）
         gen_cover = getattr(self, '_gen_cover', None)
@@ -550,6 +671,8 @@ class BiliWebApi:
         videos: 'Data'=None,
         submit_api: Callable[[str], None] = None,
         progress_cb=None,
+        publish_options=None,
+        append_desc=None,
     ):
         status, message = self._upload_path(
             filepath=filepath,
@@ -559,6 +682,8 @@ class BiliWebApi:
             videos=videos,
             submit_api=submit_api,
             progress_cb=progress_cb,
+            publish_options=publish_options,
+            append_desc=append_desc,
         )
         return status, message
 
@@ -571,6 +696,8 @@ class BiliWebApi:
         videos: 'Data'=None,
         submit_api: Callable[[str], None] = None,
         progress_cb=None,
+        publish_options=None,
+        append_desc=None,
     ):
 
         logger.info(f"{file_name} 开始上传")
@@ -631,6 +758,8 @@ class BiliWebApi:
 
         if new_videos := self.get_remote_data(videos.bvid):
             videos = new_videos
+        self._apply_publish_options(videos, publish_options)
+        self._append_remote_desc(videos, append_desc)
         videos.append(video_part)  # 添加已经上传的视频
 
         ret = self.submit(submit_api=submit_api, videos=videos)
@@ -641,18 +770,25 @@ class BiliWebApi:
 
     async def _upos_upload(self, filepath, file_name, total_size, ret, progress_cb=None):
         # print("--------------, ", file_name)
+        file_size = total_size
         chunk_size = ret['chunk_size']
         auth = ret["auth"]
         endpoint = ret["endpoint"]
         biz_id = ret["biz_id"]
         upos_uri = ret["upos_uri"]
-        url = f"https:{endpoint}/{upos_uri.replace('upos://', '')}"  # 视频上传路径
+        endpoint_pool = _UploadEndpointPool(
+            [endpoint, *(ret.get('endpoints') or [])],
+            upos_uri,
+        )
+        url = endpoint_pool.current()
         headers = {
             "X-Upos-Auth": auth
         }
         # 向上传地址申请上传，得到上传id等信息
         upload_id = self._session.post(f'{url}?uploads&output=json', timeout=15,
                                         headers=headers).json()["upload_id"]
+        if progress_cb:
+            progress_cb(0, file_size)
         # 开始上传
         parts = []  # 分块信息
         chunks = math.ceil(total_size / chunk_size)  # 获取分块数量
@@ -670,33 +806,33 @@ class BiliWebApi:
         chunk_generator = self.file_reader_generator(filepath, chunk_size)
         
         n = 0
-        st = time.perf_counter()
         max_workers = self.limit
         semaphore = threading.Semaphore(max_workers)
-        # 分块完成进度：每块传完计数 +1，回调 progress_cb(已完成块, 总块数)。块是并行乱序完成的，故计数加锁。
-        _done = [0]
+        # 只累计确认上传成功的字节；失败、重试和 endpoint 切换都不会虚增进度。
+        uploaded_bytes = [0]
         _plock = threading.Lock()
         def _chunk_done(fut):
             semaphore.release()
-            if progress_cb:
+            if not progress_cb:
+                return
+            try:
+                result = fut.result()
+                if result is None:
+                    return
                 with _plock:
-                    _done[0] += 1
-                    c = _done[0]
-                try:
-                    progress_cb(c, chunks)
-                except Exception:
-                    pass
+                    uploaded_bytes[0] += result['size']
+                    done = min(uploaded_bytes[0], file_size * 99 // 100)
+                progress_cb(done, file_size)
+            except Exception:
+                pass
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
+            futures = {}
             sessions = [copy.deepcopy(self._session) for _ in range(max_workers)]
             for index, chunk in enumerate(chunk_generator):
                 if self.stoped:                     # 手动停止：不再提交新分块，立即中断
                     raise RuntimeError('上传已被手动停止')
                 if not chunk:
                     break
-                const_time = time.perf_counter() - st
-                speed = len(chunk) * 8 / 1024 / 1024 / const_time
-                # logger.info(f"{file_name} - chunks-({index+1}/{chunks}) - down - speed: {speed:.2f}Mbps")
                 n += len(chunk)
                 params = {
                     'uploadId': upload_id,
@@ -711,24 +847,29 @@ class BiliWebApi:
                 params_clone = params.copy()
                 semaphore.acquire()
                 future = executor.submit(self.upload_chunk_thread, sessions[index % max_workers],
-                                         url, chunk, params_clone, headers, file_name)
+                                         endpoint_pool, chunk, params_clone, headers, file_name)
                 future.add_done_callback(_chunk_done)
-                futures.append(future)
-                st = time.perf_counter()
+                futures[future] = index + 1
 
-                for f in list(futures):
-                    if f.done():
-                        futures.remove(f)
-
-                # 等待所有分片上传完成，并按顺序收集结果
+            # 必须检查每个分片的真实结果，缺少任意分片都不能请求合并。
+            failed_parts = []
             for future in concurrent.futures.as_completed(futures):
-                pass
+                result = future.result()
+                if result is None:
+                    failed_parts.append(futures[future])
+                else:
+                    parts.append({
+                        'partNumber': result['partNumber'],
+                        'eTag': result['eTag'],
+                    })
 
-            results = [{
-                "partNumber": i + 1,
-                "eTag": "etag"
-            } for i in range(chunks)]
-            parts.extend(results)
+            if failed_parts:
+                logger.error(
+                    "%s 有 %d 个分块上传失败: %s",
+                    file_name, len(failed_parts), sorted(failed_parts),
+                )
+                return None
+            parts.sort(key=lambda part: part['partNumber'])
 
         if n == 0:
             return None
@@ -744,8 +885,13 @@ class BiliWebApi:
         attempt = 1
         while attempt <= 3:  # 一旦放弃就会丢失前面所有的进度，多试几次吧
             try:
-                r = self._session.post(url, params=p, json={"parts": parts}, headers=headers, timeout=15).json()
+                merge_url = endpoint_pool.current()
+                if merge_url is None:
+                    return None
+                r = self._session.post(merge_url, params=p, json={"parts": parts}, headers=headers, timeout=15).json()
                 if r.get('OK') == 1:
+                    if progress_cb:
+                        progress_cb(file_size, file_size)
                     # logger.info(f'{file_name} uploaded >> {n / 1000 / 1000:.2f}MB, {n / 1000 / 1000 / cost:.2f}MB/s. {r}')
                     return {"title": splitext(file_name)[0], "filename": splitext(basename(upos_uri))[0], "desc": ""}
                 raise IOError(r)
@@ -755,47 +901,74 @@ class BiliWebApi:
                 time.sleep(10)
         pass
 
-    def upload_chunk_thread(self, session, url, chunk, params_clone, headers, file_name, max_retries=5, backoff_factor=2):
-        st = time.perf_counter()
-        retries = 0
-        while retries < max_retries:
-            if self.stoped:                          # 手动停止：在途分块不再重试，直接退出
-                return None
-            try:
-                r = session.put(url=url, params=params_clone, data=chunk, headers=headers, timeout=20)
+    def upload_chunk_thread(self, session, endpoint_pool, chunk, params_clone, headers,
+                            file_name, max_retries=5, backoff_factor=2):
+        chunk_index = params_clone['chunk']
 
-                # 如果上传成功，退出重试循环
-                if r.status_code == 200:
-                    const_time = time.perf_counter() - st
-                    speed = len(chunk) * 8 / 1024 / 1024 / const_time
-                    # logger.info(
-                    #     f"{file_name} - chunks-{params_clone['chunk'] +1 } - up status: {r.status_code} - speed: {speed:.2f}Mbps"
-                    # )
-                    return {
-                        "partNumber": params_clone['chunk'] + 1,
-                        "eTag": "etag"
-                    }
+        while url := endpoint_pool.current():
+            retries = 0
+            while retries < max_retries:
+                if self.stoped:                     # 手动停止：在途分块不再重试，直接退出
+                    return None
+                try:
+                    r = session.put(
+                        url=url,
+                        params=params_clone,
+                        data=chunk,
+                        headers=headers,
+                        timeout=20,
+                    )
+                    if r.status_code == 200:
+                        return {
+                            "partNumber": chunk_index + 1,
+                            "eTag": "etag",
+                            "size": len(chunk),
+                        }
 
-                # 如果上传失败，但未达到最大重试次数，等待一段时间后重试
-                else:
                     retries += 1
-                    logger.warning(
-                        f"{file_name} - chunks-{params_clone['chunk']} - up failed: {r.status_code}. Retrying {retries}/{max_retries}")
+                    if retries < max_retries:
+                        logger.warning(
+                            "%s - chunks-%d - up failed: %s. Retrying %d/%d",
+                            file_name, chunk_index, r.status_code, retries, max_retries,
+                        )
+                    else:
+                        logger.error(
+                            "%s - chunks-%d - endpoint %s 连续失败 %d 次",
+                            file_name, chunk_index, url, max_retries,
+                        )
+                except requests.exceptions.SSLError as e:
+                    # 证书错误属于 endpoint 级故障，在原地址继续重试没有意义。
+                    logger.error("上传节点证书错误 %s: %s", url, e)
+                    break
+                except Exception as e:
+                    retries += 1
+                    if retries < max_retries:
+                        logger.error(
+                            "upload_chunk_thread err %s. Retrying %d/%d",
+                            e, retries, max_retries,
+                        )
+                    else:
+                        logger.error(
+                            "%s - chunks-%d - endpoint %s 连续失败 %d 次: %s",
+                            file_name, chunk_index, url, max_retries, e,
+                        )
 
-                    # 计算退避时间，逐步增加重试间隔
-                    backoff_time = backoff_factor ** retries
-                    time.sleep(backoff_time)
+                if retries < max_retries:
+                    time.sleep(backoff_factor ** retries)
 
-            except Exception as e:
-                retries += 1
-                logger.error(f"upload_chunk_thread err {str(e)}. Retrying {retries}/{max_retries}")
+            next_url = endpoint_pool.disable(url)
+            if next_url:
+                logger.warning(
+                    "%s - chunks-%d - endpoint 失败，切换到 %s",
+                    file_name, chunk_index, next_url,
+                )
+            else:
+                logger.error(
+                    "%s - chunks-%d - 所有候选 endpoint 均上传失败",
+                    file_name, chunk_index,
+                )
+                return None
 
-                # 计算退避时间，逐步增加重试间隔
-                backoff_time = backoff_factor ** retries
-                time.sleep(backoff_time)
-
-        # 如果重试了所有次数仍然失败，记录错误
-        logger.error(f"{file_name} - chunks-{params_clone['chunk']} - Upload failed after {max_retries} attempts.")
         return None
 
     def file_reader_generator(self, filepath: str, chunk_size: int):
@@ -841,6 +1014,8 @@ class BiliWebApi:
                     no_reprint=info['no_reprint'],
                     is_only_self=info['is_only_self'],
                     charging_pay=info['charging_pay'],
+                    watermark=info.get('watermark') or {'state': 0},
+                    space_hidden=info.get('space_hidden', 0),
                 )
                 for video in data['videos']:
                     video_data.append({
@@ -860,9 +1035,8 @@ class BiliWebApi:
             videos.videos.sort(key=lambda x: x['title'])
         # 不能提交 extra_kwargs 字段，提前处理
         post_data = asdict(videos)
-        if post_data.get('extra_kwargs'):
-            for key, value in post_data.pop('extra_kwargs').items():
-                post_data.setdefault(key, value)
+        for key, value in (post_data.pop('extra_kwargs', None) or {}).items():
+            post_data.setdefault(key, value)
 
         # self.__session.get('https://member.bilibili.com/x/geetest/pre/add', timeout=5)
         ret = self.submit_web(post_data, edit=edit)
@@ -917,6 +1091,8 @@ class Data:
     is_only_self: int = 0
     charging_pay: int = 0
     no_disturbance: int = 0
+    watermark: dict = field(default_factory=lambda: {'state': 0})
+    space_hidden: int = 0
     extra_kwargs: dict = field(default_factory=dict)
 
     bvid: int = None

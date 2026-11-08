@@ -81,6 +81,11 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self._check_wakeup = threading.Event()
         self._check_now_lock = threading.Lock()
         self._last_check_now = 0.0
+        self._segment_lock = threading.RLock()
+        self._segment_contexts = {}
+        self._ended_segment_keys = set()
+        self._dm_preopened_start_time = None
+        self.segment_start_time = None
         os.makedirs(self.output_dir,exist_ok=True)
     @property
     def taskname_disp(self) -> str:
@@ -104,38 +109,126 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             )
             self.send_queue.put(msg)
 
-    def segment_callback(self, filename: str, next_segment_start_time: float = None):
-        if self.room_info is None or not exists(filename):
-            self.logger.debug(f'No video file {filename}')
+    @staticmethod
+    def _segment_key(filename: str) -> str:
+        """统一下载中临时名和完成名；StreamGears 的 .part 重命名不应产生两个段。"""
+        key = os.path.abspath(str(filename))
+        if key.lower().endswith(".part"):
+            key = key[:-5]
+        return os.path.normcase(key)
+
+    def _reset_segment_tracking(self):
+        with self._segment_lock:
+            self._segment_contexts.clear()
+            self._ended_segment_keys.clear()
+            self._dm_preopened_start_time = None
+            self.segment_start_time = None
+
+    def segment_start_callback(self, filename: str, start_time: float):
+        """登记下载引擎实际打开的视频文件，并开始对应的弹幕事件段。"""
+        if not filename:
+            return
+        key = self._segment_key(filename)
+        start_time = float(start_time)
+        start_dt = datetime.fromtimestamp(start_time)
+
+        with self._segment_lock:
+            if key in self._segment_contexts:
+                return
+            context = {
+                "filename": filename,
+                "segment_id": self.segment_id,
+                "start_time": start_dt,
+                "room_info": self.room_info,
+                "streamer_info": self.streamer_info,
+            }
+            self._segment_contexts[key] = context
+            self._ended_segment_keys.discard(key)
+            # 仅供 WebUI 和本轮录制时长显示；视频收尾必须读取自己的 context。
+            self.segment_start_time = start_dt
+
+        dm_already_open = False
+        with self._segment_lock:
+            if self._dm_preopened_start_time is not None:
+                dm_already_open = abs(self._dm_preopened_start_time - start_time) < 0.001
+                self._dm_preopened_start_time = None
+
+        if self.danmaku and self.dmw and not dm_already_open:
+            try:
+                self.dmw.open_segment(start_time=start_time)
+            except RuntimeError:
+                # 正常连续分段必须由引擎先上报旧段结束；出现反序时不能覆盖旧段。
+                with self._segment_lock:
+                    self._segment_contexts.pop(key, None)
+                self.logger.exception("视频段开始事件顺序异常: %s", filename)
+                return
+
+        self.logger.debug("视频段开始: %s, start_time=%.6f", filename, start_time)
+
+    def segment_end_callback(
+        self,
+        filename: str,
+        end_time: float,
+        continuous: bool = False,
+    ):
+        """结束指定视频段；开始时间只从该文件自己的上下文读取。"""
+        if not filename:
+            return
+        key = self._segment_key(filename)
+        end_time = float(end_time)
+
+        with self._segment_lock:
+            if key in self._ended_segment_keys:
+                return
+            context = self._segment_contexts.pop(key, None)
+            if context is None:
+                self.logger.warning("收到未登记开始时间的视频段结束事件: %s", filename)
+                return
+            self._ended_segment_keys.add(key)
+
+        # 必须先按边界关闭 JSONL。FFprobe 和重命名可能耗时，若延后关闭，
+        # 边界后的事件可能越过尾部缓冲并错误落进旧段。
+        old_dm_file = None
+        if self.danmaku and self.dmw:
+            if continuous:
+                old_dm_file = self.dmw.rotate_segment(
+                    next_segment_start_time=end_time,
+                )
+                with self._segment_lock:
+                    self._dm_preopened_start_time = end_time
+            else:
+                old_dm_file = self.dmw.close_segment(end_time=end_time)
+
+        if not exists(filename):
+            self.logger.debug("视频段文件不存在: %s", filename)
+            if old_dm_file and exists(old_dm_file):
+                os.remove(old_dm_file)
             return
 
-        callback_time = time.time()
-        wall_duration = callback_time - self.segment_start_time.timestamp()
-        probed_duration = FFprobe.get_duration(filename)
+        start_time = context["start_time"]
+        wall_duration = max(0.0, end_time - start_time.timestamp())
+        # 直播 FLV 可能保留上游累计时间戳，format.duration 因而不一定是本段时长。
+        # 以视频包时间线跨度作为分段媒体时长，探测失败时该函数内部仍会回退到容器时长。
+        probed_duration = FFprobe.get_timeline_duration(filename)
         # 0 秒同样是无效探测结果；使用现实经过时间兜底，避免把已录制的
         # FLV 误判为短视频并连同 JSONL 一起删除。
         duration = probed_duration if probed_duration > 0 else wall_duration
-        # 能由下载引擎在“新文件打开”瞬间上报时优先用它；否则用媒体时长反推，
-        # 避免 streamgears 的轮询延迟（最多约 10 秒）污染 JSONL 分段边界。
-        if next_segment_start_time is None:
-            next_segment_start_time = (
-                self.segment_start_time.timestamp() + duration
-                if duration >= 0 else callback_time
-            )
+        room_info = context.get("room_info") or self.room_info or {}
+        streamer_info = context.get("streamer_info") or self.streamer_info
 
         video_info = VideoInfo(
             path=filename,
             file_id=uuid(),
             dtype='src_video',
             group_id=self.sess_id,
-            segment_id=self.segment_id,
-            segment_start_time=self.segment_start_time,
+            segment_id=context["segment_id"],
+            segment_start_time=start_time,
             size=os.path.getsize(filename),
-            ctime=self.segment_start_time,
+            ctime=start_time,
             duration=duration,
             resolution=(self.width, self.height),
-            title=self.room_info['title'],
-            streamer=self.streamer_info,
+            title=room_info.get("title", ""),
+            streamer=streamer_info,
             taskname=self.taskname,
         )
 
@@ -151,13 +244,13 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             newfile = filename
             self.logger.error(f'视频 {newfile} 分段失败，将使用默认名称 {filename}.')
 
-        if self.danmaku:
+        if self.danmaku and old_dm_file:
             newdmfile = splitext(newfile)[0]+'.'+self.dm_format
-            newdmfile = self.dmw.split(
-                newdmfile,
-                next_segment_start_time=next_segment_start_time,
-                open_next=not self.stoped,
-            ) or newdmfile
+            try:
+                os.replace(old_dm_file, newdmfile)
+            except OSError:
+                self.logger.exception("弹幕事件文件重命名失败: %s -> %s", old_dm_file, newdmfile)
+                newdmfile = old_dm_file
         else:
             newdmfile = None
 
@@ -178,14 +271,12 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 os.remove(video_info.path)
             if video_info.dm_file_id and exists(video_info.dm_file_id):
                 os.remove(video_info.dm_file_id)
-            self.segment_start_time = datetime.fromtimestamp(next_segment_start_time)
             return
 
         self._pipeSend(event='livesegment', msg=f'视频分段 {newfile} 录制完成.', target=f'replay/{self.taskname}', dtype='VideoInfo', data=video_info)
         new_room_info = retry_safe(self.liveapi.GetRoomInfo)
         if new_room_info:
             self.room_info = new_room_info
-        self.segment_start_time = datetime.fromtimestamp(next_segment_start_time)
         self.segment_id += 1
 
     def start_once(self):
@@ -197,7 +288,6 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         if not(self.room_info and self.streamer_info):
             raise RuntimeError(f'{self.taskname}: 获取主播信息出现错误.')
 
-        self.segment_start_time = datetime.now()
         os.makedirs(self.output_dir,exist_ok=True)
 
         stream_url = self.liveapi.GetStreamURL(**self.stream_option)
@@ -264,7 +354,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         def danmaku_thread():
             self.dmw.start(
                 self_segment=not self.video,
-                segment_start_time=self.segment_start_time.timestamp(),
+                segment_start_time=time.time() if not self.video else None,
             )
 
         def video_thread():
@@ -293,13 +383,12 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 url=self.url,
                 taskname=self.taskname,
                 advanced_video_args=self.advanced_video_args,
-                segment_callback=self.segment_callback,
+                segment_start_callback=self.segment_start_callback,
+                segment_end_callback=self.segment_end_callback,
                 debug=self.debug,
                 **self.kwargs
             )
 
-        # 两个下载器均已构造；让视频和 JSONL 使用同一个第一段现实时间起点。
-        self.segment_start_time = datetime.now()
         if self.danmaku:
             futures.append(self.executor.submit(danmaku_thread))
         if self.video:
@@ -543,6 +632,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
                     self.sess_id = uuid(8)
                     self.segment_id = 1
+                    self._reset_segment_tracking()
                     self.force_stop_trigger = False
                     self.stop_confirm_deadline = None
                     state = StreamState.OFFLINE
@@ -561,6 +651,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
                     self.sess_id = uuid(8)
                     self.segment_id = 1
+                    self._reset_segment_tracking()
 
                     # 如果是人为强制下播（force_offline_time/cmd_offline）但主播实际未下播，
                     # 下一次检测到在线时应视为回放，而不是继续按直播处理
@@ -616,7 +707,10 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 # 过期/节点切换导致的断流）。按"这一轮录了多久"区分正常断流和异常中断。
                 if update_state(state) == StreamState.LIVE:
                     self.stop_once()
-                    recorded = (datetime.now() - self.segment_start_time).total_seconds()
+                    recorded = (
+                        (datetime.now() - self.segment_start_time).total_seconds()
+                        if self.segment_start_time else 0
+                    )
                     if recorded >= normal_reconnect_min_sec:
                         # 录够久才断 → 正常断流，平静换地址续录，不当异常、不累加重启计数
                         restart_cnt = 0
@@ -718,7 +812,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         self._check_wakeup.set()
         return True, "立即检测指令已发送"
 
-    def stop_once(self): # 会调用segment callback分段视频
+    def stop_once(self): # 视频后端会通过 segment_end_callback 收尾当前文件
         self.stoped = True
         if self.video and hasattr(self, 'downloader'):
             try:
@@ -727,10 +821,12 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 self.logger.exception(e)
         if self.danmaku and hasattr(self, 'dmw') and self.dmw:
             try:
-                # 视频后端先通过 segment_callback 收尾已有视频；此时仍留在
+                # 视频后端先通过 segment_end_callback 收尾已有视频；此时仍留在
                 # dm_file 中的临时 JSONL 没有对应视频，应在关闭 writer 后删除。
                 # 纯弹幕任务没有视频，必须保留其当前 JSONL。
                 self.dmw.stop(discard_unpaired=self.video)
+                with self._segment_lock:
+                    self._dm_preopened_start_time = None
             except Exception as e:
                 self.logger.exception(e)
         try:
@@ -738,3 +834,10 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 self.executor.shutdown(wait=False)
         except Exception as e:
             self.logger.exception(e)
+        with self._segment_lock:
+            if self._segment_contexts:
+                self.logger.warning(
+                    "停止本轮录制时仍有 %d 个未收到结束事件的视频段",
+                    len(self._segment_contexts),
+                )
+                self._segment_contexts.clear()

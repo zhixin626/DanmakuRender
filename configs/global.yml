@@ -6,6 +6,17 @@ dmr_engine_args:
   enabled_plugins: [downloader, render, uploader, cleaner, webservice, merger]
   config_path: ./configs
 
+logging_args:
+  instance_name: ~
+  directory: ./logs
+  console_level: INFO
+  file_level: DEBUG
+  retention_days: 30
+  protected_days: 7
+  max_total_size_mb: 200
+  max_file_size_mb: 20
+  cleanup_interval_hours: 24
+
 # 八个任务默认都执行：弹幕渲染、上传、清理和分段合并。
 # 只做纯净转码的任务在自己的配置中覆盖前两项。
 common_event_args:
@@ -14,28 +25,89 @@ common_event_args:
   auto_upload: true
   auto_clean: true
   auto_merge: true
+  state_timeout_hours: 72
+
+bark_args:
+  is_bark: false
+  sound: silence
+
+merge_args:
+  merge_type: ~
+  is_amplify: false
+  extra_gain_db: 0
+  file_name_template: '{stime.month:02d}月{stime.day:02d}日'
+  remove_source: true
+  retry: 3
 
 download_args:
   live:
     output_name: '{CTIME.MONTH}月{CTIME.DAY}日{CTIME.HOUR:02d}点{CTIME.MINUTE:02d}分'
     segment: 7200
     stream_args:
-      stop_wait_time: 120
+      enable: true
+      engine: auto
+      output_format: ~
+      stop_wait_time: 180
+      stream_option:
+        # 留空使用接口返回的第一条主线；也可以填写 CDN 关键词或正则
+        stream_cdn: ~
+        # 留空按 FLV-AVC > fMP4-AVC > HLS-TS-AVC > HEVC > AV1 自动选择
+        stream_type: ~
+        bili_watch_cookies: .login_info/bili_watch_cookies.json
       advanced_args:
+        default_resolution: [1920, 1080]
         start_check_interval: 60
-        stop_check_interval: 60
-        restart_interval: [0, 1, 20]
-        min_video_size: 0.5
-        min_video_duration: 3
+        stop_check_interval: 15
+        check_policy:
+          enabled: false
+          ranges: []
+        record_windows:
+          ranges: []
+        force_offline_time: ~
+        trust_onair_at_startup: true
+        restart_interval: [2, 2, 10]
+        max_fn_length: 80
+        min_video_size: 0.1
+        min_video_duration: 1
+        group_id: ~
+        ffmpeg_stream_args: [
+          '-rw_timeout', '10000000',
+          '-analyzeduration', '15000000',
+          '-probesize', '50000000',
+          '-thread_queue_size', '16'
+        ]
+        ffmpeg_output_args: ~
+        disable_lowspeed_interrupt: false
+        bili_force_origin: true
+        streamlink_extra_args: [
+          '--twitch-disable-ads',
+          '--twitch-disable-reruns'
+        ]
+        streamlink_quality: ~
     danmaku_args:
+      enable: true
+      record_types: [danmaku, gift, superchat, member]
+      stream_option:
+        dm_cookie_path: ~
+      advanced_args:
+        dm_auto_restart: 300
+        event_tail_window: 15
       statistics:
         enable: true
         types: [gift, superchat, member]
         rank_top_n: 10
 
+render_kernel_args:
+  # 同时运行的渲染/转码任务数
+  nrenders: 1
+
 render_args:
   # 纯净转码任务直接封装为 MP4，不重新编码音视频。
   transcode:
+    output_dir: ~
+    output_name: ~
+    format: mp4
+    retry: 3
     hwaccel: false
     vencoder: copy
     vencoder_args: []
@@ -44,39 +116,144 @@ render_args:
     output_resize: ~
 
   overlay:
+    # 弹幕渲染与输出
     engine: emoji_dmrender
+    output_dir: ~
+    output_name: ~
+    format: mp4
+    retry: 3
+    hwaccel: auto
     vencoder: hevc_nvenc
     vencoder_args: [-b:v, 4M]
+    aencoder: aac
     aencoder_args: [-b:a, 128K]
-    danmaku:
-      font: Microsoft YaHei
-      fontsize: 60
-      opacity: 0.78
-      max_width: 60char
-    gift:
-      duration: 30
-      min_price_cny: 3
-    member:
-      duration: 30
+    output_resize: ~
+
+    # Emoji、分辨率与输出帧率
+    min_fps: 30
+    # 所有横/竖屏源等比缩放并补黑边到对应的1080p画布
+    rescale_to_1080p: true
+    # 明显横/竖屏相信当前源；接近方形且方向突变时参考上一段
+    rescale_orientation: adaptive
+    # 留空时按 JSONL 中的平台自动选择表情包和字体
+    emoji_pack: ~
+    emoji_font: ~
+
+    # 普通从右向左滚动的弹幕轨道
     r2l:
-      duration: 8
+      screen_duration: 8
       vertical_ratio: 0.3
       margin_top: 10px
       vertical_gap: 10px
-      horizontal_gap: 12px
+      horizontal_gap: 13px
+
+      danmaku:
+        enable: true
+        font: Microsoft YaHei
+        fontsize: 60
+        opacity: 0.78
+        outline_color: '#000000'
+        outline_size: 1px
+        vip_users: ~
+        filter_keywords: ~
+        filter_users: ~
+        max_width: ~
+
+    # 左侧药丸轨道，目前承载 Super Chat
     slide_left:
-      width: 18%
+      width: 13%
       margin_left: 10px
-      margin_bottom: 10px
+      margin_bottom: 12px
+      vertical_gap: 10px
+      enter_duration: 0.5
+      exit_duration: 0.5
+      reflow_duration: 0.3
+      font: Microsoft YaHei
+      fontsize: 30
+      top_opacity: 0.7
+      bottom_opacity: 0.3
+      corner_radius: 40px
+      box_border_width: 1px
+      box_border_opacity: 0.45
+      name_border_width: 0px
+      content_border_width: 1px
+      name_color: '#666666'
+      content_color: '#FFFFFF'
+
+      # 左闭右开；~ 表示无上限。价格缺失或未匹配时使用最低档
+      price_duration_ranges:
+        - {min_price_cny: 0, max_price_cny: 30, seconds: 30}
+        - {min_price_cny: 30, max_price_cny: 50, seconds: 60}
+        - {min_price_cny: 50, max_price_cny: 100, seconds: 120}
+        - {min_price_cny: 100, max_price_cny: ~, seconds: 180}
+      price_color_ranges:
+        - {min_price_cny: 0, max_price_cny: 1, top_color: '#EEF6F8', bottom_color: '#607D8B'}
+        - {min_price_cny: 1, max_price_cny: 10, top_color: '#DBFFFD', bottom_color: '#3E8E95'}
+        - {min_price_cny: 10, max_price_cny: 50, top_color: '#E2F0FF', bottom_color: '#4C78C2'}
+        - {min_price_cny: 50, max_price_cny: 100, top_color: '#EDE7FF', bottom_color: '#7656B5'}
+        - {min_price_cny: 100, max_price_cny: 1000, top_color: '#FFE8F1', bottom_color: '#C65386'}
+        - {min_price_cny: 1000, max_price_cny: ~, top_color: '#FFF2C7', bottom_color: '#B77A16'}
+
+      superchat:
+        enable: true
+        min_price_cny: 0
+        # true：仅上下背景色采用平台传入值；文字颜色始终使用轨道配置
+        use_event_background_colors: true
+        use_event_duration: false
+
+    # 右侧药丸轨道，礼物和会员共用同一队列
     slide_right:
-      width: 18%
+      width: 13%
       margin_right: 10px
-      margin_bottom: 10px
+      margin_bottom: 12px
+      vertical_gap: 10px
+      enter_duration: 0.5
+      exit_duration: 0.5
+      reflow_duration: 0.3
+      font: Microsoft YaHei
+      fontsize: 30
+      top_opacity: 0.7
+      bottom_opacity: 0.3
+      corner_radius: 40px
+      box_border_width: 1px
+      box_border_opacity: 0.45
+      name_border_width: 0px
+      content_border_width: 1px
+      name_color: '#666666'
+      content_color: '#FFFFFF'
+
+      price_duration_ranges:
+        - {min_price_cny: 0, max_price_cny: 30, seconds: 30}
+        - {min_price_cny: 30, max_price_cny: 50, seconds: 60}
+        - {min_price_cny: 50, max_price_cny: 100, seconds: 120}
+        - {min_price_cny: 100, max_price_cny: ~, seconds: 180}
+      price_color_ranges:
+        - {min_price_cny: 0, max_price_cny: 1, top_color: '#EEF6F8', bottom_color: '#607D8B'}
+        - {min_price_cny: 1, max_price_cny: 10, top_color: '#DBFFFD', bottom_color: '#3E8E95'}
+        - {min_price_cny: 10, max_price_cny: 50, top_color: '#E2F0FF', bottom_color: '#4C78C2'}
+        - {min_price_cny: 50, max_price_cny: 100, top_color: '#EDE7FF', bottom_color: '#7656B5'}
+        - {min_price_cny: 100, max_price_cny: 1000, top_color: '#FFE8F1', bottom_color: '#C65386'}
+        - {min_price_cny: 1000, max_price_cny: ~, top_color: '#FFF2C7', bottom_color: '#B77A16'}
+
+      gift:
+        enable: true
+        # 保留当前全局行为：低于 ¥3 的礼物不渲染；改成 0 即全部渲染
+        min_price_cny: 1
+        use_event_background_colors: false
+        use_event_duration: false
+        template: '送出 {gift_name}{gift_count_suffix}'
+
+      member:
+        enable: true
+        min_price_cny: 0
+        use_event_background_colors: false
+        use_event_duration: false
+        template: '开通 {member_name}{member_count_suffix}'
 
 upload_args:
   bilibili:
     engine: biliwebapi
-    account: b站_不可一世冷狗
+    account: ~
     retry: 3
     realtime: false
     line: ~
@@ -85,28 +262,41 @@ upload_args:
     source: ''
     dtime: 0
     no_reprint: 1
-    is_only_self: 0
-    no_disturbance: 0
-    auto_append_period: daily
-    cover_args:
-      is_render_cover: true
-      is_extract_frame: false
+    cover:
+      mode: ~
+      path: ''
+      frame_opacity: 0.2
       time_template: '{stime.month}月{stime.day}日'
       ratio: 16/9
       sample_count: 10
     desc: |
       主播：{STREAMER.NAME}
+      地址：{STREAMER.URL}
+      录制：a fork of https://github.com/SmallPeaches/DanmakuRender
+      ==={p_n}===
       标题：{TITLE}
       开播：{STIME.YEAR:02d}年{STIME.MONTH:02d}月{STIME.DAY:02d}日{STIME.HOUR:02d}点{STIME.MINUTE:02d}分
       下播：{ETIME.YEAR:02d}年{ETIME.MONTH:02d}月{ETIME.DAY:02d}日{ETIME.HOUR:02d}点{ETIME.MINUTE:02d}分
       时长：{TOTALTIME}
-      地址：{STREAMER.URL}
-      录制：https://github.com/SmallPeaches/DanmakuRender
       礼物：{revenue_summary}
       排名：{top_ranking}
+    append_desc: |
+      ==={p_n}===
+      标题：{TITLE}
+      开播：{STIME.YEAR:02d}年{STIME.MONTH:02d}月{STIME.DAY:02d}日{STIME.HOUR:02d}点{STIME.MINUTE:02d}分
+      下播：{ETIME.YEAR:02d}年{ETIME.MONTH:02d}月{ETIME.DAY:02d}日{ETIME.HOUR:02d}点{ETIME.MINUTE:02d}分
+      时长：{TOTALTIME}
+      礼物：{revenue_summary}
+      排名：{top_ranking}
+    watermark: 0
+    space_hidden: 0
+    auto_append_period: ~
+    no_disturbance: 0
+    is_only_self: 0
 
   acfun:
-    account: A站_不可一世冷狗3
+    engine: acfun
+    account: ~
     retry: 3
     realtime: false
     channel_id: 218
@@ -121,7 +311,7 @@ upload_args:
       下播：{ETIME.YEAR:02d}年{ETIME.MONTH:02d}月{ETIME.DAY:02d}日{ETIME.HOUR:02d}点{ETIME.MINUTE:02d}分
       时长：{TOTALTIME}
       地址：{STREAMER.URL}
-      录制：https://github.com/SmallPeaches/DanmakuRender
+      录制：a fork of https://github.com/SmallPeaches/DanmakuRender
       礼物：{revenue_summary}
       排名：{top_ranking}
 
@@ -130,17 +320,9 @@ cleaner_kernel_args:
 
 clean_args:
   delete:
-    delay: 43200
+    delay: 64800
   send2trash:
-    delay: 43200
-
-merge_args:
-  file_name_template: '{stime.month:02d}月{stime.day:02d}日'
-  remove_source: true
-
-bark_args:
-  is_bark: true
-  sound: silence
+    delay: 64800
 
 webservice_kernel_args:
   web_api: true

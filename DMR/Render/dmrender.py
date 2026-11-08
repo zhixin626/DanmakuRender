@@ -8,6 +8,7 @@ from os.path import exists
 from .baserender import BaseRender
 from .ffmpeg import RawFFmpegRender
 from .plan_ass import render_plan_to_ass
+from .resolution import resolve_render_canvas
 from DMR.utils import *
 
 
@@ -26,6 +27,8 @@ class DmRender(BaseRender):
         aencoder: str,
         aencoder_args: list,
         output_resize: str,
+        rescale_to_1080p: bool = False,
+        rescale_orientation: str = "auto",
         ffmpeg: str = None,
         debug=False,
         **kwargs,
@@ -41,6 +44,8 @@ class DmRender(BaseRender):
         self.aencoder = aencoder
         self.aencoder_args = aencoder_args
         self.output_resize = output_resize
+        self.rescale_to_1080p = bool(rescale_to_1080p)
+        self.rescale_orientation = rescale_orientation
         self.ffmpeg = ffmpeg if ffmpeg else ToolsList.get("ffmpeg")
         self.debug = debug
         self.logger = logging.getLogger(__name__)
@@ -55,6 +60,7 @@ class DmRender(BaseRender):
         logfile=None,
         duration=None,
         progress_cb=None,
+        canvas_resolution=None,
     ):
         ffmpeg_args = [self.ffmpeg, "-y", *self.hwaccel_args]
         if self.output_resize:
@@ -69,14 +75,31 @@ class DmRender(BaseRender):
                     w, h = 1920, 1080
                 scale = float(self.output_resize)
                 scale_args = ["-s", f"{int(w * scale)}x{int(h * scale)}"]
-        else:
+        elif not self.rescale_to_1080p:
             scale_args = ["-noautoscale"]
+        else:
+            scale_args = []
 
         danmaku = escape_sub(danmaku)
         filter_name = "-vf"
         fps = FFprobe.get_fps(video)
-        fps_prefix = f"fps={fps:.6g}," if fps and fps > 0 else ""
-        filter_str = f"{fps_prefix}subtitles=filename='{danmaku}'"
+        filters = [f"fps={fps:.6g}"] if fps and fps > 0 else []
+        if self.rescale_to_1080p:
+            width, height = canvas_resolution or resolve_render_canvas(
+                FFprobe.get_resolution(video),
+                rescale_to_1080p=True,
+            )
+            filters.extend([
+                (
+                    f"scale={width}:{height}:"
+                    "force_original_aspect_ratio=decrease:"
+                    "force_divisible_by=2"
+                ),
+                f"pad={width}:{height}:-1:-1:color=black",
+                "setsar=1",
+            ])
+        filters.append(f"subtitles=filename='{danmaku}'")
+        filter_str = ",".join(filters)
 
         ffmpeg_args += [
             "-fflags",
@@ -113,6 +136,15 @@ class DmRender(BaseRender):
 
         render_plan = kwargs.get("render_plan")
         danmaku = kwargs.get("danmaku") or video.dm_file_id
+        canvas_resolution = kwargs.get("canvas_resolution")
+        if canvas_resolution is None:
+            canvas_resolution = resolve_render_canvas(
+                getattr(video, "resolution", None),
+                rescale_to_1080p=self.rescale_to_1080p,
+                rescale_orientation=self.rescale_orientation,
+            )
+        else:
+            canvas_resolution = tuple(int(value) for value in canvas_resolution)
         temp_ass = None
         if render_plan:
             if not exists(render_plan):
@@ -124,13 +156,12 @@ class DmRender(BaseRender):
                 dir=os.path.dirname(output) or None,
             )
             os.close(fd)
-            resolution = getattr(video, "resolution", None) or (1920, 1080)
             render_plan_to_ass(
                 render_plan,
                 temp_ass,
                 include_raster_text=True,
-                width=int(resolution[0] or 1920),
-                height=int(resolution[1] or 1080),
+                width=canvas_resolution[0],
+                height=canvas_resolution[1],
             )
             danmaku = temp_ass
         if not danmaku or not exists(danmaku):
@@ -151,6 +182,7 @@ class DmRender(BaseRender):
                 output,
                 duration=getattr(video, "duration", None),
                 progress_cb=progress_cb,
+                canvas_resolution=canvas_resolution,
             )
         finally:
             try:
@@ -164,6 +196,8 @@ class DmRender(BaseRender):
         output_info: VideoInfo = copy.deepcopy(video)
         output_info.dtype = "dm_video"
         output_info.path = output
+        if self.rescale_to_1080p and not self.output_resize:
+            output_info.resolution = canvas_resolution
         output_info.file_id = uuid()
         output_info.size = os.path.getsize(output)
         output_info.ctime = start_time

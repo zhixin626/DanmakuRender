@@ -104,11 +104,8 @@ class Sampler:
 def _cookie_kwargs(platform):
     kwargs = {}
     cookie = auto_cookie(platform)
-    if cookie and os.path.exists(cookie):
-        if platform == "bilibili":
-            kwargs["bilibili_dm_cookie_path"] = cookie
-        elif platform == "douyin":
-            kwargs["douyin_dm_cookies"] = cookie
+    if platform in {"bilibili", "douyin"} and cookie and os.path.exists(cookie):
+        kwargs["dm_cookie_path"] = cookie
     return kwargs
 
 

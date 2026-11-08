@@ -7,6 +7,7 @@ from DMR.Login.cookiemgr import PLATFORM_PREFIXES
 from . import common
 
 PACK_DIR = os.path.join("emoji_pack", "bilibili")
+MANIFEST = os.path.join(PACK_DIR, "bilibili_emoji.json")
 API = "https://api.live.bilibili.com/xlive/web-ucenter/v2/emoticon/GetEmoticons"
 BUVID_API = "https://api.bilibili.com/x/frontend/finger/spi"
 # 实测：账号级的"通用表情"+"emoji表情"两个包不随房间号变化，只有"UP主粉丝团"这种粉丝勋章包
@@ -60,12 +61,13 @@ def check():
     merged = _fetch_room(ROOM_ID, cookie)
 
     os.makedirs(PACK_DIR, exist_ok=True)
-    with open(os.path.join(PACK_DIR, "bilibili_emoji.json"), "w", encoding="utf-8") as f:
+    with open(MANIFEST, "w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=2)
 
-    missing, existing_count, unique_count = common.diff_missing(merged, PACK_DIR)
+    missing, extra, existing_count, unique_count = common.diff_pack(merged, PACK_DIR)
     return {
         'missing': missing,
+        'extra': extra,
         'existing_count': existing_count,
         'unique_count': unique_count,
         'cookie_used': cookie_used,
@@ -74,6 +76,11 @@ def check():
 
 def download(items):
     return common.download_missing(items, PACK_DIR, headers=common.UA)
+
+
+def delete_extras(items):
+    with open(MANIFEST, encoding="utf-8") as file:
+        return common.delete_extras(json.load(file), PACK_DIR, items)
 
 
 if __name__ == '__main__':

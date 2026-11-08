@@ -7,7 +7,7 @@ from math import ceil
 from pathlib import Path
 
 from DMR.utils import replace_keywords
-from DMR.utils.cover import generate_cover
+from DMR.utils.cover import prepare_cover
 from DMR.Login.cookiemgr import load_cookie_dict, PLATFORM_PREFIXES
 
 try:
@@ -372,21 +372,15 @@ class acfun:
         original_declare = int(copyright) if copyright is not None else None
         watermark_position  = int(config.get('watermark_position', 3))
         watermark_signature = bool(config.get('watermark_signature', False))
-        # 封面：优先按 cover_args 生成（抽帧+渲染，共享 util）；否则用静态 config['cover']；再否则兜底自动抽帧
-        cover = generate_cover(file_paths[0], config.get('cover_args'),
-                               stime=(session or {}).get('stime'), account=config.get('account', ''))
-        if not cover:
-            cover = config.get('cover', '')
-        if not cover:
-            try:
-                cover = extract_best_frame(
-                    file_paths[0],
-                    output_dir=str(Path(file_paths[0]).parent),
-                )
-                self.logger.info(f'封面已自动提取: {cover}')
-            except Exception as e:
-                self.logger.warning(f'封面自动提取失败，将不设封面: {e}')
-                cover = ''
+        # 封面完全由统一的 cover.mode / cover.path 决定，不再隐式抽帧。
+        cover, generated_cover = prepare_cover(
+            file_paths[0],
+            config.get('cover'),
+            stime=(session or {}).get('stime'),
+            account=config.get('account', ''),
+            context={**dict(files[0]), **(session or {})},
+        )
+        cover = cover or ''
 
         try:
             ac_id = self._client.create_douga(
@@ -403,6 +397,11 @@ class acfun:
                 watermark_position=watermark_position,
                 watermark_signature=watermark_signature,
             )
+            if generated_cover:
+                try:
+                    os.remove(cover)
+                except OSError:
+                    pass
             return True, ac_id
         except InterruptedError:
             return False, '上传被中止'

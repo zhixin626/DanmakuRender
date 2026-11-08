@@ -3,14 +3,8 @@ check_pypi()
 
 import time
 import argparse
-from datetime import datetime
 import os
 import sys
-import logging
-import logging.handlers
-import yaml
-from glob import glob
-from os.path import exists, splitext
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append('./tools')
 
@@ -19,6 +13,7 @@ VERSION = '2026.05.01'
 from DMR import DanmakuRender
 from DMR.Config import Config
 from DMR.utils.console_buffer import install_console_tee
+from DMR.utils.log_manager import configure_logging
 
 # 接管控制台输出，镜像到内存缓冲区供 WebService 日志页读取
 # 必须在下面 logging.StreamHandler(sys.stdout) 创建之前调用
@@ -42,23 +37,10 @@ if __name__ == '__main__':
     
     config = Config(args.config)
 
-    logger = logging.getLogger('DMR')
-    logger.setLevel(logging.DEBUG)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO) 
-    console_handler.setFormatter(logging.Formatter("[%(asctime)s][%(levelname)s]: %(message)s"))
-    
-    os.makedirs('logs', exist_ok=True)
-    log_file = f'logs/DMR-{datetime.now().strftime("%Y%m%d")}.log'
-    if exists(log_file):
-        _cnt = len(glob(splitext(log_file)[0] + '*'))
-        log_file = splitext(log_file)[0] + f'({_cnt})' + splitext(log_file)[1]
-    file_handler = logging.handlers.TimedRotatingFileHandler(log_file, when='D', interval=1, backupCount=3, encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter("[%(asctime)s][%(name)s][%(levelname)s]: %(message)s"))
-    
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
+    logger = configure_logging(
+        args.config,
+        config.global_config.get("logging_args") or {},
+    )
 
     logger.debug(f'VERSION: {VERSION}')
 

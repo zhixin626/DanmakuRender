@@ -11,6 +11,26 @@ executable_tools_path:
   ffprobe: ~
   biliup: ~
 
+# 主程序日志。WebUI 使用独立的内存日志流，不受这里的磁盘路径影响
+logging_args:
+  # 实例名称会写入日志文件名；留空时从配置目录推导（如 configs、configs_test）
+  instance_name: ~
+  # 相对路径以项目根目录为基准
+  directory: ./logs
+  # 控制台只显示 INFO 以上，日志文件记录 DEBUG 以上
+  console_level: INFO
+  file_level: DEBUG
+  # 删除最后写入时间超过该天数的 DMR-*.log*；0 表示不按时间删除
+  retention_days: 30
+  # 容量清理时至少保护最近这些天的日志
+  protected_days: 7
+  # 日志目录中 DMR 主日志的总容量上限；0 表示不限制
+  max_total_size_mb: 200
+  # 单个进程日志达到该大小后轮转，最多保留3个备份；0 表示不轮转
+  max_file_size_mb: 20
+  # 启动时立即清理，此后按该间隔重复清理；0 表示只在启动时清理
+  cleanup_interval_hours: 24
+
 # DMR引擎参数
 dmr_engine_args:
   # 选择组件
@@ -74,12 +94,14 @@ download_args:
         # 对于虎牙直播，此项可选al, tx, hw等cdn服务器的缩写
         # 对于B站，可选特定的CDN域名前缀，例如：c1--cn-gotcha208
         # 或者正则匹配特定CDN，例如：.*cn-gotcha.*
-        # 默认为空，由程序随机选择可用cdn
+        # 默认为空，使用B站接口返回的第一条地址（主线）
         stream_cdn: ~
-        # 直播流类型（暂时只对B站生效）可选flv，hls，avc，hevc，av1
-        # 注意hls流无法使用streamgears录制
-        # 如果需要同时指定codec类型，请使用'type-codec'的格式，例如：flv-avc
-        # 默认为空，由程序自动选择
+        # 直播流类型（暂时只对B站生效）：
+        #   留空：FLV-AVC > fMP4-AVC > HLS-TS-AVC > HEVC > AV1
+        #   flv/fmp4/hls 或 avc/hevc/av1：提高该格式/编码的优先级，缺失时自动回退
+        #   flv_only/fmp4_only/hls_only 或 avc_only/hevc_only/av1_only：严格限制
+        #   type-codec（如 flv-avc、fmp4-hevc）：优先该精确组合
+        # 注意HLS/fMP4流无法使用streamgears录制
         stream_type: ~
         # B站观看cookies，用于获取直播流，如果不填写则使用登录B站上传视频的cookies
         # 如果希望不登录录制最低画质，请设置为'None'
@@ -151,13 +173,11 @@ download_args:
       record_types: [danmaku, gift, superchat, member]
       # 弹幕流选项
       stream_option:
-        # B站弹幕连接使用的 Cookie 文件；留空时按平台默认方式连接
-        bilibili_dm_cookie_path: ~
-        # 用于获取抖音弹幕流的cookies，用于特殊情况下录制抖音弹幕(https://github.com/SmallPeaches/DanmakuRender/issues/258)
-        # 格式：'__ac_nonce=xxx; __ac_signature=xxx; sessionid=xxx'
+        # 当前直播平台的弹幕 Cookie 文件；留空时按平台默认方式连接
+        # B站使用登录导出的 Cookie JSON；抖音使用 Cookie 字典 JSON
+        # 抖音 Cookie 用于特殊情况下录制弹幕(https://github.com/SmallPeaches/DanmakuRender/issues/258)
         # 特别提醒，使用此方法传入参数会在日志文件中明文显示，如果需要共享日志文件请确保删除了敏感信息！
-        # 推荐设置为cookies所在的json文件，这样cookies就不会明文显示，json文件应该为cookies字典：{'__ac_nonce': xxx, ...}
-        douyin_dm_cookies: ~
+        dm_cookie_path: ~
       # 高级弹幕录制参数（请确保你明白这些参数的含义后再修改）
       advanced_args:
         # 弹幕超时自动重启（秒），超过一段时间无弹幕会自动重启弹幕录制，0表示关闭
@@ -252,8 +272,8 @@ download_args:
 
 # 渲染器核心参数
 render_kernel_args:
-  # 同时执行的渲染/转码任务数。每个 emoji_dmrender 任务内部还会启用 workers 并行，
-  # 因此通常保持 1；显存、CPU 和磁盘足够时再提高
+  # 同时执行的渲染/转码任务数。emoji_dmrender 单个任务内部固定整段单路渲染；
+  # 多个任务同时执行时，显存和CPU占用仍会叠加
   nrenders: 1
 
 # 渲染器默认参数
@@ -267,14 +287,25 @@ render_args:
     format: mp4
     # 失败后的重试次数
     retry: 3
-    # FFmpeg 硬件解码器。auto/true 表示自动；false/~ 表示关闭；
-    # 也可填写 cuda、qsv 等明确名称
+    # 输入视频的解码方式，与下面的输出编码器相互独立：
+    #   auto/true：由 FFmpeg 自动选择可用的硬件解码（推荐）
+    #   false/~：关闭硬件解码，改用 CPU
+    #   cuda：NVIDIA GPU 解码；qsv：Intel 核显解码
+    # 使用 copy 直接复制视频流时不会发生解码，此项没有实际作用
     hwaccel: auto
-    # 视频编码器，例如 h264_nvenc、hevc_nvenc、h264_amf、libx264 或 copy
+    # 输出视频编码器，可按硬件和兼容性选择：
+    #   hevc_nvenc：NVIDIA GPU 编码 HEVC/H.265，体积较小
+    #   h264_nvenc：NVIDIA GPU 编码 H.264，兼容性更好
+    #   hevc_qsv/h264_qsv：Intel 核显编码
+    #   hevc_amf/h264_amf：AMD GPU 编码
+    #   libx265/libx264：CPU 编码，通常更慢
+    #   copy：不重新编码，直接复制原视频流；缩放时不能使用
     vencoder: h264_nvenc
+    # 传给视频编码器的附加参数；例如 [-b:v, 6M] 表示目标视频码率 6 Mbps
     vencoder_args: [-b:v, 15M]
-    # 音频编码器，例如 aac 或 copy
+    # 音频编码器：aac 表示重新编码；copy 表示直接复制原音频流
     aencoder: aac
+    # 例如 [-b:a, 160K] 表示目标音频码率 160 kbps；aencoder 为 copy 时应写 []
     aencoder_args: [-b:a, 320K]
     # 输出尺寸：~ 保持原尺寸；1.5 表示按比例缩放；也可写 3840x2160
     output_resize: ~
@@ -288,110 +319,147 @@ render_args:
     output_name: ~
     format: mp4
     retry: 3
+    # 输入视频的解码方式，与下面的输出编码器相互独立：
+    #   auto/true：由 FFmpeg 自动选择可用的硬件解码（推荐）
+    #   false/~：关闭硬件解码，改用 CPU
+    #   cuda：NVIDIA GPU 解码；qsv：Intel 核显解码
     hwaccel: auto
+    # 弹幕叠加后必须重新编码，不能使用 copy：
+    #   hevc_nvenc：NVIDIA GPU 编码 HEVC/H.265，体积较小
+    #   h264_nvenc：NVIDIA GPU 编码 H.264，兼容性更好
+    #   hevc_qsv/h264_qsv：Intel 核显编码
+    #   hevc_amf/h264_amf：AMD GPU 编码
+    #   libx265/libx264：CPU 编码，通常更慢
     vencoder: h264_nvenc
+    # 传给视频编码器的附加参数；例如 [-b:v, 6M] 表示目标视频码率 6 Mbps
     vencoder_args: [-b:v, 15M]
+    # 音频无需叠加弹幕，可选择 aac 重新编码或 copy 直接复制
     aencoder: aac
+    # 例如 [-b:a, 160K]；aencoder 为 copy 时应写 []
     aencoder_args: [-b:a, 320K]
     # ~ 保持原尺寸；数字表示缩放倍率；WxH 表示目标分辨率
     output_resize: ~
 
-    # 以下四项只供 emoji_dmrender 使用
+    # 所有渲染后端统一使用1080p横屏/竖屏画布；等比缩放并补黑边
+    # 宽 >= 高使用1920x1080，高 > 宽使用1080x1920；default关闭，由global/任务按需开启
+    rescale_to_1080p: false
+    # auto按当前源判断；adaptive在当前比例接近方形时参考上一段
+    # 也可用portrait或landscape强制固定方向
+    rescale_orientation: auto
+
+    # 以下参数只供 emoji_dmrender 使用
+    # 最低输出帧率；低于该值时补帧后逐帧渲染弹幕，高于该值时保持源帧率；~ 表示完全跟随源
+    min_fps: 30
     # 表情包目录；留空时按 JSONL 平台使用 ./emoji_pack/<platform>
     emoji_pack: ~
     # Pillow 绘制表情弹幕使用的字体；留空时自动选择
     emoji_font: ~
-    # 并行渲染进程数
-    workers: 3
-    # 每个进程再切多少段；总分段数 = workers × chunks_per_worker
-    chunks_per_worker: 3
-
-    # 参与布局和渲染的事件。未列出的事件仍保留在 JSONL，但不会进入 RenderPlan
-    include_events: [danmaku, gift, superchat, member]
-
-    # 普通滚动弹幕自身的文字、过滤和 VIP 格式
-    danmaku:
-      font: Microsoft YaHei
-      # 字号为视频像素口径
-      fontsize: 36
-      # 文字不透明度，范围 0~1
-      opacity: 0.8
-      outline_color: '#000000'
-      outline_size: 1px
-      # VIP 用户 UID 映射；值留空时使用程序默认 VIP 格式
-      # 示例：{'123456': ~}
-      vip_users: ~
-      # 包含任一关键词/用户名完全匹配时过滤；~ 表示不启用
-      filter_keywords: ~
-      filter_users: ~
-      # 最大弹幕宽度：0/~ 不限制；支持 60char、1920px、100%
-      max_width: 0
-
-    # 礼物事件自身的内容、持续时间和药丸外观
-    gift:
-      # 完成滑入后停留的秒数；进入/退出动画时长由程序内部统一控制
-      duration: 10
-      # 按人民币总价过滤，低于该值不渲染；~ 表示不过滤
-      min_price_cny: ~
-      template: '送出 {gift_name}{gift_count_suffix}'
-      top_opacity: 0.7
-      bottom_opacity: 0.3
-      corner_radius: 40px
-      box_border_width: 1px
-      box_border_opacity: 0.45
-      name_border_width: 0px
-      content_border_width: 1px
-
-    # SC 停留时长由事件价格对应的平台持续时间决定，这里只配置外观
-    superchat:
-      top_opacity: 0.7
-      bottom_opacity: 0.3
-      corner_radius: 40px
-      box_border_width: 1px
-      box_border_opacity: 0.45
-      name_border_width: 0px
-      content_border_width: 1px
-
-    # 舰长/会员事件自身的内容、持续时间和药丸外观
-    member:
-      duration: 10
-      template: '开通 {member_name}{member_count_suffix}'
-      top_opacity: 0.7
-      bottom_opacity: 0.3
-      corner_radius: 40px
-      box_border_width: 1px
-      box_border_opacity: 0.45
-      name_border_width: 0px
-      content_border_width: 1px
-
-    # R2L 轨道：目前只承载 danmaku。它位于两侧药丸的上层
+    # 轨道是第一层，事件类型嵌套在所属轨道中。
     r2l:
-      # 一条弹幕从屏幕右侧完全移动到左侧所需秒数
-      duration: 8
+      # 弹幕移动一个屏幕宽度所需秒数
+      screen_duration: 8
       # 从 margin_top 以下可供 R2L 使用的垂直比例，范围 0~1
       vertical_ratio: 0.3
       margin_top: 10px
-      # 相邻轨道的垂直空隙
       vertical_gap: 10px
-      # 前后弹幕碰撞计算要求的最小水平空隙
       horizontal_gap: 15px
 
-    # 左侧药丸轨道：目前只承载 superchat
+      danmaku:
+        enable: true
+        font: Microsoft YaHei
+        fontsize: 36
+        opacity: 0.8
+        outline_color: '#000000'
+        outline_size: 1px
+        vip_users: ~
+        filter_keywords: ~
+        filter_users: ~
+        # 0/~ 不限制；支持 60char、1920px、100%
+        max_width: 0
+
     slide_left:
-      # 只接受百分比或像素，例如 25% / 270px
       width: 18%
       margin_left: 10px
       margin_bottom: 10px
-      # 稳定停留时相邻药丸之间的空隙
       vertical_gap: 10px
+      enter_duration: 0.5
+      exit_duration: 0.5
+      reflow_duration: 0.3
+      font: Microsoft YaHei
+      fontsize: 30
+      top_opacity: 0.7
+      bottom_opacity: 0.3
+      corner_radius: 40px
+      box_border_width: 1px
+      box_border_opacity: 0.45
+      name_border_width: 0px
+      content_border_width: 1px
+      name_color: '#666666'
+      content_color: '#FFFFFF'
+      price_duration_ranges:
+        - {min_price_cny: 0, max_price_cny: 30, seconds: 30}
+        - {min_price_cny: 30, max_price_cny: 50, seconds: 60}
+        - {min_price_cny: 50, max_price_cny: 100, seconds: 120}
+        - {min_price_cny: 100, max_price_cny: ~, seconds: 180}
+      price_color_ranges:
+        - {min_price_cny: 0, max_price_cny: 1, top_color: '#EEF6F8', bottom_color: '#607D8B'}
+        - {min_price_cny: 1, max_price_cny: 10, top_color: '#DBFFFD', bottom_color: '#3E8E95'}
+        - {min_price_cny: 10, max_price_cny: 50, top_color: '#E2F0FF', bottom_color: '#4C78C2'}
+        - {min_price_cny: 50, max_price_cny: 100, top_color: '#EDE7FF', bottom_color: '#7656B5'}
+        - {min_price_cny: 100, max_price_cny: 1000, top_color: '#FFE8F1', bottom_color: '#C65386'}
+        - {min_price_cny: 1000, max_price_cny: ~, top_color: '#FFF2C7', bottom_color: '#B77A16'}
 
-    # 右侧药丸轨道：目前承载 gift 和 member
+      superchat:
+        enable: true
+        min_price_cny: 0
+        use_event_background_colors: true
+        use_event_duration: true
+
     slide_right:
-      # 只接受百分比或像素，例如 25% / 270px
       width: 18%
       margin_right: 10px
       margin_bottom: 10px
       vertical_gap: 10px
+      enter_duration: 0.5
+      exit_duration: 0.5
+      reflow_duration: 0.3
+      font: Microsoft YaHei
+      fontsize: 30
+      top_opacity: 0.7
+      bottom_opacity: 0.3
+      corner_radius: 40px
+      box_border_width: 1px
+      box_border_opacity: 0.45
+      name_border_width: 0px
+      content_border_width: 1px
+      name_color: '#666666'
+      content_color: '#FFFFFF'
+      price_duration_ranges:
+        - {min_price_cny: 0, max_price_cny: 30, seconds: 30}
+        - {min_price_cny: 30, max_price_cny: 50, seconds: 60}
+        - {min_price_cny: 50, max_price_cny: 100, seconds: 120}
+        - {min_price_cny: 100, max_price_cny: ~, seconds: 180}
+      price_color_ranges:
+        - {min_price_cny: 0, max_price_cny: 1, top_color: '#EEF6F8', bottom_color: '#607D8B'}
+        - {min_price_cny: 1, max_price_cny: 10, top_color: '#DBFFFD', bottom_color: '#3E8E95'}
+        - {min_price_cny: 10, max_price_cny: 50, top_color: '#E2F0FF', bottom_color: '#4C78C2'}
+        - {min_price_cny: 50, max_price_cny: 100, top_color: '#EDE7FF', bottom_color: '#7656B5'}
+        - {min_price_cny: 100, max_price_cny: 1000, top_color: '#FFE8F1', bottom_color: '#C65386'}
+        - {min_price_cny: 1000, max_price_cny: ~, top_color: '#FFF2C7', bottom_color: '#B77A16'}
+
+      gift:
+        enable: true
+        min_price_cny: 0
+        use_event_background_colors: false
+        use_event_duration: false
+        template: '送出 {gift_name}{gift_count_suffix}'
+
+      member:
+        enable: true
+        min_price_cny: 0
+        use_event_background_colors: false
+        use_event_duration: false
+        template: '开通 {member_name}{member_count_suffix}'
 
 uploader_kernel_args:
   # 指定同时执行的上传任务数，默认1
@@ -430,15 +498,24 @@ upload_args:
     source: ''
     # 分区号，分区参考 https://biliup.github.io/tid-ref.html
     tid: 65
-    # 封面，指向本地文件地址
-    cover: ''
-    # 动态生成封面。任务配置只需覆盖主播名、颜色等不同字段
-    cover_args:
-      is_render_cover: false
+    # 封面模式：extract_frame / render_template / render_text / render_on_frame / render_text_on_frame / 空
+    # mode 为空时使用 path；动态生成失败时也会回退到 path
+    cover:
+      mode: extract_frame
+      # render_on_frame / render_text_on_frame 可直接使用已有图片；留空时自动抽帧
+      frame_path: ~
+      path: ''
+      frame_opacity: 0.2
+      # 所有文字渲染模式：-1 左对齐，0 居中，1 右对齐
+      edge: 0
       name: '{STREAMER.NAME}'
       name_color: '#FFFFFF'
       time_template: '{stime.month}月{stime.day}日'
-      is_extract_frame: true
+      # year: '{stime.year}'
+      # render_text / render_text_on_frame 使用以下两个数组；一个颜色会应用到全部文字
+      # texts: ['第一行', 'vs', '第三行']
+      # colors: ['#FFFFFF', '#FF99FF', '#FFFFFF']
+      # transparent: false  # 仅 render_text 使用；true 时输出透明背景
       ratio: 16/9
       sample_count: 10
     # 标题，可以使用关键字替换
@@ -476,9 +553,16 @@ upload_args:
     season_id: ~
     # 按天或按月查找历史稿件并追加分P；可选 daily / monthly / ~
     auto_append_period: ~
+    # 周期追加已有稿件时，每个上传任务只附加一次；{p_n} 表示本次任务对应的分P（如 p2,p3）
+    # 分隔线由 append_desc 自己配置；为空则不追加，合并后最多2000字符
+    append_desc: ~
     # 免打扰参数
     no_disturbance: 0
-    # biliwebapi 透传字段，例如 watermark.state
+    # B站投稿水印：0-关闭，1-开启；接口中会转换为 watermark.state
+    watermark: 0
+    # 是否从个人空间隐藏稿件：0-不隐藏，1-隐藏
+    space_hidden: 0
+    # biliwebapi 其他尚未正式建模的透传字段
     extra_kwargs: {}
   
   # 上传到YouTube
@@ -552,10 +636,16 @@ upload_args:
     copyright: 1  # 1: 自制原创, 0: 转载
     watermark_position: 3   # 水印位置 0-3
     watermark_signature: false
-    cover: ''
-    # 可从视频抽帧并生成封面；任务中的嵌套字段会递归覆盖
-    cover_args:
-      is_extract_frame: true
+    # AcFun 默认直接从视频抽帧作为封面
+    cover:
+      mode: extract_frame
+      # render_on_frame 可直接使用已有图片；留空时从待上传视频自动抽帧
+      frame_path: ~
+      path: ''
+      frame_opacity: 0.2
+      name: '{STREAMER.NAME}'
+      name_color: '#FFFFFF'
+      time_template: '{stime.month}月{stime.day}日'
       ratio: 16/9
       sample_count: 10
     tag: []

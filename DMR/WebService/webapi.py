@@ -72,7 +72,7 @@ from DMR.utils import *
 from DMR.utils.console_buffer import get_console_lines, subscribe as console_subscribe, unsubscribe as console_unsubscribe
 from DMR.utils.session_record import encode_dt, humanize_dt
 from DMR.Login import CookieManager
-from DMR.EmojiPack import bilibili as emoji_bilibili, douyin as emoji_douyin, common as emoji_common
+from DMR.EmojiPack import bilibili as emoji_bilibili, douyin as emoji_douyin, douyu as emoji_douyu, common as emoji_common
 
 class WebApi:
     def __init__(
@@ -239,12 +239,11 @@ class WebApi:
         @app.route('/api/console/stream')
         @self.login_required
         def api_console_stream():
-            """SSE 实时日志：连上先发一段历史打底，之后每来一行推一行（来一行滚一行，不再轮询）。"""
+            """SSE 日志：历史一次性发送，之后逐行推送实时日志。"""
             def gen():
-                q = console_subscribe()
+                q, history = console_subscribe(5000)
                 try:
-                    for line in get_console_lines(5000):   # 历史打底
-                        yield f'data: {json.dumps(line)}\n\n'
+                    yield f'event: history\ndata: {json.dumps(history)}\n\n'
                     while True:
                         try:
                             yield f'data: {json.dumps(q.get(timeout=15))}\n\n'
@@ -444,11 +443,10 @@ class WebApi:
             return {'ok': ok, 'message': message}
 
         # ---- 表情包检查：查缺失 -> 前端展示 -> 用户确认后再下载 ----
-        # 目前只有B站/抖音有对应的检查脚本，斗鱼列出来但没有 check/download 支持
         EMOJI_PLATFORMS = [
             {'platform': 'bilibili', 'label': 'B站', 'dir': emoji_bilibili.PACK_DIR, 'supported': True},
             {'platform': 'douyin',   'label': '抖音', 'dir': emoji_douyin.PACK_DIR,  'supported': True},
-            {'platform': 'douyu',    'label': '斗鱼', 'dir': os.path.join('emoji_pack', 'douyu'), 'supported': False},
+            {'platform': 'douyu',    'label': '斗鱼', 'dir': emoji_douyu.PACK_DIR,   'supported': True},
         ]
 
         @app.route('/api/emoji/list')
@@ -470,11 +468,18 @@ class WebApi:
                     result = emoji_bilibili.check()
                 elif platform == 'douyin':
                     result = emoji_douyin.check()
+                elif platform == 'douyu':
+                    result = emoji_douyu.check()
                 else:
                     return {'ok': False, 'message': f'未知平台: {platform}'}, 400
                 return {'ok': True, **result}
             except Exception as e:
-                return {'ok': False, 'message': str(e)}
+                self.logger.exception('表情包检查失败：platform=%s', platform)
+                message = str(e).strip() or repr(e)
+                return {
+                    'ok': False,
+                    'message': f'{type(e).__name__}: {message}',
+                }
 
         @app.route('/api/emoji/download', methods=['POST'])
         @self.login_required
@@ -487,11 +492,34 @@ class WebApi:
                     result = emoji_bilibili.download(items)
                 elif platform == 'douyin':
                     result = emoji_douyin.download(items)
+                elif platform == 'douyu':
+                    result = emoji_douyu.download(items)
                 else:
                     return {'ok': False, 'message': f'未知平台: {platform}'}, 400
                 return {'ok': True, **result}
             except Exception as e:
                 return {'ok': False, 'message': str(e)}
+
+        @app.route('/api/emoji/delete-extras', methods=['POST'])
+        @self.login_required
+        def emoji_delete_extras_api():
+            body = request.get_json(silent=True) or {}
+            platform = body.get('platform')
+            items = body.get('items') or []
+            try:
+                modules = {
+                    'bilibili': emoji_bilibili,
+                    'douyin': emoji_douyin,
+                    'douyu': emoji_douyu,
+                }
+                module = modules.get(platform)
+                if not module:
+                    return {'ok': False, 'message': f'未知平台: {platform}'}, 400
+                return {'ok': True, **module.delete_extras(items)}
+            except Exception as e:
+                self.logger.exception('删除多余表情失败：platform=%s', platform)
+                message = str(e).strip() or repr(e)
+                return {'ok': False, 'message': f'{type(e).__name__}: {message}'}
 
         @app.route('/api/upload_tasks/<uuid>/stop', methods=['POST'])
         @self.login_required
@@ -694,11 +722,6 @@ class WebApi:
                         now = datetime.now()
                         seg_start = getattr(task, 'segment_start_time', None)
                         live_start = getattr(task, 'live_start_time', None)
-                        # 第一段:分段即整场。取流前的 GetRoomInfo/GetStreamerInfo 会让
-                        # segment_start_time 比 live_start_time 晚约1秒,导致"分段时长比本场时长少1秒"。
-                        # 这里第一段直接对齐到本场起点,后续分段各用自己的起点;并统一用一次 now 避免跨秒抖动。
-                        if getattr(task, 'segment_id', 1) <= 1 and live_start:
-                            seg_start = live_start
                         if seg_start:
                             duration = str(now - seg_start).split('.')[0]
                         if live_start:

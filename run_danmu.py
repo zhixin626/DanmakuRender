@@ -210,10 +210,8 @@ def main():
     cookie = args.cookie or auto_cookie(platform)
     if cookie and not os.path.exists(cookie):
         print(c(f"[!] cookie 文件不存在: {cookie}(将用游客身份)", 'yellow')); cookie = None
-    if platform == "bilibili" and cookie:
-        kwargs["bilibili_dm_cookie_path"] = cookie
-    elif platform == "douyin" and cookie:
-        kwargs["douyin_dm_cookies"] = cookie
+    if platform in {"bilibili", "douyin"} and cookie:
+        kwargs["dm_cookie_path"] = cookie
 
     print(c(f"[*] 平台={platform} cookie={cookie or '游客'} 显示={','.join(sorted(show_cats))}", 'gray'))
     if args.debug:

@@ -93,12 +93,13 @@ def get_error_count():
     return _error_count[0]
 
 
-def subscribe():
-    """SSE 连接订阅新日志行：返回一个队列，之后每来一行都会被推进来。用完务必 unsubscribe。"""
+def subscribe(history_size=0):
+    """原子地取得历史快照并订阅新日志，避免两步操作造成遗漏或重复。"""
     q = queue.Queue(maxsize=10000)
     with _lock:
+        history = list(_console_lines)[-history_size:] if history_size else []
         _subscribers.add(q)
-    return q
+    return q, history
 
 
 def unsubscribe(q):

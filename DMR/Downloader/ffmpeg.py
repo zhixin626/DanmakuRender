@@ -24,7 +24,8 @@ class FFmpegDownloader():
                  segment:int=None,
                  header:dict=None,
                  ffmpeg:str=None,
-                 segment_callback=None,
+                 segment_start_callback=None,
+                 segment_end_callback=None,
                  advanced_video_args:dict=None,
                  debug=False,
                  **kwargs):
@@ -36,7 +37,8 @@ class FFmpegDownloader():
         self.segment = segment
         self.debug = debug
         self.taskname = taskname
-        self.segment_callback = segment_callback
+        self.segment_start_callback = segment_start_callback
+        self.segment_end_callback = segment_end_callback
         self.advanced_video_args = advanced_video_args if advanced_video_args else {}
         self.kwargs = kwargs
         self.ffmpeg = ffmpeg if ffmpeg else ToolsList.get('ffmpeg')
@@ -48,6 +50,24 @@ class FFmpegDownloader():
     @property
     def duration(self):
         return datetime.now().timestamp() - self.start_time
+
+    def _handle_opening_line(self, event_time, line):
+        if 'Opening' not in line:
+            return
+        try:
+            fname = line.split("'")[1]
+        except IndexError:
+            return
+        if fname.startswith('http'):
+            return
+        if self.thisfile:
+            self.segment_end_callback(
+                self.thisfile,
+                event_time,
+                continuous=True,
+            )
+        self.thisfile = fname
+        self.segment_start_callback(fname, event_time)
         
     def start_ffmpeg(self):
         ffmpeg_stream_args = self.advanced_video_args.get('ffmpeg_stream_args', 
@@ -91,10 +111,16 @@ class FFmpegDownloader():
         self.logger.debug('FFmpegDownloader args:')
         self.logger.debug(ffmpeg_args)
 
-        if self.debug:
-            self.ffmpeg_proc = subprocess.Popen(ffmpeg_args, stdin=subprocess.PIPE, stdout=sys.stdout, stderr=subprocess.STDOUT,bufsize=10**8, universal_newlines=True, encoding='utf-8', errors='ignore')
-        else:
-            self.ffmpeg_proc = subprocess.Popen(ffmpeg_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,bufsize=10**8, universal_newlines=True, encoding='utf-8', errors='ignore')
+        self.ffmpeg_proc = subprocess.Popen(
+            ffmpeg_args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            universal_newlines=True,
+            encoding='utf-8',
+            errors='ignore',
+        )
         
         self.msg_queue = None
         def ffmpeg_monitor():
@@ -102,7 +128,9 @@ class FFmpegDownloader():
                 if self.ffmpeg_proc.stdout.readable():
                     line = self.ffmpeg_proc.stdout.readline().strip()
                     if len(line) > 0:
-                        self.msg_queue.put(line)
+                        # 在读取到 FFmpeg 日志的线程立即取时钟，避免主循环最多约1秒的
+                        # 消费延迟污染真实文件边界。
+                        self.msg_queue.put((time.time(), line))
         
         if self.ffmpeg_proc.stdout is not None:
             self.msg_queue = queue.Queue()
@@ -129,17 +157,22 @@ class FFmpegDownloader():
         self.download_stable = False # stable ffmpeg speed < 2
         while not self.stoped:
             if self.ffmpeg_proc.poll() is not None:
+                while self.msg_queue and not self.msg_queue.empty():
+                    queued_time, queued_line = self.msg_queue.get_nowait()
+                    self._handle_opening_line(queued_time, queued_line)
+                if self.thisfile:
+                    self.segment_end_callback(self.thisfile, time.time())
+                    self.thisfile = None
                 self.logger.debug('FFmpeg exit.')
                 self.logger.debug(log)
                 raise RuntimeError(f'FFmpeg 退出.')
             
-            if self.debug:
-                time.sleep(1)
-                continue
-            
+            event_time = None
             line = ''
             try:
-                line = self.msg_queue.get_nowait()
+                event_time, line = self.msg_queue.get_nowait()
+                if self.debug:
+                    self.logger.debug("%s ffmpeg: %s", self.taskname, line)
                 if not line.startswith('[hls'):
                     log += line + '\n'
             except queue.Empty:
@@ -164,15 +197,7 @@ class FFmpegDownloader():
                         if not self.download_stable and speed and speed < 2:
                             self.download_stable = True
             
-            if 'Opening' in line:
-                fname = line.split('\'')[1]
-                if not fname.startswith('http'):
-                    if self.thisfile:
-                        self.segment_callback(
-                            self.thisfile,
-                            next_segment_start_time=time.time(),
-                        )
-                    self.thisfile = fname
+            self._handle_opening_line(event_time, line)
 
             if 'dropping it' in line or 'Invalid NAL unit size' in line:
                 self.logger.debug(log)
@@ -204,7 +229,8 @@ class FFmpegDownloader():
         log = ''
         try:
             while self.msg_queue.qsize() > 0:
-                msg = self.msg_queue.get_nowait()
+                event_time, msg = self.msg_queue.get_nowait()
+                self._handle_opening_line(event_time, msg)
                 log += msg+'\n'
         except Exception as e:
             self.logger.debug(e)
@@ -220,6 +246,10 @@ class FFmpegDownloader():
             self.logger.debug(e)
         
         if self.thisfile:
+            end_time = time.time()
+            # 时间在 FFmpeg 退出后立即固定；等待仅用于确保文件句柄和尾部数据稳定，
+            # 不能把这1秒算进视频的现实时间边界。
             time.sleep(1)
-            self.segment_callback(self.thisfile)
+            self.segment_end_callback(self.thisfile, end_time)
+            self.thisfile = None
         self.logger.debug('ffmpeg downloader stoped.')

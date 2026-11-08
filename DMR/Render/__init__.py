@@ -247,8 +247,7 @@ class Render():
                 }
                 if mode == 'dmrender':
                     for key in (
-                        'emoji_pack', 'emoji_font', 'workers',
-                        'chunks_per_worker',
+                        'emoji_pack', 'emoji_font', 'min_fps',
                     ):
                         target_args.pop(key, None)
 
@@ -279,10 +278,33 @@ class Render():
                         work_dir=output_dir or None,
                     )
                     render_kwargs['render_plan'] = layout_result.render_plan_path
+                    render_kwargs['canvas_resolution'] = (
+                        layout_result.next_state.canvas_resolution
+                    )
+                    track_stats = layout_result.track_stats
+                    r2l_stats = track_stats.get('r2l', {})
+                    slide_left_stats = track_stats.get('slide_left', {})
+                    slide_right_stats = track_stats.get('slide_right', {})
+                    other_dropped = layout_result.unrouted_dropped_count
+                    other_summary = (
+                        f'；其他丢弃 {other_dropped} 条'
+                        if other_dropped
+                        else ''
+                    )
                     self.logger.info(
-                        '布局编译完成: %s 条，过滤/丢弃 %s 条',
+                        '布局编译完成: 共布局 %s 条，丢弃 %s 条'
+                        '（R2L: 布局 %s/丢弃 %s；'
+                        'Slide L: 布局 %s/丢弃 %s；'
+                        'Slide R: 布局 %s/丢弃 %s%s）',
                         layout_result.event_count,
                         layout_result.dropped_count,
+                        r2l_stats.get('accepted', 0),
+                        r2l_stats.get('dropped', 0),
+                        slide_left_stats.get('accepted', 0),
+                        slide_left_stats.get('dropped', 0),
+                        slide_right_stats.get('accepted', 0),
+                        slide_right_stats.get('dropped', 0),
+                        other_summary,
                     )
 
             target_render = TargetRender(**target_args)

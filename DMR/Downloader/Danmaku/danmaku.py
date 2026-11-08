@@ -84,56 +84,104 @@ class DanmakuDownloader:
         )
         self.dm_file = None
         self.monitor = None
+        self._segment_lock = threading.RLock()
+        self._opened_once = False
 
         if platform.system() == "Windows":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     def start(self, self_segment: bool = False, segment_start_time: float = None):
-        start_time = float(segment_start_time or time.time())
-        self.dm_file = self.output.replace("%03d", "%03d" % self.part)
-        self.writer.open(self.dm_file, start_time)
-
         if self_segment:
+            self.open_segment(start_time=segment_start_time or time.time())
+
             def monitor():
                 while not self.stoped:
                     time.sleep(self.segment)
                     if not self.stoped:
-                        self.split(next_segment_start_time=time.time())
+                        self.rotate_segment(next_segment_start_time=time.time())
 
             self.monitor = threading.Thread(target=monitor, daemon=True)
             self.monitor.start()
 
         return self.start_dmc()
 
+    def _next_temp_file(self) -> str:
+        return self.output.replace("%03d", "%03d" % self.part)
+
+    def open_segment(
+        self,
+        filename: str = None,
+        start_time: float = None,
+    ) -> str:
+        """打开首段或断线重连后的新 JSONL，不改变弹幕流连接。"""
+        with self._segment_lock:
+            if self.dm_file is not None:
+                raise RuntimeError("当前弹幕事件段尚未关闭")
+            if self._opened_once:
+                self.part += 1
+            self.dm_file = filename or self._next_temp_file()
+            self.writer.open(self.dm_file, float(start_time or time.time()))
+            self._opened_once = True
+            return self.dm_file
+
+    def rotate_segment(
+        self,
+        filename: str = None,
+        next_segment_start_time: float = None,
+    ):
+        """按精确的公共边界原子地结束当前段并打开下一段。
+
+        filename 是已结束视频对应的最终 JSONL 路径；下一段仍先使用临时名称，
+        等对应视频结束时再改成与视频相同的名字。
+        """
+        with self._segment_lock:
+            if self.dm_file is None:
+                return self.open_segment(start_time=next_segment_start_time)
+
+            old_dm_file = self.dm_file
+            self.part += 1
+            next_file = self._next_temp_file()
+            next_segment_start_time = float(next_segment_start_time or time.time())
+
+            self.writer.rotate(next_file, next_segment_start_time)
+
+            if filename and old_dm_file and old_dm_file != filename:
+                try:
+                    os.replace(old_dm_file, filename)
+                    old_dm_file = filename
+                except Exception as exc:
+                    self.logger.error("弹幕事件文件 %s 分段失败: %s", old_dm_file, exc)
+
+            self.dm_file = next_file
+            return old_dm_file
+
+    def close_segment(
+        self,
+        filename: str = None,
+        end_time: float = None,
+    ):
+        """结束当前 JSONL，但保持弹幕流连接和短暂的未归属事件缓冲。"""
+        with self._segment_lock:
+            old_dm_file = self.writer.close_segment(float(end_time or time.time()))
+            self.dm_file = None
+            if filename and old_dm_file and old_dm_file != filename:
+                try:
+                    os.replace(old_dm_file, filename)
+                    old_dm_file = filename
+                except Exception as exc:
+                    self.logger.error("弹幕事件文件 %s 收尾失败: %s", old_dm_file, exc)
+            return old_dm_file
+
+    # 兼容旧调用者；新的视频分段流程应显式使用 rotate_segment()。
     def split(
         self,
         filename: str = None,
         next_segment_start_time: float = None,
         open_next: bool = True,
     ):
-        """完成当前事件段，并按精确边界打开下一段。
-
-        filename 是与已完成视频同名的最终 JSONL 路径。最终停机时 open_next=False，
-        只关闭并重命名当前文件，不制造空的下一段。
-        """
-        old_dm_file = self.dm_file
-        next_file = None
         if open_next:
-            self.part += 1
-            next_file = self.output.replace("%03d", "%03d" % self.part)
-            next_segment_start_time = float(next_segment_start_time or time.time())
-
-        self.writer.rotate(next_file, next_segment_start_time)
-
-        if filename and old_dm_file and old_dm_file != filename:
-            try:
-                os.replace(old_dm_file, filename)
-                old_dm_file = filename
-            except Exception as exc:
-                self.logger.error("弹幕事件文件 %s 分段失败: %s", old_dm_file, exc)
-
-        self.dm_file = next_file
-        return old_dm_file
+            return self.rotate_segment(filename, next_segment_start_time)
+        return self.close_segment(filename, next_segment_start_time)
 
     def process_danmaku(self, event) -> bool:
         if not isinstance(event, _EVENT_CLASSES):

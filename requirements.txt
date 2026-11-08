@@ -30,6 +30,8 @@ tqdm
 colorama
 colorlog
 wcwidth
+tree-sitter>=0.25
+tree-sitter-javascript>=0.23
 
 # ── WebUI ──
 flask

@@ -230,7 +230,7 @@ class Douyu(DMAPI):
 
                 else:  # 理解不了的：采样 + 原样塞进 BaseDanmaku.raw，content 放 j 便于 --all 查看
                     raw_type = j.get("type", "unknown")
-                    sample_raw_message(raw_type, j)
+                    # sample_raw_message(raw_type, j)
                     msgs.append(BaseDanmaku(
                         dtype=raw_type,
                         raw=j,

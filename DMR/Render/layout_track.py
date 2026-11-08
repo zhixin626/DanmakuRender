@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import os
 import threading
 from collections import defaultdict
 
@@ -18,7 +16,6 @@ class LayoutTrackManager:
         self._states: dict[str, LayoutState] = {}
         self._history: dict[str, dict[int, LayoutState | None]] = defaultdict(dict)
         self._next_sequence = defaultdict(int)
-        self._state_paths: dict[str, str] = {}
         self._closed: set[str] = set()
 
     def begin(self, track_key: str) -> None:
@@ -83,15 +80,6 @@ class LayoutTrackManager:
             # originally, without rewinding or consuming the current live state.
             return result
 
-        state_path = self._state_path(track_key, work_dir)
-        if result.next_state.events:
-            result.next_state.save(state_path)
-        else:
-            try:
-                if os.path.exists(state_path):
-                    os.remove(state_path)
-            except OSError:
-                pass
         with self._condition:
             self._history[track_key][sequence] = (
                 LayoutState.from_dict(previous.to_dict())
@@ -99,10 +87,6 @@ class LayoutTrackManager:
                 else None
             )
             self._states[track_key] = result.next_state
-            if result.next_state.events:
-                self._state_paths[track_key] = state_path
-            else:
-                self._state_paths.pop(track_key, None)
             if sequence == self._next_sequence[track_key]:
                 self._next_sequence[track_key] += 1
             self._condition.notify_all()
@@ -114,29 +98,14 @@ class LayoutTrackManager:
                 [track_key]
                 if track_key is not None
                 else list(
-                    set(self._state_paths)
-                    | set(self._states)
+                    set(self._states)
                     | set(self._history)
                     | set(self._next_sequence)
                 )
             )
-            paths = [self._state_paths.pop(key, None) for key in keys]
             for key in keys:
                 self._closed.add(key)
                 self._states.pop(key, None)
                 self._history.pop(key, None)
                 self._next_sequence.pop(key, None)
             self._condition.notify_all()
-        for path in paths:
-            try:
-                if path and os.path.exists(path):
-                    os.remove(path)
-            except OSError:
-                pass
-
-    @staticmethod
-    def _state_path(track_key: str, work_dir: str | None) -> str:
-        digest = hashlib.sha1(track_key.encode("utf-8")).hexdigest()[:12]
-        directory = work_dir or "."
-        os.makedirs(directory, exist_ok=True)
-        return os.path.join(directory, f".layout_state_{digest}.json")

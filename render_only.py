@@ -194,8 +194,7 @@ def main():
                 }
                 if engine_name == 'dmrender':
                     for key in (
-                        'emoji_pack', 'emoji_font', 'workers',
-                        'chunks_per_worker',
+                        'emoji_pack', 'emoji_font', 'min_fps',
                     ):
                         target_args.pop(key, None)
                 if task['danmaku'].lower().endswith('.jsonl'):
@@ -212,6 +211,9 @@ def main():
                     )
                     layout_state = layout_result.next_state
                     render_kwargs['render_plan'] = layout_result.render_plan_path
+                    render_kwargs['canvas_resolution'] = (
+                        layout_result.next_state.canvas_resolution
+                    )
             target_render = TargetRender(**target_args)
             status, info = target_render.render_one(
                 video=video,

@@ -1,3 +1,3 @@
-from . import bilibili, douyin
+from . import bilibili, douyin, douyu
 
-__all__ = ['bilibili', 'douyin']
+__all__ = ['bilibili', 'douyin', 'douyu']

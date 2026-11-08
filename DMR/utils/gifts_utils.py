@@ -14,6 +14,10 @@ def _number(value) -> float:
         return 0.0
 
 
+def _has_price(item) -> bool:
+    return item.get("price_cny") not in (None, "")
+
+
 def generate_gift_statistics(
     jsonl_paths,
     stat_path,
@@ -60,9 +64,13 @@ def generate_gift_statistics(
     sc_entries = [item for item in entries if item["type"] == "superchat"]
     member_entries = [item for item in entries if item["type"] == "member"]
 
-    gifts_revenue = sum(_number(item.get("price_cny")) for item in gift_entries)
-    sc_revenue = sum(_number(item.get("price_cny")) for item in sc_entries)
-    member_revenue = sum(_number(item.get("price_cny")) for item in member_entries)
+    priced_gifts = [item for item in gift_entries if _has_price(item)]
+    priced_scs = [item for item in sc_entries if _has_price(item)]
+    priced_members = [item for item in member_entries if _has_price(item)]
+
+    gifts_revenue = sum(_number(item.get("price_cny")) for item in priced_gifts)
+    sc_revenue = sum(_number(item.get("price_cny")) for item in priced_scs)
+    member_revenue = sum(_number(item.get("price_cny")) for item in priced_members)
     total_revenue = gifts_revenue + sc_revenue + member_revenue
     num_of_sc = len(sc_entries)
     num_of_gifters = len({item.get("uname", "") for item in gift_entries})
@@ -78,11 +86,11 @@ def generate_gift_statistics(
     )
 
     revenue_parts = []
-    if gift_entries:
+    if priced_gifts:
         revenue_parts.append(f"{round(gifts_revenue, 2):g}元({num_of_gifters}人)")
-    if sc_entries:
+    if priced_scs:
         revenue_parts.append(f"{round(sc_revenue, 2):g}元({num_of_sc}条SC)")
-    if member_entries:
+    if priced_members:
         revenue_parts.append(f"{round(member_revenue, 2):g}元({member_info})")
     revenue_summary = "+".join(revenue_parts)
     if len(revenue_parts) > 1:
@@ -90,6 +98,8 @@ def generate_gift_statistics(
 
     user_totals = Counter()
     for item in entries:
+        if not _has_price(item):
+            continue
         user_totals[item.get("uname") or "未知"] += _number(item.get("price_cny"))
     top_ranking = [
         {"name": name, "total_value": round(price, 2)}

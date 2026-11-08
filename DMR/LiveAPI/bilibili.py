@@ -3,16 +3,94 @@ import logging
 import os
 import re
 import requests
-import json
-import random
 
-from DMR.utils import match1, random_user_agent
+from DMR.utils import random_user_agent
 try:
     from .BaseAPI import BaseAPI
 except ImportError:
     from BaseAPI import BaseAPI
 
 logger = logging.getLogger(__name__)
+
+
+# 与 biliLive-tools 的默认优先级一致：先 AVC，再 HEVC、AV1；
+# 同一编码内依次选择 FLV、fMP4、HLS-TS。
+BILIBILI_STREAM_PRIORITY = (
+    'flv-avc',
+    'fmp4-avc',
+    'ts-avc',
+    'flv-hevc',
+    'fmp4-hevc',
+    'ts-hevc',
+    'flv-av1',
+    'fmp4-av1',
+    'ts-av1',
+)
+
+# DMR 的 FLV 会交给 StreamGears。它不能稳定处理 B 站的增强
+# FLV-HEVC/AV1，因此自动模式不把这两种流作为候选；HEVC/AV1
+# 原画改走 fMP4/HLS，由 FFmpeg 录制。
+DMR_AUTO_STREAM_PRIORITY = (
+    'flv-avc',
+    'fmp4-avc',
+    'ts-avc',
+    'fmp4-hevc',
+    'ts-hevc',
+    'fmp4-av1',
+    'ts-av1',
+)
+
+
+def _ordered_stream_types(preference=None):
+    """把兼容的 stream_type 配置转换成候选类型顺序。
+
+    flv/hls/fmp4 与 avc/hevc/av1 表示优先但允许回退；
+    *_only 表示严格限制；type-codec（如 flv-avc）表示该组合优先。
+    """
+    priority = list(BILIBILI_STREAM_PRIORITY)
+    value = str(preference or '').strip().lower().replace('_', '-')
+    if value in ('', 'auto', 'none'):
+        return list(DMR_AUTO_STREAM_PRIORITY)
+
+    only = value.endswith('-only')
+    if only:
+        value = value[:-5]
+
+    # biliLive-tools 中 hls 指 MPEG-TS，fmp4 是单独的格式选项。
+    value = {'hls': 'ts'}.get(value, value)
+    if '-' in value:
+        fmt, codec = value.split('-', 1)
+        fmt = {'hls': 'ts'}.get(fmt, fmt)
+        exact = f'{fmt}-{codec}'
+        if exact in priority:
+            if only:
+                return [exact]
+            return [exact] + [item for item in priority if item != exact]
+
+    if value in ('flv', 'fmp4', 'ts'):
+        matched = [item for item in priority if item.startswith(f'{value}-')]
+    elif value in ('avc', 'hevc', 'av1'):
+        matched = [item for item in priority if item.endswith(f'-{value}')]
+    else:
+        logger.warning('未知的B站 stream_type=%s，将使用自动选流顺序', preference)
+        return priority
+
+    if only:
+        return matched
+    return matched + [item for item in priority if item not in matched]
+
+
+def _cdn_matches(pattern, host):
+    if not pattern:
+        return True
+    if host == pattern:
+        return True
+    try:
+        return re.search(str(pattern), host) is not None
+    except re.error:
+        logger.warning('B站 stream_cdn 不是有效正则：%s，将按完整域名匹配', pattern)
+        return False
+
 
 class bilibili(BaseAPI):
     def __init__(self,rid) -> None:
@@ -105,10 +183,12 @@ class bilibili(BaseAPI):
                             })
         except Exception as e:
             raise RuntimeError(f'bilibili {self.rid} 直播流获取错误: {e}')
-        
+
+        if not real_urls:
+            raise RuntimeError(f'bilibili {self.rid} 没有返回可用直播流')
         if max(real_urls, key=lambda x: x['quality'])['quality'] < 10000:
             logger.warning('未登录B站账号，无法录制原画，将录制最低画质直播.')
-        
+
         return real_urls
     
     def get_stream_url(self,
@@ -118,69 +198,75 @@ class bilibili(BaseAPI):
                        **kwargs) -> str:
         avail_urls = self.get_stream_urls(**kwargs)
 
-        # 有可能返回的流存在多种质量，因为H.265和H.264压缩策略不同
-        max_quality = max(avail_urls, key=lambda x: x['quality'])['quality']
-        avail_urls = [max_res_urls for max_res_urls in avail_urls if max_res_urls['quality'] == max_quality]
+        type_priority = _ordered_stream_types(stream_type)
 
-        # 找出URL里面不带bluray字样的原画流
-        best_urls = [best_urls for best_urls in avail_urls if not re.search(r'live_\d+_[a-zA-Z_]{0,10}\d+_[a-zA-Z1-2]{1,10}', best_urls['stream_url'])]
-        if best_urls:
-            avail_urls = best_urls
+        # 自动模式优先保留原画，但先排除 StreamGears 不兼容的增强
+        # FLV-HEVC/AV1。这样有 1440p fMP4-HEVC 时会交给 FFmpeg，
+        # 而不会降到 1080p AVC，也不会误交给 StreamGears。
+        auto_mode = str(stream_type or '').strip().lower() in ('', 'auto', 'none')
+        if auto_mode:
+            safe_urls = [
+                item for item in avail_urls
+                if item['stream_type'].lower() in type_priority
+            ]
+            if not safe_urls:
+                raise RuntimeError(f'Bilibili{self.rid}没有返回 DMR 可安全录制的流')
+            max_quality = max(item['quality'] for item in safe_urls)
+            avail_urls = [
+                item for item in safe_urls
+                if item['quality'] == max_quality
+            ]
 
-        # 如果没有指定cdn和流类型，使用自动选择
-        if not stream_cdn and not stream_type:
-            # 无原画流，使用hls用于强制原画
-            if not best_urls:
-                stream_cdn = '.*gotcha.*'
-                stream_type = 'fmp4'
-            # HEVC,av1原画使用hls，H264使用flv
-            else:
-                if any('avc' not in url_info['stream_type'] for url_info in best_urls):
-                    stream_type = 'fmp4'
-                else:
-                    stream_type = 'flv'
-        # 使用指定的cdn和流类型
-        else:
-            stream_type = 'fmp4' if stream_type == 'hls' else 'flv'
+        selected_group = []
+        selected_type = None
+        for candidate_type in type_priority:
+            selected_group = [
+                item for item in avail_urls
+                if item['stream_type'].lower() == candidate_type
+            ]
+            if selected_group:
+                selected_type = candidate_type
+                break
 
-        selected_urls = []
-        for url_info in avail_urls:
-            if stream_cdn \
-                and url_info['stream_cdn'] != stream_cdn \
-                and re.search(stream_cdn, url_info['stream_cdn']) is None:
-                continue
-            if stream_type and stream_type not in url_info['stream_type']:
-                continue
-            uri = url_info['stream_url']
-            selected_urls.append(uri)
-
-        # 尝试使用不带后缀的原始流地址
-        for uri in selected_urls:
-            try:
-                stream_name = match1(uri, r'(live_\d+_[a-zA-Z_]{0,10}\d+_[a-zA-Z1-2]{1,10})')
-                ori_stream_name = '_'.join(stream_name.split('_')[:-1])
-                uri = uri.replace(stream_name, ori_stream_name)
-                resp = self.sess.get(uri, headers=self.header, timeout=5, stream=True)
-                if resp.status_code == 200:
-                    logger.debug(f'find origin stream {stream_name}->{ori_stream_name}')
-                    return uri
-            except Exception:
-                pass
-
-        if not selected_urls:
-            logger.warning(f'Bilibili{self.rid}没有满足 {stream_cdn},{stream_type} 的流，将使用默认选项.')
-            return random.choice(avail_urls)['stream_url']
-        else:
-            selected_url=random.choice(selected_urls)
-            chosen_info = next((u for u in avail_urls if u['stream_url'] == selected_url), None)
-            cdn = re.search(r'//([^/]+)/', selected_url).group(1) if '//' in selected_url else '未知'
-            proto = 'FLV' if '.flv' in selected_url else 'HLS/fMP4'
-            logger.info(
-                f'[选流] qn={chosen_info["quality"] if chosen_info else "未知"} '
-                f'编码={chosen_info["stream_type"] if chosen_info else "未知"} '
-                f'CDN={cdn} 协议={proto}'
+        if not selected_group:
+            raise RuntimeError(
+                f'Bilibili{self.rid}没有满足 stream_type={stream_type} 的流'
             )
-            return selected_url
+
+        # 同一种格式/编码可能返回多个 qn；保留该类型的最高画质。
+        # 列表原有顺序就是 B 站 url_info 的顺序，因此 [0] 仍是首个 CDN。
+        selected_quality = max(item['quality'] for item in selected_group)
+        selected_group = [
+            item for item in selected_group
+            if item['quality'] == selected_quality
+        ]
+
+        # biliLive-tools 默认使用 url_info[0]（主线）。显式填写 stream_cdn
+        # 时保留 DMR 原有能力：在同类型候选中取第一个匹配项；匹配不到仍回退主线。
+        chosen_info = selected_group[0]
+        if stream_cdn:
+            cdn_group = [
+                item for item in selected_group
+                if _cdn_matches(stream_cdn, item['stream_cdn'])
+            ]
+            if cdn_group:
+                chosen_info = cdn_group[0]
+            else:
+                logger.warning(
+                    'Bilibili%s的%s流没有匹配CDN %s，将使用B站主线',
+                    self.rid,
+                    selected_type,
+                    stream_cdn,
+                )
+
+        logger.info(
+            '[选流] qn=%s 编码=%s CDN=%s 来源=%s',
+            chosen_info['quality'],
+            chosen_info['stream_type'],
+            chosen_info['stream_cdn'],
+            '指定CDN' if stream_cdn and chosen_info is not selected_group[0] else 'B站主线',
+        )
+        return chosen_info['stream_url']
 
     def get_info(self) -> tuple:
         try:

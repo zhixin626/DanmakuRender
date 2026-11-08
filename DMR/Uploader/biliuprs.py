@@ -9,6 +9,7 @@ import time
 import subprocess
 
 from DMR.utils import replace_keywords, ToolsList, VideoInfo
+from DMR.utils.cover import prepare_cover
 
 
 class biliuprs():
@@ -195,27 +196,41 @@ class biliuprs():
             config['tag'] = replace_keywords(config['tag'], video_info, replace_invalid=replace_invalid)
         if config.get('source'):
             config['source'] = replace_keywords(config['source'], video_info, replace_invalid=replace_invalid)
-        if config.get('cover'):
-            config['cover'] = replace_keywords(config['cover'], video_info, replace_invalid=replace_invalid)
-            if config['cover'].startswith('http'):
-                import requests
-                try:
-                    resp = requests.get(config['cover'], headers={'User-Agent': 'Mozilla/5.0'}, timeout=5.0)
-                    resp.raise_for_status()
-                    cover_filename = f'.temp/biliuprs_cover_{int(time.time())+86400}.png'
-                    with open(cover_filename, 'wb') as f:
-                        f.write(resp.content)
-                    config['cover'] = cover_filename
-
-                except Exception as e:
-                    self.logger.error(f'视频 {config["title"]} 封面图片下载失败: {e}, 跳过设置.')
-                    config['cover'] = ''
         return config
 
     def upload(self, files:list[VideoInfo], session: dict=None, **kwargs):
         if not isinstance(files, list):
             files = [files]
         config = self.format_config(kwargs, files[0], session=session)
+        context = {**dict(files[0]), **(session or {})}
+        cover_file, generated_cover = prepare_cover(
+            files[0].path,
+            config.get('cover'),
+            stime=(session or {}).get('stime'),
+            account=config.get('account', self.account),
+            context=context,
+        )
+        downloaded_cover = None
+        if isinstance(cover_file, str) and cover_file.startswith('http'):
+            import requests
+            try:
+                resp = requests.get(cover_file, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5.0)
+                resp.raise_for_status()
+                suffix = os.path.splitext(cover_file.split('?', 1)[0])[1] or '.png'
+                with tempfile.NamedTemporaryFile(
+                    mode='wb',
+                    suffix=suffix,
+                    prefix='biliuprs_cover_',
+                    dir='.temp',
+                    delete=False,
+                ) as f:
+                    f.write(resp.content)
+                    downloaded_cover = f.name
+                cover_file = downloaded_cover
+            except Exception as e:
+                self.logger.error(f'视频 {config.get("title", "")} 封面图片下载失败: {e}, 跳过设置.')
+                cover_file = ''
+        config['cover'] = cover_file or ''
 
         if self._upload_lock.locked():
             self.logger.warning('上传速度慢于录制速度，可能导致上传队列阻塞！')
@@ -248,6 +263,17 @@ class biliuprs():
                 status, bvid = self.upload_once(video=video_files, bvid=self.task_info.get('bvid'), **config)
                 if status:
                     self.task_info['bvid'] = bvid
+
+        if downloaded_cover:
+            try:
+                os.remove(downloaded_cover)
+            except OSError:
+                pass
+        if status and generated_cover and cover_file:
+            try:
+                os.remove(cover_file)
+            except OSError:
+                pass
 
         return status, bvid
 

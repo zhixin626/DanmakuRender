@@ -510,6 +510,7 @@
 
     // ===================== Emoji 列表 =====================
     var emojiMissing = {};   // platform -> 该平台最近一次检查出的缺失列表，确认下载时用
+    var emojiExtra = {};     // platform -> 本地存在但不在最近远端清单中的文件
     var emojiChecking = {};   // platform -> true，检查中；列表每5秒轮询重绘，靠这个状态让按钮重绘后还是"检查中"
 
     function buildEmojiRow(e) {
@@ -551,28 +552,34 @@
         var el = document.getElementById('emoji-result-' + platform);
         if (el) el.remove();
         delete emojiMissing[platform];
+        delete emojiExtra[platform];
     }
 
     function renderEmojiResult(platform, data) {
         emojiMissing[platform] = data.missing || [];
+        emojiExtra[platform] = data.extra || [];
 
         var scopeNote = '';
         if (data.cookie_used) {
             scopeNote = ' <span style="color:#666;">（使用cookie：' + esc(data.cookie_used) + '）</span>';
         }
         var summaryHtml = (PLATFORM_META[platform] || platform) + '：本地已有 ' + data.existing_count + ' 个，接口共 ' +
-            data.unique_count + ' 个，缺失 <b>' + emojiMissing[platform].length + '</b> 个' + scopeNote;
-        var listHtml = emojiMissing[platform].map(function (m) { return '<div>' + esc(m.name) + '</div>'; }).join('');
+            data.unique_count + ' 个，缺失 <b>' + emojiMissing[platform].length + '</b> 个，本地多余 <b>' +
+            emojiExtra[platform].length + '</b> 个' + scopeNote;
+        var missingHtml = emojiMissing[platform].map(function (m) { return '<div>' + esc(m.name) + '</div>'; }).join('');
+        var extraHtml = emojiExtra[platform].map(function (m) { return '<div>' + esc(m.filename) + '</div>'; }).join('');
+        var listHtml = (missingHtml ? '<div><b>缺失：</b></div>' + missingHtml : '') +
+            (extraHtml ? '<div style="margin-top:8px;"><b>本地多余：</b></div>' + extraHtml : '');
 
-        var actionsHtml;
+        var actions = [];
         if (emojiMissing[platform].length > 0) {
-            actionsHtml =
-                '<button class="op-emoji-download" data-platform="' + esc(platform) + '">更新（下载缺失的 ' + emojiMissing[platform].length + ' 个）</button>' +
-                '<button class="op-emoji-dismiss" data-platform="' + esc(platform) + '">取消</button>';
-        } else {
-            actionsHtml = '<span style="color:#1a8917;">已是最新，无需下载。</span>' +
-                '<button class="op-emoji-dismiss" data-platform="' + esc(platform) + '">关闭</button>';
+            actions.push('<button class="op-emoji-download" data-platform="' + esc(platform) + '">更新（下载缺失的 ' + emojiMissing[platform].length + ' 个）</button>');
         }
+        if (emojiExtra[platform].length > 0) {
+            actions.push('<button class="op-emoji-delete-extra" data-platform="' + esc(platform) + '">删除本地多余的 ' + emojiExtra[platform].length + ' 个</button>');
+        }
+        if (!actions.length) actions.push('<span style="color:#1a8917;">本地表情已与远端清单一致。</span>');
+        actions.push('<button class="op-emoji-dismiss" data-platform="' + esc(platform) + '">关闭</button>');
 
         var el = document.getElementById('emoji-result-' + platform);
         if (!el) {
@@ -583,7 +590,7 @@
         }
         el.innerHTML = '<div>' + summaryHtml + '</div>' +
             '<div class="ar-missing-list">' + listHtml + '</div>' +
-            '<div class="ar-row">' + actionsHtml + '</div>';
+            '<div class="ar-row">' + actions.join('') + '</div>';
     }
 
     document.getElementById('emoji-results').addEventListener('click', function (e) {
@@ -591,6 +598,7 @@
         var platform = t.dataset && t.dataset.platform;
         if (!platform) return;
         if (t.classList.contains('op-emoji-download')) doEmojiDownload(platform, t);
+        else if (t.classList.contains('op-emoji-delete-extra')) doEmojiDeleteExtras(platform, t);
         else if (t.classList.contains('op-emoji-dismiss')) resetEmojiResult(platform);
     });
 
@@ -643,6 +651,27 @@
             })
             .catch(function (e) { alert('请求失败: ' + e); })
             .finally(function () { btn.disabled = false; btn.textContent = '更新'; });
+    }
+
+    function doEmojiDeleteExtras(platform, btn) {
+        var items = emojiExtra[platform] || [];
+        if (!confirm('确定永久删除这 ' + items.length + ' 个本地多余表情吗？')) return;
+        btn.disabled = true; btn.textContent = '删除中...';
+        fetch('/api/emoji/delete-extras', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform: platform, items: items })
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (!d.ok) { alert(d.message || '删除失败'); return; }
+                var msg = '完成：删除 ' + d.deleted.length + ' 个';
+                if (d.failed && d.failed.length) msg += '，失败 ' + d.failed.length + ' 个';
+                alert(msg);
+                resetEmojiResult(platform);
+                refreshEmojiList();
+            })
+            .catch(function (e) { alert('请求失败: ' + e); })
+            .finally(function () { btn.disabled = false; btn.textContent = '删除本地多余表情'; });
     }
 
     startPolling(refreshEmojiList, 5000);

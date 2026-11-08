@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 import os
 import re
@@ -14,11 +15,14 @@ from DMR.utils.text_width import TextMeasurer
 
 from .emoji_width import EmojiWidthMeasurer
 from .layout_models import LayoutState, RenderPlan
+from .resolution import resolve_render_canvas
 
 
 SUPPORTED_SCHEMA = 1
+logger = logging.getLogger(__name__)
 
-PANEL_SLIDE_DURATION = 0.5
+PANEL_ENTER_DURATION = 0.5
+PANEL_EXIT_DURATION = 0.5
 PANEL_PUSH_DURATION = 0.3
 PANEL_STACK_GAP = 10.0
 
@@ -27,7 +31,8 @@ TRACK_SLIDE_LEFT = "slide_left"
 TRACK_SLIDE_RIGHT = "slide_right"
 
 # Event routing is intentionally fixed for now. Event configuration controls
-# content/appearance/lifetime; track configuration controls motion/geometry.
+# content/filtering and optional platform overrides; track configuration
+# controls motion, geometry, colour policy and lifetime policy.
 EVENT_TRACKS = {
     "danmaku": TRACK_R2L,
     "superchat": TRACK_SLIDE_LEFT,
@@ -35,19 +40,22 @@ EVENT_TRACKS = {
     "member": TRACK_SLIDE_RIGHT,
 }
 
-# Gift/member colours are selected by total CNY value. Ranges are left-closed
-# and right-open: [min_cny, max_cny). The last range has no upper bound.
-GIFT_MEMBER_TOTAL_PRICE_COLORS = {
-    "ranges": (
-        {"min_cny": 0, "max_cny": 1, "top_color": "#EEF6F8", "bottom_color": "#607D8B"},
-        {"min_cny": 1, "max_cny": 10, "top_color": "#DBFFFD", "bottom_color": "#3E8E95"},
-        {"min_cny": 10, "max_cny": 50, "top_color": "#E2F0FF", "bottom_color": "#4C78C2"},
-        {"min_cny": 50, "max_cny": 100, "top_color": "#EDE7FF", "bottom_color": "#7656B5"},
-        {"min_cny": 100, "max_cny": 1000, "top_color": "#FFE8F1", "bottom_color": "#C65386"},
-        {"min_cny": 1000, "max_cny": None, "top_color": "#FFF2C7", "bottom_color": "#B77A16"},
-    ),
-    "unknown": {"top_color": "#EEEEEE", "bottom_color": "#616161"},
-}
+# Fallback panel policies used only when a track omits its own ranges.
+# Ranges are left-closed and right-open; the last range has no upper bound.
+DEFAULT_PANEL_PRICE_COLORS = (
+    {"min_cny": 0, "max_cny": 1, "top_color": "#EEF6F8", "bottom_color": "#607D8B"},
+    {"min_cny": 1, "max_cny": 10, "top_color": "#DBFFFD", "bottom_color": "#3E8E95"},
+    {"min_cny": 10, "max_cny": 50, "top_color": "#E2F0FF", "bottom_color": "#4C78C2"},
+    {"min_cny": 50, "max_cny": 100, "top_color": "#EDE7FF", "bottom_color": "#7656B5"},
+    {"min_cny": 100, "max_cny": 1000, "top_color": "#FFE8F1", "bottom_color": "#C65386"},
+    {"min_cny": 1000, "max_cny": None, "top_color": "#FFF2C7", "bottom_color": "#B77A16"},
+)
+DEFAULT_PANEL_PRICE_DURATIONS = (
+    {"min_price_cny": 0, "max_price_cny": 30, "seconds": 30},
+    {"min_price_cny": 30, "max_price_cny": 50, "seconds": 60},
+    {"min_price_cny": 50, "max_price_cny": 100, "seconds": 120},
+    {"min_price_cny": 100, "max_price_cny": None, "seconds": 180},
+)
 
 
 @dataclass
@@ -56,6 +64,8 @@ class LayoutCompileResult:
     next_state: LayoutState
     event_count: int = 0
     dropped_count: int = 0
+    track_stats: dict[str, dict[str, int]] = field(default_factory=dict)
+    unrouted_dropped_count: int = 0
     cleanup_paths: list[str] = field(default_factory=list)
 
     def cleanup(self):
@@ -102,30 +112,114 @@ def _hex_color(value, default="#FFFFFF") -> str:
     return "#" + raw.upper()
 
 
-def _gift_panel_colors(price_cny) -> tuple[str, str]:
-    ranges = GIFT_MEMBER_TOTAL_PRICE_COLORS["ranges"]
-    unknown = GIFT_MEMBER_TOTAL_PRICE_COLORS["unknown"]
+def _decimal_price(value):
     try:
-        price = Decimal(str(price_cny))
+        price = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
-        return unknown["top_color"], unknown["bottom_color"]
+        return None
     if not price.is_finite() or price < 0:
-        return unknown["top_color"], unknown["bottom_color"]
+        return None
+    return price
 
-    for price_range in ranges:
+
+def _select_price_range(price_cny, configured, fallback):
+    raw_ranges = configured if isinstance(configured, (list, tuple)) and configured else fallback
+    parsed = []
+    for index, price_range in enumerate(raw_ranges):
+        if not isinstance(price_range, dict):
+            continue
+        lower_raw = price_range.get("min_price_cny", price_range.get("min_cny"))
+        upper_raw = price_range.get("max_price_cny", price_range.get("max_cny"))
         try:
-            lower_raw = price_range.get("min_cny")
-            upper_raw = price_range.get("max_cny")
-            lower = Decimal(str(lower_raw)) if lower_raw is not None else None
+            lower = Decimal(str(lower_raw if lower_raw is not None else 0))
             upper = Decimal(str(upper_raw)) if upper_raw is not None else None
         except (InvalidOperation, TypeError, ValueError):
             continue
-        if lower is not None and price < lower:
+        if not lower.is_finite() or (upper is not None and not upper.is_finite()):
             continue
-        if upper is not None and price >= upper:
+        if upper is not None and upper <= lower:
             continue
-        return price_range["top_color"], price_range["bottom_color"]
-    return unknown["top_color"], unknown["bottom_color"]
+        parsed.append((lower, upper, index, price_range))
+    if not parsed:
+        return None
+    parsed.sort(key=lambda item: (item[0], item[2]))
+    price = _decimal_price(price_cny)
+    if price is None:
+        return parsed[0][3]
+    for lower, upper, _, price_range in parsed:
+        if price >= lower and (upper is None or price < upper):
+            return price_range
+    # An uncovered value deliberately falls back to the lowest tier.
+    return parsed[0][3]
+
+
+def _panel_duration(record: dict, event_cfg: dict, track_cfg: dict) -> float:
+    if event_cfg.get("use_event_duration", False):
+        try:
+            event_duration = float(
+                record.get("platform_duration", record.get("duration"))
+            )
+            if math.isfinite(event_duration) and event_duration > 0:
+                return event_duration
+        except (TypeError, ValueError):
+            pass
+    # Compatibility with the former top-level gift/member ``duration``.
+    if event_cfg.get("duration") is not None:
+        try:
+            fixed_duration = float(event_cfg["duration"])
+            if math.isfinite(fixed_duration) and fixed_duration > 0:
+                return fixed_duration
+        except (TypeError, ValueError):
+            pass
+    selected = _select_price_range(
+        record.get("price_cny"),
+        track_cfg.get("price_duration_ranges"),
+        DEFAULT_PANEL_PRICE_DURATIONS,
+    ) or DEFAULT_PANEL_PRICE_DURATIONS[0]
+    try:
+        seconds = float(selected.get("seconds"))
+    except (TypeError, ValueError):
+        seconds = float(DEFAULT_PANEL_PRICE_DURATIONS[0]["seconds"])
+    return max(0.1, seconds if math.isfinite(seconds) else 30.0)
+
+
+def _panel_colors(record: dict, event_cfg: dict, track_cfg: dict) -> tuple[str, str, str, str]:
+    selected = _select_price_range(
+        record.get("price_cny"),
+        track_cfg.get("price_color_ranges"),
+        DEFAULT_PANEL_PRICE_COLORS,
+    ) or DEFAULT_PANEL_PRICE_COLORS[0]
+    price_top = _hex_color(selected.get("top_color"), "#EEF6F8")
+    price_bottom = _hex_color(selected.get("bottom_color"), "#607D8B")
+    default_name = _hex_color(track_cfg.get("name_color"), "#666666")
+    default_content = _hex_color(track_cfg.get("content_color"), "#FFFFFF")
+    if not event_cfg.get("use_event_background_colors", False):
+        return price_top, price_bottom, default_name, default_content
+    return (
+        _hex_color(record.get("background_color"), price_top),
+        _hex_color(record.get("background_bottom_color"), price_bottom),
+        default_name,
+        default_content,
+    )
+
+
+def _event_is_enabled(record: dict, event_cfg: dict) -> bool:
+    if event_cfg.get("enable", True) is False:
+        return False
+    minimum = _decimal_price(event_cfg.get("min_price_cny", 0))
+    if minimum is None or minimum <= 0:
+        return True
+    price = _decimal_price(record.get("price_cny"))
+    return price is not None and price >= minimum
+
+
+def _event_config(config: dict, track_cfg: dict, event_type: str) -> dict:
+    """Read the track-first config while accepting legacy top-level overrides."""
+    result = copy.deepcopy(track_cfg.get(event_type) or {})
+    legacy = config.get(event_type)
+    if isinstance(legacy, dict):
+        result.update(copy.deepcopy(legacy))
+    return result
 
 
 def _panel_width(video_width, value) -> int:
@@ -170,9 +264,11 @@ def _positive_count(value) -> int:
 
 def _quantity_suffix(value, unit="") -> str:
     count = _positive_count(value)
-    if count <= 1:
-        return ""
     return f" ×{count}{unit or ''}"
+
+
+def _optional_quantity_suffix(value, unit="") -> str:
+    return "" if value is None else _quantity_suffix(value, unit)
 
 
 def _format_cny(value) -> str:
@@ -296,8 +392,10 @@ class LayoutCompiler:
         work_dir: str = None,
     ) -> LayoutCompileResult:
         header, records = self._read_events(events_path)
-        width, height = getattr(video, "resolution", None) or (1920, 1080)
-        width, height = int(width or 1920), int(height or 1080)
+        source_resolution = resolve_render_canvas(
+            getattr(video, "resolution", None),
+            rescale_to_1080p=False,
+        )
         raw_segment_start = float(header["segment_start_time"])
         duration = max(0.0, float(getattr(video, "duration", 0) or 0))
 
@@ -310,6 +408,32 @@ class LayoutCompiler:
             old_state = LayoutState.from_dict(
                 previous_state,
                 raw_segment_start,
+            )
+        current_canvas = resolve_render_canvas(
+            source_resolution,
+            rescale_to_1080p=bool(
+                self.engine_config.get("rescale_to_1080p", False)
+            ),
+            rescale_orientation=self.engine_config.get(
+                "rescale_orientation", "auto"
+            ),
+            previous_canvas=old_state.canvas_resolution,
+            previous_source_resolution=old_state.source_resolution,
+        )
+        width, height = current_canvas
+        if (
+            previous_state is not None
+            and old_state.canvas_resolution != current_canvas
+        ):
+            logger.info(
+                "布局画布变化 %s → %s，放弃上一段布局状态",
+                old_state.canvas_resolution,
+                current_canvas,
+            )
+            old_state = LayoutState(
+                at=old_state.at,
+                canvas_resolution=current_canvas,
+                source_resolution=source_resolution,
             )
 
         # The downloader records a wall-clock start in each JSONL, while render
@@ -324,19 +448,34 @@ class LayoutCompiler:
         segment_time_shift = segment_start - raw_segment_start
         segment_end = segment_start + duration
 
+        # Stacked panels must be retained from the checkpoint time, including
+        # panels which expire in a recording gap.  Their exits still change the
+        # positions of surviving panels even though no frames are emitted for
+        # that gap.  Other tracks have no persistent stack state and can be
+        # filtered directly at the new segment boundary.
         state_events = [
             copy.deepcopy(event)
             for event in old_state.events
-            if _path_end(event) > segment_start
+            if _path_end(event) > (
+                old_state.at
+                if event.get("track") in (TRACK_SLIDE_LEFT, TRACK_SLIDE_RIGHT)
+                else segment_start
+            )
         ]
 
-        dan_render = self.config.get("danmaku") or {}
-        gift_render = self.config.get("gift") or {}
-        sc_render = self.config.get("superchat") or {}
-        member_render = self.config.get("member") or {}
         r2l_render = self.config.get(TRACK_R2L) or {}
         slide_left_render = self.config.get(TRACK_SLIDE_LEFT) or {}
         slide_right_render = self.config.get(TRACK_SLIDE_RIGHT) or {}
+        dan_render = _event_config(self.config, r2l_render, "danmaku")
+        gift_render = _event_config(self.config, slide_right_render, "gift")
+        sc_render = _event_config(self.config, slide_left_render, "superchat")
+        member_render = _event_config(self.config, slide_right_render, "member")
+        event_configs = {
+            "danmaku": dan_render,
+            "gift": gift_render,
+            "superchat": sc_render,
+            "member": member_render,
+        }
 
         font = dan_render.get("font", "Microsoft YaHei")
         fontsize = int(dan_render.get("fontsize", 36) or 36)
@@ -370,8 +509,23 @@ class LayoutCompiler:
             else set(EVENT_TRACKS)
         )
 
-        accepted = 0
-        dropped = 0
+        track_stats = {
+            TRACK_R2L: {"accepted": 0, "dropped": 0},
+            TRACK_SLIDE_LEFT: {"accepted": 0, "dropped": 0},
+            TRACK_SLIDE_RIGHT: {"accepted": 0, "dropped": 0},
+        }
+        unrouted_dropped = 0
+
+        def mark_accepted(track):
+            track_stats[track]["accepted"] += 1
+
+        def mark_dropped(track):
+            nonlocal unrouted_dropped
+            if track in track_stats:
+                track_stats[track]["dropped"] += 1
+            else:
+                unrouted_dropped += 1
+
         new_r2l = []
         new_panels = {
             TRACK_SLIDE_LEFT: [],
@@ -386,17 +540,21 @@ class LayoutCompiler:
             event_type = record.get("type")
             event_track = EVENT_TRACKS.get(event_type)
             if event_type not in included_events or event_track is None:
-                dropped += 1
+                mark_dropped(event_track)
+                continue
+            event_cfg = event_configs.get(event_type) or {}
+            if not _event_is_enabled(record, event_cfg):
+                mark_dropped(event_track)
                 continue
             try:
                 # Keep the event's segment-local time unchanged when an
                 # overlapping segment origin was moved forward.
                 start_at = float(record["received_at"]) + segment_time_shift
             except (KeyError, TypeError, ValueError):
-                dropped += 1
+                mark_dropped(event_track)
                 continue
             if duration > 0 and start_at >= segment_end + 1:
-                dropped += 1
+                mark_dropped(event_track)
                 continue
 
             event_id = self._event_id(video, events_path, record["_line"])
@@ -417,25 +575,12 @@ class LayoutCompiler:
                     emoji_measurer=emoji_measurer,
                 )
                 if prepared is None:
-                    dropped += 1
+                    mark_dropped(event_track)
                     continue
                 new_r2l.append(prepared)
-                accepted += 1
                 continue
 
             if event_type == "gift":
-                min_cny = gift_render.get("min_price_cny")
-                try:
-                    below_minimum = (
-                        min_cny is not None
-                        and record.get("price_cny") is not None
-                        and float(record["price_cny"]) < float(min_cny)
-                    )
-                except (TypeError, ValueError):
-                    below_minimum = False
-                if below_minimum:
-                    dropped += 1
-                    continue
                 display_record = dict(record)
                 display_record["gift_count_suffix"] = _quantity_suffix(
                     record.get("gift_count")
@@ -452,7 +597,7 @@ class LayoutCompiler:
                     event_id,
                     event_track,
                     start_at,
-                    float(gift_render.get("duration", 10) or 10),
+                    _panel_duration(record, gift_render, slide_right_render),
                     record.get("uname", ""),
                     content,
                     width,
@@ -463,12 +608,12 @@ class LayoutCompiler:
                     record=record,
                 )
                 new_panels[event_track].append(panel)
-                accepted += 1
+                mark_accepted(event_track)
                 continue
 
             if event_type == "member":
                 display_record = dict(record)
-                display_record["member_count_suffix"] = _quantity_suffix(
+                display_record["member_count_suffix"] = _optional_quantity_suffix(
                     record.get("member_count"),
                     record.get("member_unit", ""),
                 )
@@ -484,7 +629,7 @@ class LayoutCompiler:
                     event_id,
                     event_track,
                     start_at,
-                    float(member_render.get("duration", 10) or 10),
+                    _panel_duration(record, member_render, slide_right_render),
                     record.get("uname", ""),
                     content,
                     width,
@@ -495,7 +640,7 @@ class LayoutCompiler:
                     record=record,
                 )
                 new_panels[event_track].append(panel)
-                accepted += 1
+                mark_accepted(event_track)
                 continue
 
             if event_type == "superchat":
@@ -503,7 +648,7 @@ class LayoutCompiler:
                     event_id,
                     event_track,
                     start_at,
-                    float(record.get("duration", 60) or 60),
+                    _panel_duration(record, sc_render, slide_left_render),
                     record.get("uname", ""),
                     str(record.get("content", "") or ""),
                     width,
@@ -514,10 +659,10 @@ class LayoutCompiler:
                     record=record,
                 )
                 new_panels[event_track].append(panel)
-                accepted += 1
+                mark_accepted(event_track)
                 continue
 
-            dropped += 1
+            mark_dropped(event_track)
 
         active_r2l = [
             event for event in state_events
@@ -534,26 +679,30 @@ class LayoutCompiler:
             ):
                 active_r2l.append(event)
                 state_events.append(event)
+                mark_accepted(TRACK_R2L)
             else:
-                accepted -= 1
-                dropped += 1
+                mark_dropped(TRACK_R2L)
 
         track_configs = {
             TRACK_SLIDE_LEFT: slide_left_render,
             TRACK_SLIDE_RIGHT: slide_right_render,
         }
+        next_track_orders = {}
         for track, track_render in track_configs.items():
             existing = [event for event in state_events if event.get("track") == track]
-            combined = self._layout_stacked_panels(
+            combined, track_order = self._layout_stacked_panels(
                 track=track,
                 existing=existing,
                 newcomers=new_panels[track],
+                state_at=old_state.at,
+                initial_order=old_state.track_orders.get(track),
                 segment_start=segment_start,
                 segment_end=segment_end,
                 width=width,
                 height=height,
                 track_cfg=track_render,
             )
+            next_track_orders[track] = track_order
             state_events = [event for event in state_events if event.get("track") != track]
             state_events.extend(combined)
 
@@ -575,8 +724,27 @@ class LayoutCompiler:
             for event in state_events
             if _path_end(event) > segment_end
         ]
-        next_state = LayoutState(at=segment_end, events=next_events)
+        live_ids = {str(event.get("id")) for event in next_events}
+        next_state = LayoutState(
+            at=segment_end,
+            events=next_events,
+            track_orders={
+                track: [
+                    event_id
+                    for event_id in order
+                    if event_id in live_ids
+                ]
+                for track, order in next_track_orders.items()
+            },
+            canvas_resolution=current_canvas,
+            source_resolution=source_resolution,
+        )
         plan = RenderPlan(duration=duration, events=plan_events)
+        accepted = sum(stats["accepted"] for stats in track_stats.values())
+        dropped = (
+            sum(stats["dropped"] for stats in track_stats.values())
+            + unrouted_dropped
+        )
 
         os.makedirs(work_dir or tempfile.gettempdir(), exist_ok=True)
         fd, plan_path = tempfile.mkstemp(
@@ -591,6 +759,8 @@ class LayoutCompiler:
             next_state=next_state,
             event_count=accepted,
             dropped_count=dropped,
+            track_stats=track_stats,
+            unrouted_dropped_count=unrouted_dropped,
             cleanup_paths=[plan_path],
         )
 
@@ -633,7 +803,12 @@ class LayoutCompiler:
             }
 
         emoticon = record.get("emoticon") if isinstance(record.get("emoticon"), dict) else None
-        is_raster = emoji_measurer.is_special(text, emoticon)
+        # emoji_dmrender 中所有 VIP 药丸统一由 Pillow 绘制。否则纯文字 VIP
+        # 会走 libass，而带 Emoji 的 VIP 会走 Pillow，产生两套圆角、留白、
+        # 描边透明度和文字基线。普通 dmrender 没有 Pillow 合成阶段，仍走 ASS。
+        is_raster = (
+            self.engine == "emoji_dmrender" and pill is not None
+        ) or emoji_measurer.is_special(text, emoticon)
         measure = (
             (lambda value: emoji_measurer.measure(value, emoticon))
             if is_raster
@@ -644,18 +819,22 @@ class LayoutCompiler:
             return None
 
         content_width = max(1, int(measure(text)))
-        line_height = max(
-            int(dan_render.get("fontsize", 36) or 36),
-            emoji_measurer.png_height if is_raster else 0,
-        )
+        fontsize = int(dan_render.get("fontsize", 36) or 36)
+        if is_raster:
+            content_ascent, content_descent = emoji_measurer.vertical_metrics(
+                text, emoticon
+            )
+            content_height = content_ascent + content_descent
+        else:
+            content_ascent, content_descent = fontsize, 0
+            content_height = fontsize
+        line_height = max(fontsize, content_height)
         outer_width = content_width
         if pill:
-            pad_x = (float(dan_render.get("fontsize", 36) or 36) + 2 * pill["padding"]) / 2
+            pill_height = content_height + 2 * pill["padding"]
+            pad_x = pill_height / 2
             outer_width += int(round(2 * pad_x))
-            line_height = max(
-                line_height,
-                int(dan_render.get("fontsize", 36) or 36) + 2 * pill["padding"],
-            )
+            line_height = max(line_height, pill_height)
         visual = {
             "type": "line",
             "text": text,
@@ -666,6 +845,10 @@ class LayoutCompiler:
         }
         if is_raster:
             visual["images"] = emoji_measurer.resolve_images(text, emoticon)
+            visual["text_box"] = {
+                "ascent": content_ascent,
+                "descent": content_descent,
+            }
         if pill:
             visual["pill"] = pill
         return {
@@ -700,7 +883,16 @@ class LayoutCompiler:
                 / max(1.0, fontsize + vertical_gap)
             ),
         )
-        duration = max(0.1, float(track_cfg.get("duration", 16) or 16))
+        duration = max(
+            0.1,
+            float(
+                track_cfg.get(
+                    "screen_duration",
+                    track_cfg.get("duration", 16),
+                )
+                or 16
+            ),
+        )
         speed = width / duration
         start_at = float(event["path"][0][0])
         render_width = float(event["bounds"]["width"])
@@ -754,18 +946,26 @@ class LayoutCompiler:
         panel_class,
         record=None,
     ):
-        fontsize = 30
+        def panel_setting(key, default=None):
+            # Event-level visual keys are accepted for legacy configurations;
+            # new configurations keep these keys on the track.
+            if key in render_cfg:
+                return render_cfg.get(key)
+            return track_cfg.get(key, default)
+
+        font = str(panel_setting("font", "Microsoft YaHei") or "Microsoft YaHei")
+        fontsize = max(1, int(panel_setting("fontsize", 30) or 30))
         box_width = _panel_width(width, track_cfg.get("width", "25%"))
         top_height = 40
-        corner_radius = _pixels(render_cfg.get("corner_radius"), 40)
-        box_outline = _pixels(render_cfg.get("box_border_width"), 1)
+        corner_radius = _pixels(panel_setting("corner_radius"), 40)
+        box_outline = _pixels(panel_setting("box_border_width"), 1)
         box_outline_opacity = float(
-            render_cfg.get("box_border_opacity", 0.45) or 0
+            panel_setting("box_border_opacity", 0.45) or 0
         )
         padding_top = 9
         padding_bottom = 14
         text_padding = 6
-        measurer = TextMeasurer("Microsoft YaHei", fontsize, bold=True)
+        measurer = TextMeasurer(font, fontsize, bold=True)
         lines = measurer.wrap(str(content or ""), box_width - 2 * text_padding) or [""]
         bottom_height = len(lines) * fontsize + padding_top + padding_bottom
         total_height = top_height + bottom_height
@@ -779,36 +979,20 @@ class LayoutCompiler:
         )
         name_budget = max(0, text_budget - price_width - name_price_gap)
 
-        if panel_class == "superchat":
-            top_color = _hex_color(record.get("background_color"), "#FFF5ED")
-            bottom_color = _hex_color(record.get("background_bottom_color"), "#B2602A")
-            name_color = _hex_color(record.get("name_color"), "#000000")
-            content_color = _hex_color(record.get("content_color"), "#FFFFFF")
-            uname = measurer.truncate(
-                str(uname or ""), name_budget, ellipsis="..."
-            )
-            top_opacity = float(render_cfg.get("top_opacity", 0.7) or 0.7)
-            bottom_opacity = float(render_cfg.get("bottom_opacity", 0.3) or 0.3)
-            name_outline = _pixels(render_cfg.get("name_border_width"), 0)
-            content_outline = _pixels(render_cfg.get("content_border_width"), 1)
-            name_opacity = content_opacity = 1.0
-            name_outline_color = content_outline_color = "#000000"
-        else:
-            top_color, bottom_color = _gift_panel_colors(
-                record.get("price_cny")
-            )
-            name_color = "#666666"
-            content_color = "#FFFFFF"
-            uname = measurer.truncate(
-                str(uname or ""), name_budget, ellipsis="..."
-            )
-            # Match SC typography and geometry; only the background colours differ.
-            top_opacity = float(render_cfg.get("top_opacity", 0.7) or 0.7)
-            bottom_opacity = float(render_cfg.get("bottom_opacity", 0.3) or 0.3)
-            name_opacity = content_opacity = 1.0
-            name_outline = _pixels(render_cfg.get("name_border_width"), 0)
-            content_outline = _pixels(render_cfg.get("content_border_width"), 1)
-            name_outline_color = content_outline_color = "#000000"
+        top_color, bottom_color, name_color, content_color = _panel_colors(
+            record,
+            render_cfg,
+            track_cfg,
+        )
+        uname = measurer.truncate(
+            str(uname or ""), name_budget, ellipsis="..."
+        )
+        top_opacity = float(panel_setting("top_opacity", 0.7) or 0.7)
+        bottom_opacity = float(panel_setting("bottom_opacity", 0.3) or 0.3)
+        name_opacity = content_opacity = 1.0
+        name_outline = _pixels(panel_setting("name_border_width"), 0)
+        content_outline = _pixels(panel_setting("content_border_width"), 1)
+        name_outline_color = content_outline_color = "#000000"
 
         nodes = [
             {
@@ -847,7 +1031,7 @@ class LayoutCompiler:
                 "x": text_padding,
                 "y": 5,
                 "text": uname,
-                "font": "Microsoft YaHei",
+                "font": font,
                 "size": fontsize,
                 "color": name_color,
                 "opacity": name_opacity,
@@ -864,7 +1048,7 @@ class LayoutCompiler:
                     "x": box_width - text_padding,
                     "y": 5,
                     "text": price_text,
-                    "font": "Microsoft YaHei",
+                    "font": font,
                     "size": fontsize,
                     "color": name_color,
                     "opacity": name_opacity,
@@ -880,7 +1064,7 @@ class LayoutCompiler:
                 "x": text_padding,
                 "y": top_height + padding_top,
                 "text": content,
-                "font": "Microsoft YaHei",
+                "font": font,
                 "size": fontsize,
                 "color": content_color,
                 "opacity": content_opacity,
@@ -910,6 +1094,8 @@ class LayoutCompiler:
         track,
         existing,
         newcomers,
+        state_at,
+        initial_order,
         segment_start,
         segment_end,
         width,
@@ -923,19 +1109,29 @@ class LayoutCompiler:
             0.0,
             _pixels(
                 track_cfg.get("margin_bottom"),
-                76 if side_left else 130,
+                10,
             ),
         )
         anchor_y = max(0.0, min(float(height), height - margin_bottom))
         # Keep the former SC/Gift converters' timing contract:
         # duration is the complete lifetime (entry/hold/exit included),
-        # horizontal entry/exit takes 0.5 s and vertical push/fall 0.3 s.
+        # entry, exit and vertical reflow are independently configurable.
         buff = max(
             0.0,
             _pixels(track_cfg.get("vertical_gap"), PANEL_STACK_GAP),
         )
-        slide = PANEL_SLIDE_DURATION
-        push = PANEL_PUSH_DURATION
+        enter = max(
+            0.0,
+            _pixels(track_cfg.get("enter_duration"), PANEL_ENTER_DURATION),
+        )
+        exit_duration = max(
+            0.0,
+            _pixels(track_cfg.get("exit_duration"), PANEL_EXIT_DURATION),
+        )
+        push = max(
+            0.0,
+            _pixels(track_cfg.get("reflow_duration"), PANEL_PUSH_DURATION),
+        )
 
         all_events = [copy.deepcopy(event) for event in existing]
         for event in all_events:
@@ -958,23 +1154,56 @@ class LayoutCompiler:
             event.setdefault("visual", {})["motion"] = {
                 "inside_x": float(inside_x),
                 "outside_x": float(outside_x),
-                "slide_duration": float(slide),
+                "enter_duration": float(enter),
+                "exit_duration": float(exit_duration),
             }
+        simulation_start = min(float(state_at), float(segment_start))
         active = [
             event
             for event in all_events
-            if _path_start(event) <= segment_start < _path_end(event)
+            if _path_start(event) <= simulation_start < _path_end(event)
         ]
-        if active and all(event.get("_stack_order") is not None for event in active):
+        by_id = {str(event.get("id")): event for event in active}
+        ordered_ids = [
+            str(event_id)
+            for event_id in (initial_order or [])
+            if str(event_id) in by_id
+        ]
+        if ordered_ids:
+            ordered_set = set(ordered_ids)
+            active = [by_id[event_id] for event_id in ordered_ids]
+            active.extend(
+                sorted(
+                    (
+                        event
+                        for event in by_id.values()
+                        if str(event.get("id")) not in ordered_set
+                    ),
+                    key=lambda event: _position_at(
+                        event["path"], simulation_start
+                    )[1],
+                    reverse=True,
+                )
+            )
+        elif active and all(event.get("_stack_order") is not None for event in active):
+            # Backward compatibility for checkpoints written before
+            # ``track_orders`` was introduced.
             active.sort(key=lambda event: float(event["_stack_order"]))
         else:
             active.sort(
-                key=lambda event: _position_at(event["path"], segment_start)[1],
+                key=lambda event: _position_at(event["path"], simulation_start)[1],
                 reverse=True,
             )
-        self._set_panel_order(active)
         actions = []
         arrival_batches = {}
+        # Normally a checkpoint only contains panels already visible at
+        # ``state_at``.  Keep future-starting panels valid as well (for example,
+        # an event accepted inside the one-second boundary tolerance).
+        for event in all_events:
+            start_at = _path_start(event)
+            if start_at > simulation_start + 1e-7:
+                arrival_batches.setdefault(start_at, []).append(event)
+                actions.append((_path_end(event), 1, event))
         for event in sorted(newcomers, key=lambda item: float(item["path"][0][0])):
             start_at = max(float(event["path"][0][0]), segment_start)
             lifetime = max(0.1, float(event.pop("_duration")))
@@ -996,7 +1225,8 @@ class LayoutCompiler:
             event.setdefault("visual", {})["motion"] = {
                 "inside_x": float(inside_x),
                 "outside_x": float(outside_x),
-                "slide_duration": float(slide),
+                "enter_duration": float(enter),
+                "exit_duration": float(exit_duration),
             }
             event["path"] = self._panel_initial_path(
                 start_at,
@@ -1004,7 +1234,8 @@ class LayoutCompiler:
                 outside_x,
                 inside_x,
                 anchor_y - event["bounds"]["height"],
-                slide,
+                enter,
+                exit_duration,
             )
             arrival_batches.setdefault(start_at, []).append(event)
             actions.append((end_at, 1, event))
@@ -1017,8 +1248,50 @@ class LayoutCompiler:
             end_at = _path_end(event)
             actions.append((end_at, 1, event))
 
+        active = self._advance_panel_state(
+            active=active,
+            actions=actions,
+            from_time=simulation_start,
+            to_time=segment_end,
+            anchor_y=anchor_y,
+            buff=buff,
+            enter=enter,
+            exit_duration=exit_duration,
+            push=push,
+        )
+
+        for event in all_events:
+            event.pop("_stack_order", None)
+        return (
+            [event for event in all_events if _path_end(event) > segment_start],
+            [str(event["id"]) for event in active],
+        )
+
+    def _advance_panel_state(
+        self,
+        *,
+        active,
+        actions,
+        from_time,
+        to_time,
+        anchor_y,
+        buff,
+        enter,
+        exit_duration,
+        push,
+    ):
+        """Advance one stacked track through an absolute time window.
+
+        The same transition logic is used for an unrecorded gap and for the
+        visible segment.  RenderPlan clipping decides which part is emitted;
+        layout state itself always advances continuously.
+        """
         actions.sort(key=lambda item: (item[0], item[1]))
         for timestamp, action_type, payload in actions:
+            if timestamp > to_time + 1e-7:
+                break
+            if timestamp < from_time - 1e-7:
+                continue
             active = [item for item in active if _path_end(item) > timestamp]
             if action_type == 0:
                 # `active` is the logical bottom-to-top order.  Never rebuild it
@@ -1043,43 +1316,45 @@ class LayoutCompiler:
                         float(motion["outside_x"]),
                         float(motion["inside_x"]),
                         target_y,
-                        slide,
+                        enter,
+                        exit_duration,
                     )
                 active = batch + current
-                self._set_panel_order(active)
                 self._reflow_panels(
                     active,
                     timestamp,
                     anchor_y,
                     buff,
-                    slide,
+                    exit_duration,
                     push,
                 )
             else:
                 event = payload
                 active = [item for item in active if item["id"] != event["id"]]
-                self._set_panel_order(active)
                 self._reflow_panels(
                     active,
                     timestamp,
                     anchor_y,
                     buff,
-                    slide,
+                    exit_duration,
                     push,
                 )
 
-        return [event for event in all_events if _path_end(event) > segment_start]
+        return active
 
     @staticmethod
-    def _set_panel_order(active):
-        for index, event in enumerate(active):
-            event["_stack_order"] = index
-
-    @staticmethod
-    def _panel_initial_path(start, lifetime, outside_x, inside_x, y, slide):
+    def _panel_initial_path(
+        start,
+        lifetime,
+        outside_x,
+        inside_x,
+        y,
+        enter,
+        exit_duration,
+    ):
         end = start + max(0.1, float(lifetime))
-        entry_end = min(start + slide, end)
-        exit_start = max(entry_end, end - slide)
+        entry_end = min(start + enter, end)
+        exit_start = max(entry_end, end - exit_duration)
         path = [[start, outside_x, y]]
         _append_point(path, [entry_end, inside_x, y])
         _append_point(path, [exit_start, inside_x, y])
@@ -1092,7 +1367,7 @@ class LayoutCompiler:
         timestamp,
         anchor_y,
         buff,
-        slide,
+        exit_duration,
         push,
     ):
         cursor = anchor_y
@@ -1101,24 +1376,30 @@ class LayoutCompiler:
             # Reserve that real row instead of a synthetic stack slot;
             # otherwise an off-screen exit leaves a visible blank row.
             end_at = _path_end(event)
-            exit_start = max(_path_start(event), end_at - slide)
+            exit_start = max(_path_start(event), end_at - exit_duration)
             if timestamp >= exit_start - 1e-7:
                 _, current_y = _position_at(event["path"], timestamp)
                 cursor = min(cursor, current_y) - buff
                 continue
             target_y = cursor - float(event["bounds"]["height"])
             cursor = target_y - buff
-            self._retarget_panel(event, timestamp, target_y, slide, push)
+            self._retarget_panel(
+                event,
+                timestamp,
+                target_y,
+                exit_duration,
+                push,
+            )
 
     @staticmethod
-    def _retarget_panel(event, timestamp, target_y, slide, push):
+    def _retarget_panel(event, timestamp, target_y, exit_duration, push):
         end_at = _path_end(event)
         if timestamp >= end_at:
             return
         motion = (event.get("visual") or {}).get("motion") or {}
         inside_x = float(motion.get("inside_x", 0))
         outside_x = float(motion.get("outside_x", inside_x))
-        exit_start = max(_path_start(event), end_at - slide)
+        exit_start = max(_path_start(event), end_at - exit_duration)
         # Exit is a fixed horizontal movement on the row occupied at exit_start.
         # New arrivals must not turn it into a diagonal move or erase that phase.
         if timestamp >= exit_start - 1e-7:

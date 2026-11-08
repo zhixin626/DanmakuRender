@@ -23,7 +23,10 @@ from DMR.Login.cookiemgr import load_cookie_dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from DMR.LiveAPI.douyin import douyin_utils
-from DMR.utils import split_url, cookiestr2dict, BaseDanmaku, UserDanmaku, GiftDanmaku, EntryDanmaku
+from DMR.utils import (
+    split_url, cookiestr2dict, BaseDanmaku, UserDanmaku,
+    GiftDanmaku, MemberDanmaku, EntryDanmaku,
+)
 from .dy_pb2 import PushFrame, Response, ChatMessage, GiftMessage, MemberMessage
 from .utils import DouyinDanmakuUtils
 import aiohttp
@@ -31,12 +34,6 @@ import aiohttp
 from DMR.utils.bark_notifier  import bark_notify
 
 logger = logging.getLogger(__name__)
-
-RED = "\033[31m"
-YELLOW = "\033[33m"
-GREEN = "\033[32m"
-BLUE = "\033[34m"
-RESET = "\033[0m"
 
 def _decode_protobuf_raw(data: bytes, max_depth: int = 4):
     """
@@ -135,121 +132,240 @@ def _decode_protobuf_raw(data: bytes, max_depth: int = 4):
     return result
 
 
+def _first_field(message, field, default=None):
+    values = message.get(str(field), []) if isinstance(message, dict) else []
+    return values[0] if values else default
+
+
+def _decode_star_guard(payload):
+    """解析星守护开通特效；其他素材特效返回 None。"""
+    decoded = _decode_protobuf_raw(payload)
+    if _first_field(decoded, 2) != 5731:
+        return None
+
+    try:
+        extra = json.loads(_first_field(decoded, 8, ""))
+    except (TypeError, ValueError):
+        return None
+    if extra.get("effect_source") != "star_guard":
+        return None
+
+    user = _first_field(_first_field(decoded, 1, {}), 15, {})
+    name = _first_field(user, 3)
+    if not name:
+        return None
+    return {
+        "uid": _first_field(user, 1),
+        "name": str(name),
+        "raw": decoded,
+    }
+
+
 class Douyin:
     heartbeat = b':\x02hb'
     heartbeatInterval = 10
 
     # --- 未识别消息采样（用于反推协议格式，如开通会员消息） ---
-    _unknown_sample_counter = {}
     _unknown_sample_limit = 10
-    _unknown_sample_dir = "douyin_unknown_samples"
+    _unknown_sample_base_dir = "douyin_unknown_samples"
 
-    @classmethod
-    def _sample_unknown_message(cls, msg):
-        """对未识别的 method 各采样最多 _unknown_sample_limit 条，落盘成按 method 分类的 jsonl"""
-        method = msg.method
-        cnt = cls._unknown_sample_counter.get(method, 0)
-        if cnt >= cls._unknown_sample_limit:
-            return
-        cls._unknown_sample_counter[method] = cnt + 1
+    @staticmethod
+    def _safe_sample_name(name):
+        return re.sub(r'[^\w.\-]', '_', str(name))[:80] or 'unknown'
+
+    def _configure_unknown_sampling(self, room_id, session_id):
+        """设置当前直播场次；旧样本由新样本逐条滚动覆盖。"""
+        self._unknown_sample_counter = {}
+        self._unknown_sample_session_id = str(session_id)
+        self._unknown_sample_dir = os.path.join(
+            self._unknown_sample_base_dir,
+            self._safe_sample_name(room_id),
+        )
+
         try:
-            os.makedirs(cls._unknown_sample_dir, exist_ok=True)
+            os.makedirs(self._unknown_sample_dir, exist_ok=True)
+            marker_path = os.path.join(self._unknown_sample_dir, '.session')
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                f.write(self._unknown_sample_session_id)
+        except Exception as e:
+            logger.warning("初始化抖音未识别消息采样失败: %s", e)
+            self._unknown_sample_dir = None
+
+    def _sample_unknown_message(self, msg):
+        """对未识别的 method 每场直播采样最多 10 条。"""
+        if not self._unknown_sample_dir:
+            return
+
+        method = msg.method or 'unknown'
+        path = os.path.join(
+            self._unknown_sample_dir,
+            f"{self._safe_sample_name(method)}.jsonl",
+        )
+        count = self._unknown_sample_counter.get(method)
+        if count is None:
+            count = 0
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            record = json.loads(line)
+                        except (TypeError, ValueError):
+                            continue
+                        if str(record.get('session_id')) == self._unknown_sample_session_id:
+                            count += 1
+            except OSError:
+                pass
+            self._unknown_sample_counter[method] = count
+
+        if count >= self._unknown_sample_limit:
+            return
+
+        try:
             record = {
+                "time": datetime.now().astimezone().isoformat(timespec='milliseconds'),
+                "session_id": self._unknown_sample_session_id,
                 "method": method,
                 "msgId": msg.msgId,
                 "decoded": _decode_protobuf_raw(msg.payload),
             }
-            path = os.path.join(cls._unknown_sample_dir, f"{method}.jsonl")
-            with open(path, "a", encoding="utf-8") as f:
-                # indent=2 方便人工查看/直接复制粘贴发给我分析；用 --- 分隔每条样本
-                f.write(json.dumps(record, ensure_ascii=False, indent=2) + "\n---\n")
-        except Exception as e:
-            logger.info(f"{RED}【SAMPLE】{RESET}采样未识别弹幕消息失败: {e}")
-
-    def __init__(self, douyin_dm_cookies:str=None) -> None:
-        if not douyin_dm_cookies:
-            logger.info(f"[*] 正在使用 游客身份 获取抖音弹幕")
-            self.headers = douyin_utils.get_headers()
-        else:
             try:
-                if douyin_dm_cookies.endswith('.json'):
-                    cookies = load_cookie_dict(douyin_dm_cookies)
-                else:
-                    cookies = cookiestr2dict(douyin_dm_cookies)
-                self.headers = douyin_utils.get_headers(extra_cookies=cookies)
-                logger.info(f"[*] 正在使用 {douyin_dm_cookies} 的cookies获取抖音弹幕")
-            except Exception as e:
-                logger.exception(f'解析抖音cookies错误: {e}, 使用默认cookies.')
-                self.headers = douyin_utils.get_headers()
+                with open(path, 'r', encoding='utf-8') as f:
+                    lines = [line for line in f if line.strip()]
+            except OSError:
+                lines = []
+
+            lines.append(json.dumps(record, ensure_ascii=False) + "\n")
+            lines = lines[-self._unknown_sample_limit:]
+            temp_path = f"{path}.tmp"
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+            os.replace(temp_path, path)
+            self._unknown_sample_counter[method] = count + 1
+        except Exception as e:
+            logger.warning("采样抖音未识别弹幕消息失败: %s", e)
+
+    def __init__(self, dm_cookie_path: str = None) -> None:
+        self.headers = {}
+        self._using_login_cookie = False
+        self._unknown_sample_counter = {}
+        self._unknown_sample_session_id = None
+        self._unknown_sample_dir = None
+        self._set_identity(dm_cookie_path)
+
+    def _set_identity(self, dm_cookie_path: str = None) -> None:
+        if not dm_cookie_path:
+            self.headers = douyin_utils.get_headers()
+            self._using_login_cookie = False
+            logger.info("[*] 正在使用游客身份获取抖音弹幕")
+            return
+
+        try:
+            if dm_cookie_path.endswith('.json'):
+                cookies = load_cookie_dict(dm_cookie_path)
+            else:
+                cookies = cookiestr2dict(dm_cookie_path)
+            self.headers = douyin_utils.get_headers(extra_cookies=cookies)
+            self._using_login_cookie = True
+            logger.info("[*] 正在使用 %s 的cookies获取抖音弹幕", dm_cookie_path)
+        except Exception as e:
+            logger.exception("解析抖音cookies错误: %s, 使用游客身份.", e)
+            self.headers = douyin_utils.get_headers()
+            self._using_login_cookie = False
+
+    async def _request_room_info(self, session, room_id):
+        request_url = douyin_utils.build_request_url(
+            f"https://live.douyin.com/webcast/room/web/enter/?web_rid={room_id}"
+        )
+        async with session.get(request_url, headers=self.headers, timeout=5) as resp:
+            return resp.status, json.loads(await resp.text())
 
     async def get_ws_info(self, url, **kwargs):
         async with aiohttp.ClientSession() as session:
             _, room_id = split_url(url)
-            async with session.get(
-                    douyin_utils.build_request_url(f"https://live.douyin.com/webcast/room/web/enter/?web_rid={room_id}"),
-                    headers=self.headers, timeout=5) as resp:
-                result = json.loads(await resp.text())
-                rooms = (result.get('data') or {}).get('data') or []
-                if not rooms:
-                    raise RuntimeError(f"抖音接口异常: status={resp.status}, code={result.get('status_code')}, msg={result.get('status_msg') or result.get('message')}, keys={list(result)}")
-                room_info = rooms[0]
-                USER_UNIQUE_ID = DouyinDanmakuUtils.get_user_unique_id()
-                VERSION_CODE = 180800 # https://lf-cdn-tos.bytescm.com/obj/static/webcast/douyin_live/7697.782665f8.js -> a.ry
-                WEBCAST_SDK_VERSION = "1.0.14-beta.0" # https://lf-cdn-tos.bytescm.com/obj/static/webcast/douyin_live/7697.782665f8.js -> ee.VERSION
-                # logger.info(f"user_unique_id: {USER_UNIQUE_ID}")
-                sig_params = {
-                    "live_id": "1",
-                    "aid": "6383",
-                    "version_code": VERSION_CODE,
-                    "webcast_sdk_version": WEBCAST_SDK_VERSION,
-                    "room_id": room_info['id_str'],
-                    "sub_room_id": "",
-                    "sub_channel_id": "",
-                    "did_rule": "3",
-                    "user_unique_id": USER_UNIQUE_ID,
-                    "device_platform": "web",
-                    "device_type": "",
-                    "ac": "",
-                    "identity": "audience"
-                }
-                try:
-                    signature = DouyinDanmakuUtils.get_signature(DouyinDanmakuUtils.get_x_ms_stub(sig_params))
-                except Exception as e:
-                    signature = 0
-                    logger.exception('获取抖音弹幕签名失败:')
-                    logger.exception(e)
-                # logger.info(f"signature: {signature}")
-                webcast5_params = {
-                    "room_id": room_info['id_str'],
-                    "compress": 'gzip',
-                    # "app_name": "douyin_web",
-                    "version_code": VERSION_CODE,
-                    "webcast_sdk_version": WEBCAST_SDK_VERSION,
-                    # "update_version_code": "1.0.14-beta.0",
-                    # "cookie_enabled": "true",
-                    # "screen_width": "1920",
-                    # "screen_height": "1080",
-                    # "browser_online": "true",
-                    # "tz_name": "Asia/Shanghai",
-                    # "cursor": "t-1718899404570_r-1_d-1_u-1_h-7382616636258522175",
-                    # "internal_ext": "internal_src:dim|wss_push_room_id:7382580251462732598|wss_push_did:7344670681018189347|first_req_ms:1718899404493|fetch_time:1718899404570|seq:1|wss_info:0-1718899404570-0-0|wrds_v:7382616716703957597",
-                    # "host": "https://live.douyin.com",
-                    "live_id": "1",
-                    "did_rule": "3",
-                    # "endpoint": "live_pc",
-                    # "support_wrds": "1",
-                    "user_unique_id": USER_UNIQUE_ID,
-                    # "im_path": "/webcast/im/fetch/",
-                    "identity": "audience",
-                    # "need_persist_msg_count": "15",
-                    # "insert_task_id": "",
-                    # "live_reason": "",
-                    # "heartbeatDuration": "0",
-                    "signature": signature,
-                }
-                wss_url = f"wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/?{'&'.join([f'{k}={v}' for k, v in webcast5_params.items()])}"
-                url = douyin_utils.build_request_url(wss_url)
-                return url, []
+            status, result = await self._request_room_info(session, room_id)
+            data = result.get('data') or {}
+            rooms = data.get('data') or []
+            code = result.get('status_code')
+
+            if not rooms and code == 4003034 and self._using_login_cookie:
+                logger.warning("抖音弹幕账号可能被主播拉黑或限制进入")
+                self._set_identity()
+                status, result = await self._request_room_info(session, room_id)
+                data = result.get('data') or {}
+                rooms = data.get('data') or []
+                code = result.get('status_code')
+
+            if not rooms:
+                message = (
+                    result.get('status_msg')
+                    or result.get('message')
+                    or data.get('message')
+                    or data.get('prompts')
+                )
+                raise RuntimeError(
+                    f"抖音接口异常: status={status}, code={code}, "
+                    f"msg={message}, keys={list(result)}"
+                )
+
+            room_info = rooms[0]
+            self._configure_unknown_sampling(room_id, room_info['id_str'])
+            USER_UNIQUE_ID = DouyinDanmakuUtils.get_user_unique_id()
+            VERSION_CODE = 180800 # https://lf-cdn-tos.bytescm.com/obj/static/webcast/douyin_live/7697.782665f8.js -> a.ry
+            WEBCAST_SDK_VERSION = "1.0.14-beta.0" # https://lf-cdn-tos.bytescm.com/obj/static/webcast/douyin_live/7697.782665f8.js -> ee.VERSION
+            # logger.info(f"user_unique_id: {USER_UNIQUE_ID}")
+            sig_params = {
+                "live_id": "1",
+                "aid": "6383",
+                "version_code": VERSION_CODE,
+                "webcast_sdk_version": WEBCAST_SDK_VERSION,
+                "room_id": room_info['id_str'],
+                "sub_room_id": "",
+                "sub_channel_id": "",
+                "did_rule": "3",
+                "user_unique_id": USER_UNIQUE_ID,
+                "device_platform": "web",
+                "device_type": "",
+                "ac": "",
+                "identity": "audience"
+            }
+            try:
+                signature = DouyinDanmakuUtils.get_signature(DouyinDanmakuUtils.get_x_ms_stub(sig_params))
+            except Exception as e:
+                signature = 0
+                logger.exception('获取抖音弹幕签名失败:')
+                logger.exception(e)
+            # logger.info(f"signature: {signature}")
+            webcast5_params = {
+                "room_id": room_info['id_str'],
+                "compress": 'gzip',
+                # "app_name": "douyin_web",
+                "version_code": VERSION_CODE,
+                "webcast_sdk_version": WEBCAST_SDK_VERSION,
+                # "update_version_code": "1.0.14-beta.0",
+                # "cookie_enabled": "true",
+                # "screen_width": "1920",
+                # "screen_height": "1080",
+                # "browser_online": "true",
+                # "tz_name": "Asia/Shanghai",
+                # "cursor": "t-1718899404570_r-1_d-1_u-1_h-7382616636258522175",
+                # "internal_ext": "internal_src:dim|wss_push_room_id:7382580251462732598|wss_push_did:7344670681018189347|first_req_ms:1718899404493|fetch_time:1718899404570|seq:1|wss_info:0-1718899404570-0-0|wrds_v:7382616716703957597",
+                # "host": "https://live.douyin.com",
+                "live_id": "1",
+                "did_rule": "3",
+                # "endpoint": "live_pc",
+                # "support_wrds": "1",
+                "user_unique_id": USER_UNIQUE_ID,
+                # "im_path": "/webcast/im/fetch/",
+                "identity": "audience",
+                # "need_persist_msg_count": "15",
+                # "insert_task_id": "",
+                # "live_reason": "",
+                # "heartbeatDuration": "0",
+                "signature": signature,
+            }
+            wss_url = f"wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/?{'&'.join([f'{k}={v}' for k, v in webcast5_params.items()])}"
+            url = douyin_utils.build_request_url(wss_url)
+            return url, []
 
     @classmethod
     def _unpack_frame(cls, data):
@@ -272,9 +388,8 @@ class Douyin:
             ack = obj.SerializeToString()
         return resp.messagesList, ack
 
-    @classmethod
-    def decode_msg(cls, data):
-        messages, ack = cls._unpack_frame(data)
+    def decode_msg(self, data):
+        messages, ack = self._unpack_frame(data)
         msgs = []
         for msg in messages:    # msg = 一条原始 protobuf 消息(有 .method 类型名 和 .payload)
             now = datetime.now().timestamp()
@@ -319,7 +434,23 @@ class Douyin:
                         price_cny=(gift_price * gift_count) / 10,   # 10抖币=1元
                         color='ffffff', timestamp=now, raw=j))
 
+                elif method == 'WebcastAssetEffectUtilMessage':    # 星守护
+                    star_guard = _decode_star_guard(msg.payload)
+                    if star_guard:
+                        text = '开通 星守护'
+                        msgs.append(MemberDanmaku(
+                            uname=star_guard['name'], uid=star_guard['uid'],
+                            content=text, text=text, member_name='星守护',
+                            member_price=None, member_count=None, member_unit='',
+                            price_cny=None, color='ffffff', timestamp=now,
+                            raw=star_guard['raw']))
+                    else:
+                        self._sample_unknown_message(msg)
+                        msgs.append(BaseDanmaku(
+                            dtype=method, raw=msg, timestamp=now, content=method))
+
                 else:                                              # 理解不了的：采样 + 原样塞进 BaseDanmaku.raw
+                    self._sample_unknown_message(msg)
                     msgs.append(BaseDanmaku(dtype=method, raw=msg, timestamp=now, content=method))
 
             except Exception as e:

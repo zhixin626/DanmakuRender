@@ -175,7 +175,7 @@ class Bilibili(DMAPI):
         )
         async with aiohttp.ClientSession(headers=Bilibili.headers) as session:
             uid=0 # 游客身份
-            cookie_path = kwargs.get('bilibili_dm_cookie_path')
+            cookie_path = kwargs.get('dm_cookie_path')
             if cookie_path:
                 try:
                     with open(cookie_path, 'r') as f:
@@ -191,7 +191,7 @@ class Bilibili(DMAPI):
                     logger.info(f"[*] 解析 Cookie 出错: {e}，将使用游客身份")
             else:
                 # 如果没传参数，直接打印
-                logger.info("[*] 未配置 bilibili_dm_cookie_path，将使用游客身份获取弹幕")
+                logger.info("[*] 未配置 dm_cookie_path，将使用游客身份获取b站弹幕")
 
             current_cookie = Bilibili.headers.get('cookie', '')
             # 2025-06-28 B站新风控需要cookies中存在buvid3
@@ -307,10 +307,20 @@ class Bilibili(DMAPI):
                         uname=base.get('name', ''), uid=payload.get('uid', ''),
                         content=text, text=text,
                         price=price_cny * 10, price_unit='电池', price_cny=price_cny,
-                        sc_duration=max(30, min(180, payload.get('time', 60))),
-                        background_color=payload.get('background_color', 'FFF5ED'),
-                        background_bottom_color=payload.get('background_bottom_color', 'B2602A'),
-                        name_color='666666', content_color='FFFFFF',
+                        # Preserve the platform value verbatim.  The render
+                        # track decides whether to use it or its own
+                        # price-duration ranges.
+                        sc_duration=payload.get('time'),
+                        background_color=payload.get('background_color'),
+                        background_bottom_color=payload.get('background_bottom_color'),
+                        name_color=(
+                            payload.get('name_color')
+                            or (payload.get('user_info') or {}).get('name_color')
+                        ),
+                        content_color=(
+                            payload.get('message_font_color')
+                            or payload.get('content_color')
+                        ),
                         face_url=base.get('face', ''),
                         timestamp=payload.get('ts') or datetime.now().timestamp(), raw=j))
 

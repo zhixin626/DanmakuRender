@@ -1,23 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-弹幕彩色 emoji 渲染（多核并行版，方案2）
+弹幕彩色 emoji 渲染（整段单路版）
 
 用法:
     python emoji_render_mt.py <输入.flv> <输入.ass> <输出.mp4>
-        [--workers 4] [--chunks-per-worker 3] [--vb 8M] [--ab 160K] [--no-hwaccel]
+        [--vb 8M] [--ab 160K] [--no-hwaccel]
         [--emoji-font 路径] [--emoji-pack 表情目录] [--emoticon-dir 纯表情目录]
         [--render-plan LayoutCompiler生成的JSON]
+        [--rescale-to-1080p] [--min-fps 30|60]
+        [--canvas-resolution 1920x1080]
         [--resize 1280x720|0.5]
 
 特性:
-    - 无损切段 → 每段独立进程并行渲染(libass烧普通弹幕 + nv12上贴彩色emoji) → concat → 混原音。
+    - 整段原视频连续解码 → libass烧普通弹幕 + nv12上贴彩色emoji → 混修复后的音频。
     - 文字字体从 ASS 的 R2L 样式读取(Fontname+Bold,经 matplotlib 解析为文件),与普通弹幕一致。
     - emoji 字体可换: --emoji-font 指定 ttf/名称(默认系统 Segoe UI Emoji,矢量、最快最清晰;
       位图字体如 Noto 也支持,会按 strike 缩放,稍慢略糊)。
     - [xxx] 方括号表情替换: --emoji-pack 指向目录,把弹幕里的 [笑] 换成 目录/笑.png。
-    - --resize: 输出缩放,"宽x高" 或缩放系数(如 0.5);合成在原分辨率完成,仅最终编码缩放。
+    - --rescale-to-1080p: 所有横/竖屏源等比缩放并补边到对应的1080p画布。
+    - --resize: 输出缩放,"宽x高" 或缩放系数(如 0.5);合成在渲染画布完成,仅最终编码缩放。
 """
-import os, re, sys, json, time, shutil, logging, subprocess, threading, queue, glob
+import os, re, sys, json, time, shutil, logging, subprocess, threading, queue, atexit, collections
 import hashlib
 import io
 import urllib.parse
@@ -27,8 +30,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 try:
     from .plan_ass import render_plan_to_ass
+    from .resolution import resolve_render_canvas
 except ImportError:
     from plan_ass import render_plan_to_ass
+    from resolution import resolve_render_canvas
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -50,6 +55,19 @@ def setup_log():
     log.addHandler(h)
     log.setLevel(logging.DEBUG)
     log.propagate = False
+
+
+def resolve_output_fps(source_fps, minimum_fps=None):
+    """Keep the source rate unless it is below the configured floor."""
+    source_fps = float(source_fps)
+    if not np.isfinite(source_fps) or source_fps <= 0:
+        raise ValueError("source fps must be a positive number")
+    if minimum_fps is None:
+        return source_fps
+    minimum_fps = float(minimum_fps)
+    if not np.isfinite(minimum_fps) or minimum_fps <= 0:
+        raise ValueError("minimum fps must be a positive number")
+    return max(source_fps, minimum_fps)
 
 
 def kill_tree(pid):
@@ -102,7 +120,10 @@ def _default_emoji_font():
     return "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
 
 DEFAULT_EMOJI_FONT = _default_emoji_font()
-SCALE = 0.735
+# ASS 字号按 96 DPI 的 point 语义换算到 Pillow 像素。使用 3/4 后，
+# Microsoft YaHei 等字体的 Pillow ascent 正好对应 libass ``\an7`` 行顶到
+# 基线的距离；不要再为药丸单独改变这条文字基线。
+SCALE = 0.75
 OUT = 1
 QDEPTH = 8
 
@@ -185,7 +206,7 @@ def render_segment(cfg):
     pack = cfg.get("pack", {})
     segdir = os.path.dirname(os.path.abspath(out_ts)) or "."
 
-    fs_ass = cfg["fs"]                # ASS 字号(屏幕像素);药丸高按它算,与 libass 药丸一致
+    fs_ass = cfg["fs"]                # ASS 字号；按 72/96 换算为 Pillow 像素
     corr = max(1, int(round(fs_ass * SCALE)))
     tf = ImageFont.truetype(cfg["textfont"], corr)
     # emoji 字体:矢量(COLR,如 Segoe)可任意尺寸直接用;位图(CBDT,如 Noto)只有固定 strike,需缩放
@@ -219,15 +240,21 @@ def render_segment(cfg):
         return im
 
     cache = {}
-    def get_sprite(text, rgb, pill=None, event_pack=None):
+    def get_sprite(
+        text, rgb, pill=None, event_pack=None, outline=OUT,
+        outline_rgb=(0, 0, 0),
+    ):
+        outline = max(0, int(round(outline)))
+        outline_rgb = tuple(int(value) for value in outline_rgb)
         pkey = (tuple(pill["color"]), pill["pad"], pill["border"]) if pill else None
         # None=普通弹幕用默认 pack；dict=纯 emoticon 只用该条事件的精确图片。
         active_pack = pack if event_pack is None else event_pack
         event_key = None if event_pack is None else tuple(sorted(event_pack.items()))
-        key = (text, tuple(rgb), pkey, event_key)
+        key = (text, tuple(rgb), pkey, event_key, outline, outline_rgb)
         if key in cache: return cache[key]
         toks = tokenize(text, active_pack)
         has_png = any(k == "png" for k, _ in toks)
+        has_emoji = any(k == "emoji" for k, _ in toks)
         # 每个 token 只测量/加载一次，排版与实际绘制复用同一个宽度。
         prepared_tokens = []
         content_w = 0
@@ -243,25 +270,32 @@ def render_segment(cfg):
                 token_w = max(0, int(tf.getlength(pl)))
             prepared_tokens.append((kind, pl, prepared, token_w))
             content_w += token_w
-        # 内容相对基线的上下范围:文字 [-asc,+desc];表情居中于 png_center
+        # 内容相对基线的上下范围。文字行的规范基线始终是 lane_y + asc；
+        # Emoji、图片和 VIP 药丸只能向这条基线的上下扩展，不能推动文字。
         ptop = png_center - png_h // 2; pbot = png_center + (png_h - png_h // 2)
-        top_txt = max(asc, (-ptop if has_png else 0))
-        bot_txt = max(desc, (pbot if has_png else 0))
+        emoji_ascent = int(round(e_asc * ef_scale)) if has_emoji else 0
+        emoji_descent = int(round(e_desc * ef_scale)) if has_emoji else 0
+        content_ascent = max(asc, (-ptop if has_png else 0), emoji_ascent)
+        content_descent = max(desc, (pbot if has_png else 0), emoji_descent)
         if pill:
-            # 药丸高 = ASS字号 + 2*buff(与 libass 药丸完全一致),竖直居中于文字行;
-            # 左右半圆留白 pad_x = 药丸半高 = (fs+2pv)/2(与 asswriter 的 pad_x 一致)。
             pv = pill["pad"]; pb = pill["border"]
-            pad_x = (fs_ass + 2 * pv) / 2.0
-            # 文字底在精灵内位于 baseline+desc;药丸需上达 fs+pv-desc、下达 desc+pv(相对基线)
-            top_ext = int(round(max(top_txt, fs_ass + pv - desc) + pb + OUT))
-            bot_ext = int(round(max(bot_txt, desc + pv) + pb + OUT))
-            content_x = int(round(pad_x + pb + OUT))
-            total_w = content_w + 2 * content_x
+            # 先确定文字/Emoji 内容盒，再由药丸从内容盒向上下各扩 pv。
+            # stadium 两端半圆的水平留白取药丸半高，文字位置不受描边影响。
+            pill_height = content_ascent + content_descent + 2 * pv
+            pad_x = pill_height / 2.0
+            top_ext = int(round(content_ascent + pv))
+            bot_ext = int(round(content_descent + pv))
+            content_x = int(round(pad_x))
+            total_w = max(int(round(content_w + 2 * pad_x)), int(round(pill_height)))
+            anchor_x_offset = 0
         else:
-            top_ext = top_txt + OUT
-            bot_ext = bot_txt + OUT
-            content_x = OUT
-            total_w = content_w + 2 * OUT
+            # 非药丸精灵只为文字描边预留透明安全边。合成时会把这段安全边
+            # 扣回，因此内容左缘仍与 ASS 的 x 完全相同。
+            top_ext = content_ascent + outline
+            bot_ext = content_descent + outline
+            content_x = outline
+            total_w = content_w + 2 * outline
+            anchor_x_offset = outline
         baseline = top_ext
         Hs = top_ext + bot_ext
         spr = Image.new("RGBA", (max(int(total_w), 1), int(Hs)), (0, 0, 0, 0))
@@ -284,15 +318,14 @@ def render_segment(cfg):
                     x += token_w
             else:
                 d.text((x, baseline), pl, font=tf, fill=tuple(rgb) + (255,),
-                       stroke_width=OUT, stroke_fill=(0, 0, 0, 255), anchor="ls")
+                       stroke_width=outline, stroke_fill=outline_rgb + (255,), anchor="ls")
                 x += token_w
         tbo = baseline + desc   # 文字底(\an1锚点)距精灵顶的偏移,定位用
         if pill:
-            # 药丸描边(只描边,中间透明):高=fs+2pv,竖直居中于文字行(与 libass 药丸位置一致)
+            # 药丸描边画在已经确定的内容盒外侧，描边向内落在画布中。
             pb = pill["border"]; col = tuple(pill["color"]) + (255,)
-            x0p = OUT + pb / 2.0; x1p = total_w - OUT - pb / 2.0
-            y0p = tbo - fs_ass - pv          # 药丸顶 = 文字底 - 字高 - buff
-            y1p = tbo + pv                   # 药丸底 = 文字底 + buff
+            x0p = pb / 2.0; x1p = total_w - 1 - pb / 2.0
+            y0p = pb / 2.0; y1p = top_ext + bot_ext - 1 - pb / 2.0
             r = (y1p - y0p) / 2.0            # = (fs+2pv)/2,两端半圆
             d.rounded_rectangle([x0p, y0p, x1p, y1p], radius=r, outline=col, width=pb)
         a = np.asarray(spr).astype(np.float32)
@@ -300,11 +333,22 @@ def render_segment(cfg):
         sY = 16 + 0.1826 * R + 0.6142 * G + 0.0620 * B
         sU = 128 - 0.1006 * R - 0.3386 * G + 0.4392 * B
         sV = 128 + 0.4392 * R - 0.3989 * G - 0.0403 * B
-        lbo = content_x         # 内容左缘距精灵左缘的偏移,使内容对齐到 \move 的 x
-        cache[key] = (sY, sU, sV, A, spr.width, spr.height, tbo, lbo)
+        lbo = content_x         # 旧 ASS 兼容路径使用的内容左缘偏移
+        # RenderPlan 的 y 是 ASS \an7 的文字行顶。Pillow 精灵无论是否带
+        # Emoji/药丸，都用同一文字基线 lane_y + asc；两项 offset 是精灵
+        # 左上角相对 RenderPlan 锚点需要扣除的距离。
+        anchor_y_offset = baseline - asc
+        cache[key] = (
+            sY, sU, sV, A, spr.width, spr.height, tbo, lbo,
+            anchor_x_offset, anchor_y_offset,
+        )
         return cache[key]
     for ev in emoji_events:
-        ev["_spr"] = get_sprite(ev["text"], ev["rgb"], ev.get("pill"), ev.get("emoticon_pack"))
+        ev["_spr"] = get_sprite(
+            ev["text"], ev["rgb"], ev.get("pill"),
+            ev.get("emoticon_pack"), ev.get("outline", OUT),
+            ev.get("outline_rgb", (0, 0, 0)),
+        )
 
     dec_cmd = [FFMPEG, "-v", "error", "-fflags", "+genpts+discardcorrupt"]
     if use_hwaccel: dec_cmd += ["-hwaccel", "auto"]
@@ -314,12 +358,22 @@ def render_segment(cfg):
     # scale+pad 到固定 W×H：兜住「直播中途分辨率变化(如连线)」——否则后半段帧尺寸变了、
     # 而下游编码器按固定 -s {W}x{H} 切 nv12 字节流 → 字节错位 → 彩条乱码；且弹幕/礼物框(ass 按 W×H 定位)会被拉伸。
     # 源本就是 W×H 时此步为 no-op；变化的片段会被等比缩放居中补边到 W×H。放在 subtitles 之前，保证弹幕在 W×H 上不变形。
-    uniform = f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:-1:-1:color=black,setsar=1,"
-    dec_cmd += ["-i", os.path.basename(seg_file),
+    uniform = (
+        f"scale={W}:{H}:force_original_aspect_ratio=decrease:"
+        "force_divisible_by=2,"
+        f"pad={W}:{H}:-1:-1:color=black,setsar=1,"
+    )
+    # 整段单路模式直接读取原视频绝对路径；工作目录仍只放 ASS 和输出临时文件。
+    dec_cmd += ["-i", os.path.abspath(seg_file),
                 # fps 在 subtitles 之前：先把(可变帧率的)源铺成均匀 CFR，再让 libass 逐帧画弹幕 → 顺滑
                 "-vf", f"fps={fps},{uniform}subtitles={os.path.basename(textonly_ass)}{sub_filter}",
                 "-fps_mode", "cfr", "-f", "rawvideo", "-pix_fmt", "nv12", "-"]
-    dec = subprocess.Popen(dec_cmd, cwd=segdir, stdout=subprocess.PIPE)
+    dec = subprocess.Popen(
+        dec_cmd,
+        cwd=segdir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     venc = cfg.get("venc", "h264_nvenc")
     venc_args = cfg.get("venc_args") or ["-b:v", vb]   # 完整编码参数，缺省回退固定码率
     # 缩放放在编码段(合成在原分辨率完成,emoji \move 坐标才不会错位)
@@ -327,14 +381,66 @@ def render_segment(cfg):
     rs = cfg.get("resize")
     if rs and rs != f"{W}x{H}":
         rw, rh = rs.split("x"); scale_args = ["-vf", f"scale={rw}:{rh}"]
-    enc = subprocess.Popen(
-        [FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
-         "-s", f"{W}x{H}", "-r", f"{fps}", "-i", "-", "-an", *scale_args,
-         "-c:v", venc, *venc_args, "-f", "mpegts", os.path.basename(out_ts)],
-        cwd=segdir, stdin=subprocess.PIPE)
+    try:
+        enc = subprocess.Popen(
+            [FFMPEG, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
+             "-s", f"{W}x{H}", "-r", f"{fps}", "-i", "-", "-an", *scale_args,
+             "-c:v", venc, *venc_args, "-f", "mpegts", os.path.basename(out_ts)],
+            cwd=segdir,
+            stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except Exception:
+        dec.kill()
+        dec.wait()
+        raise
 
     fb = W * H * 3 // 2
     read_q = queue.Queue(maxsize=QDEPTH); write_q = queue.Queue(maxsize=QDEPTH)
+    pipeline_stop = threading.Event()
+    pipeline_errors = []
+    pipeline_error_lock = threading.Lock()
+    stderr_tail = collections.deque(maxlen=80)
+    last_read_progress = [time.monotonic()]
+    last_write_progress = [time.monotonic()]
+    pipeline_stall_seconds = 30.0
+
+    def fail_pipeline(message):
+        with pipeline_error_lock:
+            if not pipeline_errors:
+                pipeline_errors.append(str(message))
+        pipeline_stop.set()
+
+    def drain_stderr(proc, label):
+        stream = proc.stderr
+        if stream is None:
+            return
+        try:
+            for raw in iter(stream.readline, b""):
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    stderr_tail.append(f"{label}: {line}")
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def put_queue(target, item, *, encoder_side=False):
+        while not pipeline_stop.is_set():
+            try:
+                target.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                if encoder_side:
+                    enc_rc = enc.poll()
+                    if enc_rc is not None:
+                        fail_pipeline(f"编码器提前退出，返回码 {enc_rc}")
+                    elif time.monotonic() - last_write_progress[0] > pipeline_stall_seconds:
+                        fail_pipeline(
+                            f"编码器超过 {pipeline_stall_seconds:.0f} 秒未消费视频帧"
+                        )
+        return False
 
     def readexactly(rd, n):
         chunks = []; got = 0
@@ -343,71 +449,164 @@ def render_segment(cfg):
             if not ch: return None
             chunks.append(ch); got += len(ch)
         return chunks[0] if len(chunks) == 1 else b"".join(chunks)
+
     def reader():
         i = 0
-        while True:
-            buf = readexactly(dec.stdout, fb)
-            if buf is None: break
-            read_q.put((i, buf)); i += 1
-        read_q.put(None)
+        try:
+            while not pipeline_stop.is_set():
+                buf = readexactly(dec.stdout, fb)
+                if buf is None:
+                    break
+                last_read_progress[0] = time.monotonic()
+                if not put_queue(read_q, (i, buf)):
+                    break
+                i += 1
+        except Exception as exc:
+            fail_pipeline(f"读取解码帧失败: {exc}")
+        finally:
+            put_queue(read_q, None)
+
     def writer():
-        while True:
-            item = write_q.get()
-            if item is None: break
-            try: enc.stdin.write(item)
-            except (BrokenPipeError, OSError): break
-    rt = threading.Thread(target=reader, daemon=True); wt = threading.Thread(target=writer, daemon=True)
-    rt.start(); wt.start()
+        try:
+            while not pipeline_stop.is_set():
+                try:
+                    item = write_q.get(timeout=0.5)
+                except queue.Empty:
+                    enc_rc = enc.poll()
+                    if enc_rc is not None:
+                        fail_pipeline(f"编码器提前退出，返回码 {enc_rc}")
+                    continue
+                if item is None:
+                    break
+                try:
+                    enc.stdin.write(item)
+                    last_write_progress[0] = time.monotonic()
+                except (BrokenPipeError, OSError) as exc:
+                    fail_pipeline(f"写入编码器失败: {exc}")
+                    break
+        finally:
+            try:
+                enc.stdin.close()
+            except Exception:
+                pass
+
+    rt = threading.Thread(target=reader, daemon=True, name="emoji-frame-reader")
+    wt = threading.Thread(target=writer, daemon=True, name="emoji-frame-writer")
+    dec_err_thread = threading.Thread(
+        target=drain_stderr,
+        args=(dec, "decoder"),
+        daemon=True,
+        name="emoji-decoder-stderr",
+    )
+    enc_err_thread = threading.Thread(
+        target=drain_stderr,
+        args=(enc, "encoder"),
+        daemon=True,
+        name="emoji-encoder-stderr",
+    )
+    rt.start(); wt.start(); dec_err_thread.start(); enc_err_thread.start()
 
     n = 0; last = 0.0
-    while True:
-        item = read_q.get()
-        if item is None: break
-        i, buf = item
-        t = i / fps
-        active = [ev for ev in emoji_events if ev["s"] <= t <= ev["e"]]
-        if active:
-            arr = np.frombuffer(buf, np.uint8).copy()
-            Y = arr[:W * H].reshape(H, W)
-            UV = arr[W * H:].reshape(H // 2, W // 2, 2)
-            for ev in active:
-                sY, sU, sV, A, w, h, tbo, lbo = ev["_spr"]
-                p = (t - ev["s"]) / (ev["e"] - ev["s"])
-                if ev.get("anchor") == "top_left":
-                    xa = int(round(ev["x0"] + (ev["x1"] - ev["x0"]) * p))
-                    ya = int(round(ev["y0"]))
-                else:
-                    xa = int(round(ev["x0"] + (ev["x1"] - ev["x0"]) * p)) - lbo
-                    ya = int(round(ev["y0"]) - tbo)
-                sx0 = max(0, -xa); sy0 = max(0, -ya); dx0 = max(0, xa); dy0 = max(0, ya)
-                cw = min(w - sx0, W - dx0); ch = min(h - sy0, H - dy0)
-                if cw <= 0 or ch <= 0: continue
-                aR = A[sy0:sy0 + ch, sx0:sx0 + cw] * ev["op"]
-                Yreg = Y[dy0:dy0 + ch, dx0:dx0 + cw].astype(np.float32)
-                Y[dy0:dy0 + ch, dx0:dx0 + cw] = (sY[sy0:sy0 + ch, sx0:sx0 + cw] * aR + Yreg * (1 - aR)).astype(np.uint8)
-                uy, ux = dy0 // 2, dx0 // 2
-                aSub = aR[::2, ::2]; sUs = sU[sy0:sy0 + ch:2, sx0:sx0 + cw:2]; sVs = sV[sy0:sy0 + ch:2, sx0:sx0 + cw:2]
-                Ud = UV[uy:uy + aSub.shape[0], ux:ux + aSub.shape[1], 0]
-                Vd = UV[uy:uy + aSub.shape[0], ux:ux + aSub.shape[1], 1]
-                hh = min(aSub.shape[0], sUs.shape[0], Ud.shape[0]); ww = min(aSub.shape[1], sUs.shape[1], Ud.shape[1])
-                if hh <= 0 or ww <= 0: continue
-                a2 = aSub[:hh, :ww]
-                Ud[:hh, :ww] = (sUs[:hh, :ww] * a2 + Ud[:hh, :ww].astype(np.float32) * (1 - a2)).astype(np.uint8)
-                Vd[:hh, :ww] = (sVs[:hh, :ww] * a2 + Vd[:hh, :ww].astype(np.float32) * (1 - a2)).astype(np.uint8)
-            write_q.put(arr.tobytes())
-        else:
-            write_q.put(buf)
-        n += 1
-        now = time.time()
-        if now - last >= 0.4:
-            last = now; open(prog_file, "w").write(str(n))
-    write_q.put(None)
-    rt.join(timeout=10); wt.join(timeout=10)
-    try: dec.stdout.close()
-    except Exception: pass
-    try: enc.stdin.close()
-    except Exception: pass
-    enc.wait(); dec.wait()
+    dec_rc = enc_rc = None
+    try:
+        while not pipeline_stop.is_set():
+            try:
+                item = read_q.get(timeout=0.5)
+            except queue.Empty:
+                if dec.poll() is not None and not rt.is_alive():
+                    fail_pipeline(f"解码器提前退出，返回码 {dec.returncode}")
+                elif time.monotonic() - last_read_progress[0] > pipeline_stall_seconds:
+                    fail_pipeline(
+                        f"解码器超过 {pipeline_stall_seconds:.0f} 秒未产生视频帧"
+                    )
+                continue
+            if item is None:
+                break
+            i, buf = item
+            t = i / fps
+            active = [ev for ev in emoji_events if ev["s"] <= t <= ev["e"]]
+            if active:
+                arr = np.frombuffer(buf, np.uint8).copy()
+                Y = arr[:W * H].reshape(H, W)
+                UV = arr[W * H:].reshape(H // 2, W // 2, 2)
+                for ev in active:
+                    sY, sU, sV, A, w, h, tbo, lbo, anchor_x_offset, anchor_y_offset = ev["_spr"]
+                    p = (t - ev["s"]) / (ev["e"] - ev["s"])
+                    if ev.get("anchor") == "top_left":
+                        xa = int(round(ev["x0"] + (ev["x1"] - ev["x0"]) * p - anchor_x_offset))
+                        ya = int(round(ev["y0"] - anchor_y_offset))
+                    else:
+                        xa = int(round(ev["x0"] + (ev["x1"] - ev["x0"]) * p)) - lbo
+                        ya = int(round(ev["y0"]) - tbo)
+                    sx0 = max(0, -xa); sy0 = max(0, -ya); dx0 = max(0, xa); dy0 = max(0, ya)
+                    cw = min(w - sx0, W - dx0); ch = min(h - sy0, H - dy0)
+                    if cw <= 0 or ch <= 0: continue
+                    aR = A[sy0:sy0 + ch, sx0:sx0 + cw] * ev["op"]
+                    Yreg = Y[dy0:dy0 + ch, dx0:dx0 + cw].astype(np.float32)
+                    Y[dy0:dy0 + ch, dx0:dx0 + cw] = (sY[sy0:sy0 + ch, sx0:sx0 + cw] * aR + Yreg * (1 - aR)).astype(np.uint8)
+                    uy, ux = dy0 // 2, dx0 // 2
+                    aSub = aR[::2, ::2]; sUs = sU[sy0:sy0 + ch:2, sx0:sx0 + cw:2]; sVs = sV[sy0:sy0 + ch:2, sx0:sx0 + cw:2]
+                    Ud = UV[uy:uy + aSub.shape[0], ux:ux + aSub.shape[1], 0]
+                    Vd = UV[uy:uy + aSub.shape[0], ux:ux + aSub.shape[1], 1]
+                    hh = min(aSub.shape[0], sUs.shape[0], Ud.shape[0]); ww = min(aSub.shape[1], sUs.shape[1], Ud.shape[1])
+                    if hh <= 0 or ww <= 0: continue
+                    a2 = aSub[:hh, :ww]
+                    Ud[:hh, :ww] = (sUs[:hh, :ww] * a2 + Ud[:hh, :ww].astype(np.float32) * (1 - a2)).astype(np.uint8)
+                    Vd[:hh, :ww] = (sVs[:hh, :ww] * a2 + Vd[:hh, :ww].astype(np.float32) * (1 - a2)).astype(np.uint8)
+                output_frame = arr.tobytes()
+            else:
+                output_frame = buf
+            if not put_queue(write_q, output_frame, encoder_side=True):
+                break
+            n += 1
+            now = time.time()
+            if now - last >= 0.4:
+                last = now
+                with open(prog_file, "w") as progress:
+                    progress.write(str(n))
+
+        if not pipeline_stop.is_set():
+            sentinel_sent = put_queue(write_q, None, encoder_side=True)
+            if sentinel_sent:
+                wt.join(timeout=pipeline_stall_seconds)
+                if wt.is_alive():
+                    fail_pipeline(
+                        f"编码线程超过 {pipeline_stall_seconds:.0f} 秒未结束"
+                    )
+    finally:
+        if pipeline_stop.is_set():
+            for proc in (dec, enc):
+                if proc.poll() is None:
+                    proc.kill()
+        try:
+            dec.stdout.close()
+        except Exception:
+            pass
+        rt.join(timeout=5)
+        wt.join(timeout=5)
+        for proc, label in ((dec, "解码器"), (enc, "编码器")):
+            try:
+                rc = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                rc = proc.wait()
+                fail_pipeline(f"{label}退出超时，已强制结束")
+            if proc is dec:
+                dec_rc = rc
+            else:
+                enc_rc = rc
+        dec_err_thread.join(timeout=2)
+        enc_err_thread.join(timeout=2)
+
+    if dec_rc != 0:
+        fail_pipeline(f"解码器退出，返回码 {dec_rc}")
+    if enc_rc != 0:
+        fail_pipeline(f"编码器退出，返回码 {enc_rc}")
+    if pipeline_errors:
+        detail = pipeline_errors[0]
+        if stderr_tail:
+            detail += "\n" + "\n".join(stderr_tail)
+        raise RuntimeError(detail)
     if n == 0:   # 一帧都没解出来(段文件不可读/解码失败)→ 判失败
         open(prog_file, "w").write("ERR")
         raise RuntimeError(f"该段解码 0 帧(seg 不可读?): {os.path.basename(seg_file)}")
@@ -657,6 +856,14 @@ def main():
             sys.exit(1)
         return
 
+    # 无参数运行时进入项目根目录的交互式 JSONL 多视频入口。
+    # 带 video + ASS/RenderPlan + output 的内部调用仍走下面原有渲染路径。
+    if not args:
+        interactive_script = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "render_jsonl_emoji.py")
+        )
+        raise SystemExit(subprocess.call([sys.executable, interactive_script]))
+
     setup_log()
     if len(args) < 3:
         print(__doc__); sys.exit(1)
@@ -666,8 +873,6 @@ def main():
     for t in (FFMPEG, FFPROBE):
         if not check_tool(t):
             log.error("找不到 %s,请确认已安装并加入 PATH(或放到脚本目录)。", t); sys.exit(1)
-    workers = int(opt("--workers", 4))
-    chunks_per_worker = int(opt("--chunks-per-worker", 3))
     vb = opt("--vb", "8M"); ab = opt("--ab", "160K")
     vencoder = opt("--vencoder", "h264_nvenc")
     aencoder = opt("--aencoder", "aac")
@@ -690,12 +895,61 @@ def main():
             log.error("找不到文件: %s", pth); sys.exit(1)
 
     work = os.path.join(os.path.dirname(out_mp4) or ".", "_mt_" + os.path.splitext(os.path.basename(out_mp4))[0])
-    if os.path.exists(work): rmtree_retry(work)
+    if os.path.exists(work):
+        if not rmtree_retry(work):
+            log.error("无法清理上次残留的临时目录，终止本次渲染: %s", work)
+            sys.exit(1)
+        log.debug("已清理上次残留的临时目录: %s", work)
     os.makedirs(work, exist_ok=True)
+    work_active = True
+    child_processes = []
+    cleanup_handles = []
+
+    def cleanup_work():
+        nonlocal work_active
+        if not work_active:
+            return
+        running_children = [
+            process for process in child_processes
+            if process and process.poll() is None
+        ]
+        for process in running_children:
+            kill_tree(process.pid)
+        if running_children:
+            wait_dead(running_children)
+        for handle in cleanup_handles:
+            try:
+                if handle and not handle.closed:
+                    handle.close()
+            except Exception:
+                pass
+        if rmtree_retry(work):
+            work_active = False
+            log.debug("已清理 emoji 渲染临时目录: %s", work)
+
+    # sys.exit、普通未捕获异常都会走 atexit；taskkill/进程崩溃则由父进程兜底清理。
+    atexit.register(cleanup_work)
 
     import av
     c = av.open(flv); v = c.streams.video[0]
-    W, H = v.codec_context.width, v.codec_context.height
+    source_W, source_H = v.codec_context.width, v.codec_context.height
+    forced_canvas = opt("--canvas-resolution")
+    if forced_canvas:
+        try:
+            W, H = (
+                int(value)
+                for value in forced_canvas.lower().split("x", 1)
+            )
+            if W <= 0 or H <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            log.error("--canvas-resolution must use a positive WIDTHxHEIGHT")
+            sys.exit(2)
+    else:
+        W, H = resolve_render_canvas(
+            (source_W, source_H),
+            rescale_to_1080p="--rescale-to-1080p" in sys.argv,
+        )
     render_plan_data = None
     render_plan_duration = 0.0
     if "--render-plan" in sys.argv:
@@ -720,16 +974,32 @@ def main():
             height=H,
         )
         ass = generated_ass
-    # 输出帧率：--fps 优先；否则取源的标称帧率(guessed_rate，干净的 60)而非 average_rate
+    # 输出帧率：取源的标称帧率(guessed_rate，干净的 60)而非 average_rate；
+    # --min-fps 表示最低帧率，只补低帧率源，不会把 60fps 源降成 30fps。
     # (直播是可变帧率，average 会算成 62 这种)。配合解码滤镜里 fps 放在 subtitles 之前，
     # 让 libass 在均匀的 CFR 时间轴上逐帧画弹幕 → 滚动弹幕顺滑，且几乎不增加耗时。
-    if opt("--fps"):
-        fps = float(opt("--fps"))
-    else:
+    try:
+        source_fps = float(v.guessed_rate or v.average_rate)
+    except Exception:
+        source_fps = float(v.average_rate)
+    minimum_fps = None
+    if opt("--min-fps"):
         try:
-            fps = float(v.guessed_rate or v.average_rate)
-        except Exception:
-            fps = float(v.average_rate)
+            minimum_fps = float(opt("--min-fps"))
+        except (TypeError, ValueError):
+            log.error("--min-fps must be a positive number")
+            sys.exit(2)
+        if not np.isfinite(minimum_fps) or minimum_fps <= 0:
+            log.error("--min-fps must be a positive number")
+            sys.exit(2)
+    try:
+        fps = resolve_output_fps(source_fps, minimum_fps)
+    except ValueError as exc:
+        log.error("invalid frame rate: %s", exc)
+        sys.exit(2)
+    if minimum_fps is not None and fps > source_fps:
+        log.info("源帧率 %.3f 低于最低 %.3f，将补帧到 %.3f fps",
+                 source_fps, minimum_fps, fps)
     format_name = str(getattr(c.format, "name", "") or "").lower()
     is_flv = "flv" in format_name.split(",") or os.path.splitext(flv)[1].lower() == ".flv"
 
@@ -793,11 +1063,28 @@ def main():
             fontname = ps[1].strip(); fs = int(ps[2]); bold = (ps[7].strip() == "-1")
             break
     textfont = resolve_font(fontname, bold)
+    canvas_res = (
+        f" 画布{W}x{H}"
+        if (W, H) != (source_W, source_H)
+        else ""
+    )
     out_res = f" 输出{resize_str}" if resize_str else ""
-    total_chunks = workers * chunks_per_worker
-    log.info("输入: %s %dx%d@%.0ffps 时长%s%s | 并行%d路 每路%d块 共%d块 硬解%s",
-             os.path.basename(flv), W, H, fps, fmt(dur), out_res,
-             workers, chunks_per_worker, total_chunks, use_hwaccel)
+    fps_text = (
+        f"{source_fps:.3g}→{fps:.3g}fps"
+        if abs(fps - source_fps) > 1e-6
+        else f"{source_fps:.3g}fps"
+    )
+    log.info(
+        "输入: %s %dx%d@%s 时长%s%s%s | 整段单路渲染 硬解%s",
+        os.path.basename(flv),
+        source_W,
+        source_H,
+        fps_text,
+        fmt(dur),
+        canvas_res,
+        out_res,
+        use_hwaccel,
+    )
     log.debug("文字字体: %s%s -> %s | emoji字体: %s | 表情包: %d个",
               fontname, "(粗)" if bold else "", os.path.basename(textfont),
               os.path.basename(emoji_font), len(pack))
@@ -828,6 +1115,9 @@ def main():
                 color = str(style.get("color", "#FFFFFF")).lstrip("#")
                 if len(color) != 6:
                     color = "FFFFFF"
+                outline_color = str(style.get("outline_color", "#000000")).lstrip("#")
+                if len(outline_color) != 6:
+                    outline_color = "000000"
                 pill = visual.get("pill")
                 if pill:
                     pill_color = str(pill.get("color", "#FFC0CB")).lstrip("#")
@@ -855,6 +1145,12 @@ def main():
                         int(color[4:6], 16),
                     ],
                     "op": float(style.get("opacity", 0.8) or 0.8),
+                    "outline": float(style.get("outline", OUT) or 0),
+                    "outline_rgb": [
+                        int(outline_color[0:2], 16),
+                        int(outline_color[2:4], 16),
+                        int(outline_color[4:6], 16),
+                    ],
                     "pill": pill,
                     # images 非空却没有解析出本地文件时传空 dict，禁止错误地
                     # 回退到同名的通用 emoji_pack 图片。
@@ -944,47 +1240,10 @@ def main():
             sub_dia.append((ass_time(sf[1]), ass_time(sf[2]), l))
         log.debug("字幕: %d 行", len(sub_dia))
 
-    seg_time = max(20.0, dur / max(1, workers * chunks_per_worker)) if dur else 120.0
-    log.debug("切段中（每段约 %s）...", fmt(seg_time))
-    seg_in = ["-fflags", "+genpts+discardcorrupt", "-i", flv, "-map", "0:v"]
-    def seg_out(ext):
-        return ["-f", "segment", "-segment_time", f"{seg_time}", "-reset_timestamps", "1",
-                "-segment_list", "segs.csv", "-segment_list_type", "csv", f"seg_%03d.{ext}"]
-    # 主路径：无损 -c copy 切 .ts（最快）
-    r = subprocess.run([FFMPEG, "-v", "error", "-y"] + seg_in + ["-c", "copy"] + seg_out("ts"), cwd=work)
-    if r.returncode != 0:
-        # 源文件损坏时，-c copy 切 .ts 会触发 h264_mp4toannexb 在坏 NAL 处崩。
-        # 回退1：改切 .mkv（仍 -c copy，无损且快）——mkv 不做 annexb 转换，坏包原样穿过，
-        #        留待后面每段解码时由 discardcorrupt 丢弃坏帧（与 dmrender 的容错一致）。
-        log.warning("无损切段(.ts)失败（源可能损坏），回退为切 .mkv（仍无损）...")
-        r = subprocess.run([FFMPEG, "-v", "error", "-y"] + seg_in + ["-c", "copy"] + seg_out("mkv"), cwd=work)
-    if r.returncode != 0:
-        # 回退2（极少触发）：软解 + 忽略坏帧 + 重编码切段，牺牲一代画质保出片。
-        log.warning("切 .mkv 仍失败，回退为重编码切段...")
-        r = subprocess.run([FFMPEG, "-v", "error", "-y", "-err_detect", "ignore_err"]
-                           + seg_in + ["-c:v", vencoder] + (venc_args or ["-b:v", vb]) + seg_out("ts"), cwd=work)
-    if r.returncode != 0:
-        log.error("切段失败"); sys.exit(1)
-    # 段时间不用 csv（直播源时间戳不规则/有起点偏移时，csv 的 start/end 会与段文件实际时长对不上，
-    # 尤其第一段；跨段弹幕按错误时间点重定位 → 段边界整体跳）。改用各段「实际时长」累计出 off/send，
-    # 让弹幕时间轴与拼接后的视频时间轴严格对齐（干净源上 csv==实际，无副作用）。
-    segs = []
-    cum = 0.0
-    for line in open(os.path.join(work, "segs.csv"), encoding="utf-8"):
-        parts = line.strip().split(",")
-        if not parts or not parts[0].strip():
-            continue
-        segfile = parts[0].strip()
-        d = subprocess.run([FFPROBE, "-v", "error", "-show_entries", "format=duration",
-                            "-of", "csv=p=0", os.path.join(work, segfile)],
-                           capture_output=True, text=True).stdout.strip()
-        try:
-            seg_dur = float(d)
-        except ValueError:    # 探测失败兜底用 csv 跨度
-            seg_dur = (float(parts[2]) - float(parts[1])) if len(parts) >= 3 else 0.0
-        segs.append((segfile, cum, cum + seg_dur))
-        cum += seg_dur
-    log.debug("共 %d 段", len(segs))
+    # 不再用 segment/reset_timestamps 物理切割输入。唯一 worker 直接读取整段
+    # 原视频，让 fps 滤镜拥有完整时间戳上下文并在原位置补齐空洞。
+    segs = [(flv, 0.0, dur)]
+    log.debug("不切段：直接连续解码整段原视频")
 
     jobs = []
     for idx, (segfile, sstart, send) in enumerate(segs):
@@ -1059,7 +1318,7 @@ def main():
             json.dump(cfg, fcfg)
         jobs.append(dict(idx=idx, cfg=cfg_path, prog=prog))
 
-    # 源流音频可能带有断裂/跳跃时间戳。视频分段渲染会生成一条新的连续时间轴，
+    # 源流音频可能带有断裂/跳跃时间戳。视频经过 fps 后会形成连续时间轴，
     # 因此不能再把原 AAC 直接 copy 回去，否则两套时间轴长时间播放后可能失步。
     # 音频修复和视频 worker 并行执行，避免把重编码耗时串行加在渲染末尾。
     fixed_audio = None
@@ -1082,24 +1341,30 @@ def main():
             "-ar", "48000", fixed_audio,
         ]
         audio_log = open(audio_log_path, "w", encoding="utf-8", errors="replace")
+        cleanup_handles.append(audio_log)
         audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=audio_log)
+        child_processes.append(audio_proc)
         log.debug("音频时间轴修复已并行启动")
     else:
         log.debug("输入没有音轨，跳过音频时间轴修复")
 
-    log.debug("开始并行渲染（Ctrl+C 停止）...")
+    log.debug("开始整段单路渲染（Ctrl+C 停止）...")
     procs = {}; pending = list(jobs); running = []
     t0 = time.time(); CREATE_GROUP = 0x00000200 if os.name == "nt" else 0
     def launch(job):
-        return subprocess.Popen([sys.executable, os.path.abspath(__file__), "--worker", job["cfg"]],
-                                creationflags=CREATE_GROUP)
+        process = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--worker", job["cfg"]],
+            creationflags=CREATE_GROUP,
+        )
+        child_processes.append(process)
+        return process
     def killall():
         for pr in procs.values():
             kill_tree(pr.pid)
         if audio_proc and audio_proc.poll() is None:
             kill_tree(audio_proc.pid)
 
-    STALL = 180   # 某段进度 180 秒无推进 → 判定卡死,杀掉并标记失败
+    STALL = 180   # 渲染进度 180 秒无推进 → 判定卡死并终止
     failed = set()
     pstate = {}   # idx -> [last_n, last_t]
     _prog_last = {}
@@ -1114,7 +1379,7 @@ def main():
     try:
         last = 0.0
         while pending or running:
-            while pending and len(running) < workers:
+            while pending and not running:
                 job = pending.pop(0); pr = launch(job); procs[job["idx"]] = pr
                 pstate[job["idx"]] = [0, time.time()]; running.append((job, pr))
             still = []
@@ -1135,7 +1400,7 @@ def main():
                 last = now
                 done = sum(prog_n(job) for job in jobs)
                 el = now - t0; cur = done / el if el > 0 else 0
-                fl = f" 失败{len(failed)}段" if failed else ""
+                fl = " 渲染失败" if failed else ""
                 # 被 DMR 以管道捕获时只发机读进度行（供 WebUI 显示百分比），
                 # 不刷进度条——那是给交互终端看的,进了日志只会刷屏。
                 tty = sys.stdout.isatty()
@@ -1157,7 +1422,7 @@ def main():
             wait_dead([audio_proc])
         if audio_log and not audio_log.closed:
             audio_log.close()
-        rmtree_retry(work)
+        cleanup_work()
         log.info("已停止。"); return
     # 混音/清理之前必须确认 worker 全退干净,否则句柄还占着文件
     for pr in procs.values():
@@ -1174,12 +1439,11 @@ def main():
     if sys.stdout.isatty():
         print()   # 给进度条收尾换行,免得后面的日志接在同一行
 
-    # 校验：每段都要有 done_*.ts，否则报错退出(不产出残缺视频、不卡死)
+    # 校验唯一的视频结果，失败时不产出残缺视频。
     missing = [j["idx"] for j in jobs if not os.path.exists(os.path.join(work, f"done_{j['idx']:03d}.ts"))]
     bad = sorted(failed | set(missing))
     if bad:
-        log.error("渲染失败的分段: %s | 中间文件保留在: %s (可重跑;若反复失败,把对应 cfg_NNN.json / 该段报错发我)",
-                  bad, work)
+        log.error("整段视频渲染失败")
         sys.exit(1)
     if audio_proc and (
         audio_rc != 0
@@ -1199,13 +1463,9 @@ def main():
         audio_proc = None
         fixed_audio = None
 
-    dones = sorted(glob.glob(os.path.join(work, "done_*.ts")))
-    with open(os.path.join(work, "concat.txt"), "w", encoding="utf-8") as fo:
-        for d in dones: fo.write(f"file '{os.path.basename(d)}'\n")
-    subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "concat", "-safe", "0",
-                    "-i", "concat.txt", "-c", "copy", "full.ts"], cwd=work)
-    log.debug("拼接完成,混音中...")
-    full = os.path.join(work, "full.ts")
+    # 单路模式只有一个视频结果，不再生成 concat.txt，也不做无意义的单段拼接。
+    full = os.path.join(work, "done_000.ts")
+    log.debug("视频渲染完成，混音中...")
     if audio_proc:
         # 音频已在视频渲染期间完成修复和编码，此处只需快速封装。
         mux_cmd = [
@@ -1226,13 +1486,13 @@ def main():
     r = subprocess.run(mux_cmd)
     dt = time.time() - t0
     if r.returncode == 0:
-        rmtree_retry(work)
+        cleanup_work()
         real_frames = sum(prog_n(job) for job in jobs) or total   # 用真实渲染帧数算平均,更准
         avg = real_frames / dt if dt > 0 else 0
         log.info("完成！视频时长 %s，用时 %s（平均 %.0ffps）,输出: %s",
                  fmt(dur), fmt(dt), avg, out_mp4)
     else:
-        log.error("混音失败,中间文件保留在: %s", work)
+        log.error("混音失败")
         sys.exit(1)
 
 

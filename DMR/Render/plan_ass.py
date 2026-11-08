@@ -77,14 +77,19 @@ def _panel_shape(node: dict) -> str:
     return f"m 0 0 l {width:g} 0 l {width:g} {height:g} l 0 {height:g}"
 
 
-def _panel_phase(first: list, second: list, panel_class: str) -> str:
+def _panel_phase(first: list, second: list, motion: dict) -> str:
     x0, x1 = float(first[1]), float(second[1])
     y0, y1 = float(first[2]), float(second[2])
     if math.isclose(x0, x1, abs_tol=0.01):
         return "static" if math.isclose(y0, y1, abs_tol=0.01) else "push"
-    if panel_class == "superchat":
-        return "entry" if x1 > x0 else "exit"
-    return "entry" if x1 < x0 else "exit"
+    try:
+        inside_x = float(motion["inside_x"])
+        outside_x = float(motion["outside_x"])
+        before = abs(x0 - inside_x) / max(abs(outside_x - inside_x), 1e-7)
+        after = abs(x1 - inside_x) / max(abs(outside_x - inside_x), 1e-7)
+        return "entry" if after < before else "exit"
+    except (KeyError, TypeError, ValueError):
+        return "entry"
 
 
 def _panel_fade(
@@ -136,6 +141,49 @@ def _dialogue(t0, t1, layer, tags, body, style="Default") -> str:
     )
 
 
+def _pill_path(width: float, height: float) -> str:
+    """ASS ``\\p1`` stadium path with semicircular left and right ends."""
+    width = max(float(width), float(height))
+    height = max(1.0, float(height))
+    radius = height / 2.0
+    kappa = 0.5522847498 * radius
+
+    def point(x, y):
+        return f"{round(x)} {round(y)}"
+
+    top_left = (radius, 0.0)
+    top_right = (width - radius, 0.0)
+    right = (width, radius)
+    bottom_right = (width - radius, height)
+    bottom_left = (radius, height)
+    left = (0.0, radius)
+    return " ".join(
+        [
+            f"m {point(*top_left)}",
+            f"l {point(*top_right)}",
+            (
+                f"b {point(top_right[0] + kappa, top_right[1])} "
+                f"{point(right[0], right[1] - kappa)} {point(*right)}"
+            ),
+            (
+                f"b {point(right[0], right[1] + kappa)} "
+                f"{point(bottom_right[0] + kappa, bottom_right[1])} "
+                f"{point(*bottom_right)}"
+            ),
+            f"l {point(*bottom_left)}",
+            (
+                f"b {point(bottom_left[0] - kappa, bottom_left[1])} "
+                f"{point(left[0], left[1] + kappa)} {point(*left)}"
+            ),
+            (
+                f"b {point(left[0], left[1] - kappa)} "
+                f"{point(top_left[0] - kappa, top_left[1])} "
+                f"{point(*top_left)}"
+            ),
+        ]
+    )
+
+
 def _line_dialogues(event: dict, include_raster_text: bool) -> list[str]:
     mode = event.get("mode", "ass")
     if mode == "raster" and not include_raster_text:
@@ -171,14 +219,14 @@ def _line_dialogues(event: dict, include_raster_text: bool) -> list[str]:
             pad = float(pill.get("padding", pill.get("pad", 0)) or 0)
             border = float(pill.get("border", 2) or 2)
             pill_color = _bgr(pill.get("color", "#FFC0CB"), "FFC0CB")
-            rect = f"m 0 0 l {width:g} 0 l {width:g} {height:g} l 0 {height:g}"
+            pill_path = _pill_path(width, height)
             tags = (
                 "\\an7\\p1"
                 + _position_tag(first, second)
                 + f"\\1a&HFF&\\3c&H{pill_color}&\\bord{border:g}\\shad0"
             )
             result.append(
-                _dialogue(t0, t1, R2L_BACKGROUND_LAYER, tags, rect)
+                _dialogue(t0, t1, R2L_BACKGROUND_LAYER, tags, pill_path)
             )
             text_offset = max(0.0, pad)
         else:
@@ -203,14 +251,13 @@ def _panel_dialogues(event: dict) -> list[str]:
     path = event.get("path") or []
     if len(path) < 2:
         return []
-    panel_class = str(visual.get("class", ""))
     motion = visual.get("motion") or {}
     result = []
     for first, second in zip(path, path[1:]):
         t0, t1 = float(first[0]), float(second[0])
         if t1 <= t0:
             continue
-        phase = _panel_phase(first, second, panel_class)
+        phase = _panel_phase(first, second, motion)
         fade = _panel_fade(phase, t1 - t0, first, second, motion)
         for node in nodes:
             node_type = node.get("type")

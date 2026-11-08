@@ -36,6 +36,12 @@
     function connectLog() {
         const es = new EventSource('/api/console/stream');
         es.onopen  = () => { statusEl.textContent = '（实时）'; };
+        es.addEventListener('history', (e) => {
+            pending = [];
+            logLines = JSON.parse(e.data).slice(-MAX_LINES);
+            box.textContent = logLines.join('\n');
+            box.scrollTop = box.scrollHeight;
+        });
         es.onmessage = (e) => { pending.push(JSON.parse(e.data)); scheduleFlush(); };
         es.onerror = () => { statusEl.textContent = '（连接断开，自动重连…）'; };
     }

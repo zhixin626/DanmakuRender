@@ -7,6 +7,7 @@ import glob
 import requests
 import m3u8
 import time
+import threading
 
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -33,7 +34,8 @@ class PyRequestsFlvDownloader:
                  debug=False,
                  header:dict=None,
                  advanced_video_args:dict=None,
-                 segment_callback=None,
+                 segment_start_callback=None,
+                 segment_end_callback=None,
                  **kwargs):
         
         self.stream_url = stream_url
@@ -44,7 +46,8 @@ class PyRequestsFlvDownloader:
         self.debug = debug
         self.taskname = taskname
         self.url = url
-        self.segment_callback = segment_callback
+        self.segment_start_callback = segment_start_callback
+        self.segment_end_callback = segment_end_callback
         self.advanced_video_args = advanced_video_args if advanced_video_args else {}
         self.kwargs = kwargs
 
@@ -55,6 +58,9 @@ class PyRequestsFlvDownloader:
         self.logger = logging.getLogger(__name__)
         self.session = requests.Session()
         self.session.headers.update(self.header)
+        self.video_file = None
+        self._finished_event = threading.Event()
+        self._finished_event.set()
 
     def _download_part(self, stream_iter:requests.Response):
         start_t = datetime.now()
@@ -64,6 +70,7 @@ class PyRequestsFlvDownloader:
             self.video_file = splitext(self.video_file)[0] + f'({cnt})' + splitext(self.video_file)[1]
 
         with open(self.video_file, 'wb') as file_obj:
+            self.segment_start_callback(self.video_file, time.time())
             for idx, chunk in enumerate(stream_iter):
                 if not chunk:
                     raise RuntimeError(f'{self.taskname} stream end.')
@@ -83,6 +90,7 @@ class PyRequestsFlvDownloader:
 
     def start(self):
         self.logger.debug(f'{self.taskname} PyRequestsFlv: {self.stream_url}')
+        self.stoped = False
 
         stream = self.session.get(self.stream_url, headers=self.header, stream=True)
         if stream.status_code != 200:
@@ -90,6 +98,7 @@ class PyRequestsFlvDownloader:
         stream_iter = stream.iter_content(chunk_size=512*1024)
         
         while not self.stoped:
+            self._finished_event.clear()
             try:
                 self._download_part(stream_iter)
             except Exception as e:
@@ -97,18 +106,18 @@ class PyRequestsFlvDownloader:
                 raise e
             finally:
                 if self.video_file and exists(self.video_file):
-                    new_file = rename_safe(self.video_file, self.video_file.replace('[正在录制]', ''))
-                    if not new_file:
-                        self.logger.error(f'{self.taskname} 重命名文件 {self.video_file} 失败!')
-                        new_file = self.video_file
-                    self.logger.debug(f'{self.taskname} 录制完成: {new_file}')
-                    self.segment_callback(
-                        new_file,
-                        next_segment_start_time=time.time(),
+                    self.logger.debug(f'{self.taskname} 录制完成: {self.video_file}')
+                    self.segment_end_callback(
+                        self.video_file,
+                        time.time(),
+                        continuous=False,
                     )
+                self.video_file = None
+                self._finished_event.set()
     
     def stop(self):
         self.stoped = True
+        self._finished_event.wait(timeout=5)
         self.logger.debug('PyRequestsFlv downloader stoped.')
 
 
@@ -129,7 +138,8 @@ class PyRequestsHlsDownloader:
                  debug=False,
                  header:dict=None,
                  advanced_video_args:dict=None,
-                 segment_callback=None,
+                 segment_start_callback=None,
+                 segment_end_callback=None,
                  **kwargs):
         
         self.stream_url = stream_url
@@ -140,7 +150,8 @@ class PyRequestsHlsDownloader:
         self.debug = debug
         self.taskname = taskname
         self.url = url
-        self.segment_callback = segment_callback
+        self.segment_start_callback = segment_start_callback
+        self.segment_end_callback = segment_end_callback
         self.advanced_video_args = advanced_video_args if advanced_video_args else {}
         self.kwargs = kwargs
 
@@ -159,6 +170,9 @@ class PyRequestsHlsDownloader:
         self.headfile = b''
         self.headfile_name = ''
         self.video_file = ''
+        self._finished_event = threading.Event()
+        self._finished_event.set()
+        self._ended_files = set()
 
     def _convert2origin(self, uri):
         keys = re.findall(r'live_\d+_[a-zA-Z_]{0,10}\d+_[a-zA-Z]{1,10}', uri)
@@ -239,6 +253,7 @@ class PyRequestsHlsDownloader:
         
         with open(self.video_file, 'wb') as video_file:
             video_file.write(self.headfile)
+            self.segment_start_callback(self.video_file, time.time())
             while not self.stoped:
                 t0 = time.time()
                 try:
@@ -311,6 +326,7 @@ class PyRequestsHlsDownloader:
         self.segid = 0
         self.next_segid = 0
         self.future_to_segid = {}
+        self._ended_files.clear()
 
         # 处理playlist的情况
         m3u8_uri = self.stream_url
@@ -322,6 +338,7 @@ class PyRequestsHlsDownloader:
         self.m3u8_uri = m3u8_uri
 
         while not self.stoped:
+            self._finished_event.clear()
             try:
                 self._init_headfile()
                 self.download_part()
@@ -341,30 +358,25 @@ class PyRequestsHlsDownloader:
                             del self.future_to_segid[future]
                 raise e
             finally:
-                if not self.stoped and self.video_file and exists(self.video_file):
-                    new_file = rename_safe(self.video_file, self.video_file.replace('[正在录制]', ''))
-                    if not new_file:
-                        self.logger.error(f'{self.taskname} 重命名文件 {self.video_file} 失败!')
-                        new_file = self.video_file
-                    self.logger.debug(f'{self.taskname} 录制完成: {new_file}')
-                    self.segment_callback(
-                        new_file,
-                        next_segment_start_time=time.time(),
+                if (
+                    self.video_file
+                    and self.video_file not in self._ended_files
+                    and exists(self.video_file)
+                ):
+                    self.logger.debug(f'{self.taskname} 录制完成: {self.video_file}')
+                    self.segment_end_callback(
+                        self.video_file,
+                        time.time(),
+                        continuous=False,
                     )
+                    self._ended_files.add(self.video_file)
+                self.video_file = ''
+                self._finished_event.set()
     
     def stop(self):
         self.stoped = True
         self.download_executor.shutdown(wait=False)
-        try:
-            if self.video_file and exists(self.video_file):
-                new_file = rename_safe(self.video_file, self.video_file.replace('[正在录制]', ''))
-                if not new_file:
-                    self.logger.error(f'{self.taskname} 重命名文件 {self.video_file} 失败!')
-                    new_file = self.video_file
-                self.logger.debug(f'{self.taskname} 录制完成: {new_file}')
-                self.segment_callback(new_file)
-        except Exception as e:
-            self.logger.debug(e)
+        self._finished_event.wait(timeout=5)
         self.logger.debug(f'{self.taskname}：Pyrequests downloader stoped.')
 
 

@@ -7,7 +7,8 @@ import tempfile
 from dataclasses import dataclass, field
 
 
-SCHEMA_VERSION = 1
+LAYOUT_STATE_SCHEMA_VERSION = 3
+RENDER_PLAN_SCHEMA_VERSION = 1
 
 
 def _atomic_json_dump(path: str, data: dict) -> None:
@@ -37,23 +38,51 @@ class LayoutState:
 
     at: float
     events: list[dict] = field(default_factory=list)
+    # Canonical bottom-to-top event IDs for each stacked panel track.
+    # Keeping the order as a list avoids duplicate or sparse numeric ranks.
+    track_orders: dict[str, list[str]] = field(default_factory=dict)
+    canvas_resolution: tuple[int, int] | None = None
+    source_resolution: tuple[int, int] | None = None
 
     def to_dict(self) -> dict:
         return {
-            "schema": SCHEMA_VERSION,
+            "schema": LAYOUT_STATE_SCHEMA_VERSION,
             "at": float(self.at),
             "events": copy.deepcopy(self.events),
+            "track_orders": copy.deepcopy(self.track_orders),
+            "canvas_resolution": (
+                list(self.canvas_resolution)
+                if self.canvas_resolution is not None
+                else None
+            ),
+            "source_resolution": (
+                list(self.source_resolution)
+                if self.source_resolution is not None
+                else None
+            ),
         }
 
     @classmethod
     def from_dict(cls, data: dict | None, default_at: float = 0.0) -> "LayoutState":
         if not data:
             return cls(float(default_at), [])
-        if int(data.get("schema", 0)) != SCHEMA_VERSION:
+        if int(data.get("schema", 0)) != LAYOUT_STATE_SCHEMA_VERSION:
             raise ValueError(f"unsupported LayoutState schema: {data.get('schema')}")
+        def parse_resolution(key):
+            value = data.get(key)
+            if isinstance(value, (list, tuple)) and len(value) >= 2:
+                return int(value[0]), int(value[1])
+            return None
+
         return cls(
             at=float(data.get("at", default_at)),
             events=copy.deepcopy(data.get("events") or []),
+            track_orders={
+                str(track): [str(event_id) for event_id in (order or [])]
+                for track, order in (data.get("track_orders") or {}).items()
+            },
+            canvas_resolution=parse_resolution("canvas_resolution"),
+            source_resolution=parse_resolution("source_resolution"),
         )
 
     @classmethod
@@ -76,14 +105,14 @@ class RenderPlan:
 
     def to_dict(self) -> dict:
         return {
-            "schema": SCHEMA_VERSION,
+            "schema": RENDER_PLAN_SCHEMA_VERSION,
             "duration": float(self.duration),
             "events": copy.deepcopy(self.events),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "RenderPlan":
-        if int(data.get("schema", 0)) != SCHEMA_VERSION:
+        if int(data.get("schema", 0)) != RENDER_PLAN_SCHEMA_VERSION:
             raise ValueError(f"unsupported RenderPlan schema: {data.get('schema')}")
         return cls(
             duration=float(data.get("duration", 0.0)),

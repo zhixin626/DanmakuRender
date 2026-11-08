@@ -8,6 +8,7 @@ from DMR.Login.cookiemgr import PLATFORM_PREFIXES, load_cookie_dict
 from . import common
 
 PACK_DIR = os.path.join("emoji_pack", "douyin")
+MANIFEST = os.path.join(PACK_DIR, "douyin_emoji.json")
 API = "https://live.douyin.com/aweme/v1/web/emoji/list"
 
 
@@ -38,12 +39,13 @@ def _fetch():
 def check():
     merged, cookie_used = _fetch()
     os.makedirs(PACK_DIR, exist_ok=True)
-    with open(os.path.join(PACK_DIR, "douyin_emoji.json"), "w", encoding="utf-8") as f:
+    with open(MANIFEST, "w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=2)
 
-    missing, existing_count, unique_count = common.diff_missing(merged, PACK_DIR)
+    missing, extra, existing_count, unique_count = common.diff_pack(merged, PACK_DIR)
     return {
         'missing': missing,
+        'extra': extra,
         'existing_count': existing_count,
         'unique_count': unique_count,
         'cookie_used': cookie_used,
@@ -52,3 +54,8 @@ def check():
 
 def download(items):
     return common.download_missing(items, PACK_DIR, headers=common.UA)
+
+
+def delete_extras(items):
+    with open(MANIFEST, encoding="utf-8") as file:
+        return common.delete_extras(json.load(file), PACK_DIR, items)

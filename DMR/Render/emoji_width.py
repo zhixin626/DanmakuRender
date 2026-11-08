@@ -40,6 +40,10 @@ class EmojiWidthMeasurer:
             pack_path = os.path.join("./emoji_pack", platform) if platform else "./emoji_pack"
         self.pack = load_pack(pack_path)
         self.png_height = max(1, int(round(self.pixel_size * 1.25)))
+        self.text_ascent, self.text_descent = self.text_font.getmetrics()
+        emoji_ascent, emoji_descent = self.emoji_font.getmetrics()
+        self.emoji_ascent = int(round(emoji_ascent * self.emoji_scale))
+        self.emoji_descent = int(round(emoji_descent * self.emoji_scale))
         self._image_widths = {}
         self._cache = {}
 
@@ -52,6 +56,33 @@ class EmojiWidthMeasurer:
             match.group(1).lower() in self.pack
             for match in SHORTCODE_RE.finditer(text or "")
         )
+
+    def vertical_metrics(self, text: str, emoticon: dict = None) -> tuple[int, int]:
+        """返回相对共享文字基线的 ``(ascent, descent)``。
+
+        计算规则与 emoji_render_mt.get_sprite 完全相同。轨道 y 始终是 ASS
+        ``\\an7`` 的文字行顶；图片或 Emoji 只扩展视觉盒，不改变文字基线。
+        """
+        text = text or ""
+        has_emoji = any(is_emoji(char) for char in text)
+        has_png = bool(emoticon) or any(
+            match.group(1).lower() in self.pack
+            for match in SHORTCODE_RE.finditer(text)
+        )
+        png_center = -int(round(self.text_ascent * 0.38))
+        png_top = png_center - self.png_height // 2
+        png_bottom = png_center + (self.png_height - self.png_height // 2)
+        ascent = max(
+            self.text_ascent,
+            -png_top if has_png else 0,
+            self.emoji_ascent if has_emoji else 0,
+        )
+        descent = max(
+            self.text_descent,
+            png_bottom if has_png else 0,
+            self.emoji_descent if has_emoji else 0,
+        )
+        return int(ascent), int(descent)
 
     def _load_emoji_font(self, path):
         try:

@@ -112,7 +112,7 @@ def serialize_event(event) -> dict | None:
             "price": getattr(event, "price", None),
             "price_unit": getattr(event, "price_unit", ""),
             "price_cny": getattr(event, "price_cny", None),
-            "duration": getattr(event, "sc_duration", None),
+            "platform_duration": getattr(event, "sc_duration", None),
         }
         _put_optional(
             data,
@@ -165,10 +165,16 @@ class EventWriter:
 
     def open(self, path: str, segment_start_time: float) -> None:
         with self._lock:
-            self.close()
+            if self._fp is not None:
+                raise RuntimeError("当前弹幕事件段尚未关闭，请使用 rotate() 连续切段")
+            start_time = float(segment_start_time)
+            # 弹幕连接可能早于视频文件建立。只保留实际视频开始之后收到的事件，
+            # 视频开始之前的未归属事件没有对应画面，不能写入本段。
+            while self._pending and self._pending[0]["received_at"] < start_time:
+                self._pending.popleft()
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             self.path = path
-            self.segment_start_time = float(segment_start_time)
+            self.segment_start_time = start_time
             self._fp = open(path, "w", encoding="utf-8", newline="\n")
             self._write_line({
                 "type": "meta",
@@ -182,9 +188,14 @@ class EventWriter:
         if not data or data["type"] not in self.record_types:
             return False
         with self._lock:
-            if self._fp is None:
-                return False
             self._pending.append(data)
+            if self._fp is None:
+                # 视频尚未开始或正处于断线间隔。只保存一个短窗口，防止长时间
+                # 无视频时未归属弹幕无限占用内存；open() 会再按真实开始时间筛选。
+                cutoff = data["received_at"] - self.tail_window
+                while self._pending and self._pending[0]["received_at"] < cutoff:
+                    self._pending.popleft()
+                return True
             watermark = data["received_at"] - self.tail_window
             self._flush_before(watermark)
         return True
@@ -219,10 +230,34 @@ class EventWriter:
             self._pending.extend(carry)
             return old_path
 
+    def close_segment(self, segment_end_time: float) -> str | None:
+        """按真实视频结束时间关闭当前段，保留结束后的事件供下一段筛选。"""
+        with self._lock:
+            old_path = self.path
+            cutoff = float(segment_end_time)
+            if self._fp is None:
+                return old_path
+
+            self._flush_before(cutoff)
+            carry = list(self._pending)
+            self._pending.clear()
+            if self._fp:
+                self._fp.flush()
+                self._fp.close()
+            self._fp = None
+            self.path = None
+            self.segment_start_time = None
+            self._pending.extend(carry)
+            return old_path
+
     def close(self) -> None:
         with self._lock:
-            while self._pending:
-                self._write_line(self._pending.popleft())
+            if self._fp:
+                while self._pending:
+                    self._write_line(self._pending.popleft())
+            else:
+                # 没有活动视频段时的事件没有对应画面，任务结束时直接丢弃。
+                self._pending.clear()
             if self._fp:
                 self._fp.flush()
                 self._fp.close()
