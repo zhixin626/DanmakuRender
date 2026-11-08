@@ -116,7 +116,7 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 
 ## 进度
 
-- [ ] 阶段 0：基线 → `perf/results/phase0.md`
+- [x] 阶段 0：基线 → `perf/results/phase0.md`
 - [ ] 阶段 1a：零拷贝 + 扫描线
 - [ ] 阶段 1b：整数混合
 - [ ] 阶段 2：numba

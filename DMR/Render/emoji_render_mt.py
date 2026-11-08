@@ -507,6 +507,15 @@ def render_segment(cfg):
     rt.start(); wt.start(); dec_err_thread.start(); enc_err_thread.start()
 
     n = 0; last = 0.0
+    bypass_emoji = os.environ.get("DMR_EMOJI_BYPASS") == "1"
+    stats_path = os.environ.get("DMR_EMOJI_STATS")
+    stats = {
+        "frames": 0,
+        "raster_events": len(emoji_events),
+        "active_event_samples": 0,
+        "max_active_events": 0,
+        "bypass": bypass_emoji,
+    }
     dec_rc = enc_rc = None
     try:
         while not pipeline_stop.is_set():
@@ -524,7 +533,11 @@ def render_segment(cfg):
                 break
             i, buf = item
             t = i / fps
-            active = [ev for ev in emoji_events if ev["s"] <= t <= ev["e"]]
+            active = [] if bypass_emoji else [
+                ev for ev in emoji_events if ev["s"] <= t <= ev["e"]
+            ]
+            stats["active_event_samples"] += len(active)
+            stats["max_active_events"] = max(stats["max_active_events"], len(active))
             if active:
                 arr = np.frombuffer(buf, np.uint8).copy()
                 Y = arr[:W * H].reshape(H, W)
@@ -559,6 +572,7 @@ def render_segment(cfg):
             if not put_queue(write_q, output_frame, encoder_side=True):
                 break
             n += 1
+            stats["frames"] = n
             now = time.time()
             if now - last >= 0.4:
                 last = now
@@ -574,6 +588,12 @@ def render_segment(cfg):
                         f"编码线程超过 {pipeline_stall_seconds:.0f} 秒未结束"
                     )
     finally:
+        if stats_path:
+            try:
+                with open(stats_path, "w", encoding="utf-8") as fp:
+                    json.dump(stats, fp, ensure_ascii=False)
+            except OSError:
+                pass
         if pipeline_stop.is_set():
             for proc in (dec, enc):
                 if proc.poll() is None:
