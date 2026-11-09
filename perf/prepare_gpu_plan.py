@@ -35,7 +35,7 @@ def parse_color(value: str, default: str = "FFFFFF") -> tuple[int, int, int]:
 
 
 def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image:
-    """Render gift panels with the same basic shapes as the legacy path."""
+    """Render panel nodes with configured fills, borders and text outlines."""
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     for node in sorted(visual.get("nodes", []), key=lambda item: item.get("layer", 0)):
@@ -46,10 +46,14 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
             h = int(node.get("height", height))
             alpha = int(255 * float(node.get("opacity", 1.0)))
             fill = parse_color(node.get("color", "#FFFFFF")) + (alpha,)
+            outline = parse_color(node.get("outline_color", "#000000"))
+            outline_alpha = int(255 * float(node.get("outline_opacity", 1.0)))
             draw.rounded_rectangle(
                 (x, y, x + w, y + h),
                 radius=int(node.get("radius", 0)),
                 fill=fill,
+                outline=outline + (outline_alpha,),
+                width=max(0, int(node.get("outline", 0))),
             )
         if node.get("type") == "text":
             family = str(node.get("font", "Microsoft YaHei"))
@@ -59,7 +63,15 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
             x = int(node.get("x", 0))
             y = int(node.get("y", 0))
             anchor = "ra" if node.get("anchor") == "top_right" else "la"
-            draw.text((x, y), node.get("text", ""), font=font, fill=fill, anchor=anchor)
+            draw.text(
+                (x, y),
+                node.get("text", ""),
+                font=font,
+                fill=fill,
+                anchor=anchor,
+                stroke_width=max(0, int(node.get("outline", 0))),
+                stroke_fill=parse_color(node.get("outline_color", "#000000")) + (255,),
+            )
     return image
 
 
@@ -114,6 +126,15 @@ def main() -> None:
             sprite = factories[factory_key].get_sprite(
                 visual.get("text", ""),
                 rgb,
+                pill=(
+                    {
+                        "color": list(parse_color(visual["pill"].get("color", "#FFC0CB"))),
+                        "pad": int(visual["pill"].get("padding", visual["pill"].get("pad", 6))),
+                        "border": int(visual["pill"].get("border", 1)),
+                    }
+                    if visual.get("pill")
+                    else None
+                ),
                 event_pack=image_pack or None,
                 outline=style.get("outline", 1),
                 outline_rgb=parse_color(style.get("outline_color", "#000000")),
@@ -135,6 +156,7 @@ def main() -> None:
             "start": float(path[0][0]) if path else 0.0,
             "end": float(path[-1][0]) if path else 0.0,
             "path": path,
+            "motion": visual.get("motion") or {},
         })
     np.savez_compressed(
         args.output / "sprites.npz",

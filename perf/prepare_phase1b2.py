@@ -67,7 +67,7 @@ def compile_plan(config_path: pathlib.Path, output: pathlib.Path) -> dict:
     config = Config(str(config_path))
     task = config.get_task_config("峰哥")
     render_args = dict(task["render_args"]["overlay"])
-    render_args["engine"] = "emoji_dmrender"
+    render_args["engine"] = "gpu_render"
     video = VideoInfo(
         path=str(VIDEO),
         dm_file_id=str(JSONL),
@@ -76,7 +76,7 @@ def compile_plan(config_path: pathlib.Path, output: pathlib.Path) -> dict:
     )
     result = LayoutCompiler(
         render_args,
-        engine="emoji_dmrender",
+        engine="gpu_render",
         engine_config=render_args,
     ).compile(video=video, events_path=str(JSONL), work_dir=str(output.parent))
     output.parent.mkdir(parents=True, exist_ok=True)

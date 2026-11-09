@@ -807,7 +807,7 @@ class LayoutCompiler:
         # 会走 libass，而带 Emoji 的 VIP 会走 Pillow，产生两套圆角、留白、
         # 描边透明度和文字基线。普通 dmrender 没有 Pillow 合成阶段，仍走 ASS。
         is_raster = (
-            self.engine == "emoji_dmrender" and pill is not None
+            self.engine in {"emoji_dmrender", "gpu_render"} and pill is not None
         ) or emoji_measurer.is_special(text, emoticon)
         measure = (
             (lambda value: emoji_measurer.measure(value, emoticon))
@@ -1081,7 +1081,7 @@ class LayoutCompiler:
         return {
             "id": event_id,
             "track": track,
-            "mode": "ass",
+            "mode": "raster" if self.engine == "gpu_render" else "ass",
             "bounds": {"width": box_width, "height": total_height},
             "path": [[float(start_at), 0.0, 0.0]],
             "visual": visual,

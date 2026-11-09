@@ -34,7 +34,7 @@ PLAN_KERNEL = r"""
 extern "C" __global__
 void blend_plan(unsigned char* y, unsigned char* uv, int width, int height,
                 const int* px, const int* py, const int* offsets,
-                const int* widths, const int* heights, int count,
+const int* widths, const int* heights, const int* event_alpha, int count,
                 const unsigned char* sy, const unsigned char* su,
                 const unsigned char* sv, const unsigned char* sa) {
     int ux = blockIdx.x * blockDim.x + threadIdx.x;
@@ -52,7 +52,7 @@ void blend_plan(unsigned char* y, unsigned char* uv, int width, int height,
                 int sy_local = yy - py[event];
                 if (sx < 0 || sy_local < 0 || sx >= widths[event] || sy_local >= heights[event]) continue;
                 int index = offsets[event] + sy_local * widths[event] + sx;
-                int alpha = sa[index];
+                int alpha = (sa[index] * event_alpha[event] + 127) / 255;
                 value = (value * (255 - alpha) + sy[index] * alpha + 127) / 255;
             }
             y[yy * width + x] = (unsigned char)value;
@@ -70,7 +70,7 @@ void blend_plan(unsigned char* y, unsigned char* uv, int width, int height,
                 int sy_local = y0 + dy - py[event];
                 if (sx < 0 || sy_local < 0 || sx >= widths[event] || sy_local >= heights[event]) continue;
                 int index = offsets[event] + sy_local * widths[event] + sx;
-                int alpha = sa[index];
+                int alpha = (sa[index] * event_alpha[event] + 127) / 255;
                 alpha_sum += alpha;
                 u_sum += su[index] * alpha;
                 v_sum += sv[index] * alpha;
@@ -227,7 +227,7 @@ class EventScanner:
         self.active: set[int] = set()
         self.last_timestamp = float("-inf")
 
-    def visible(self, timestamp: float) -> list[tuple[dict[str, Any], int, int]]:
+    def visible(self, timestamp: float) -> list[tuple[dict[str, Any], int, int, int]]:
         """Advance the scanline and return active events in source order."""
         if timestamp < self.last_timestamp:
             raise ValueError("RenderPlan timestamps must be monotonic")
@@ -246,7 +246,15 @@ class EventScanner:
             event = self.events[index]
             position = event_position(event, timestamp)
             if position is not None:
-                visible.append((event, position[0], position[1]))
+                motion = event.get("motion") or {}
+                enter = max(0.0, float(motion.get("enter_duration", 0.0)))
+                exit_duration = max(0.0, float(motion.get("exit_duration", 0.0)))
+                alpha = 1.0
+                if enter and timestamp < float(event["start"]) + enter:
+                    alpha = max(0.0, min(1.0, (timestamp - float(event["start"])) / enter))
+                elif exit_duration and timestamp > float(event["end"]) - exit_duration:
+                    alpha = max(0.0, min(1.0, (float(event["end"]) - timestamp) / exit_duration))
+                visible.append((event, position[0], position[1], int(round(alpha * 255))))
         return visible
 
 
@@ -326,6 +334,7 @@ class SpriteCompositor:
         offsets = self.cupy.asarray([item[0]["offset"] for item in active], dtype=self.cupy.int32)
         widths = self.cupy.asarray([item[0]["width"] for item in active], dtype=self.cupy.int32)
         heights = self.cupy.asarray([item[0]["height"] for item in active], dtype=self.cupy.int32)
+        event_alpha = self.cupy.asarray([item[3] for item in active], dtype=self.cupy.int32)
         self.kernel(
             ((self.width // 2 + 31) // 32, (self.height // 2 + 7) // 8),
             (32, 8),
@@ -339,6 +348,7 @@ class SpriteCompositor:
                 offsets,
                 widths,
                 heights,
+                event_alpha,
                 self.cupy.int32(len(active)),
                 self.plan_assets["y"],
                 self.plan_assets["u"],
