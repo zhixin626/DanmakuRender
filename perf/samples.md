@@ -44,6 +44,9 @@
 - 原始视频：D:\DanmakuRender\Tasks文件\峰哥\8月18日14点19分.flv
 - 原始弹幕：D:\DanmakuRender\Tasks文件\峰哥\8月18日14点19分.jsonl
 - 截取：1860s–2160s；输出：D:\DanmakuRender-perf\perf\samples\full_coverage\峰哥_8月18日14点19分_1860-2160.flv
-- 增强弹幕：D:\DanmakuRender-perf\perf\samples\full_coverage\峰哥_8月18日14点19分_1860-2160_augmented.jsonl；真实事件数量：392；总事件数量：398；类型：{'danmaku': 274, 'member': 1, 'gift': 117, 'superchat': 6, 'emoji_or_emoticon': 56}
-- 测试配置副本：D:\DanmakuRender-perf\perf\tmp\full_coverage_config\global.yml；VIP 用户：477061263（原配置无 vip_users，未修改正式配置）
-- 合成事件：6 个 handwritten 礼物，价格 0.5/5/20/75/300/1200 元，集中在片段 20–25 秒，用于覆盖价格持续时间/颜色档位和重叠进出。
+- 增强弹幕：D:\DanmakuRender-perf\perf\samples\full_coverage\峰哥_8月18日14点19分_1860-2160_augmented.jsonl；真实事件数量：392；总事件数量：406；类型：{'danmaku': 274, 'member': 3, 'gift': 117, 'superchat': 12, 'emoji_or_emoticon': 56}
+- 真实 SC 价格（片段相对秒）：30 元（54.1s）, 50 元（121.5s）, 2 元（153.9s）, 30 元（192.8s）, 50 元（235.7s）, 30 元（297.9s）
+- 测试配置副本：D:\DanmakuRender-perf\perf\tmp\full_coverage_config\global.yml；三层继承快照：D:\DanmakuRender-perf\perf\tmp\full_coverage_config\resolved_DMR-峰哥.yml；VIP 用户：477061263（原配置无 vip_users，未修改正式配置）
+- 合成事件：6 个 handwritten SC，价格 0.5/5/20/75/300/1200 元，在 30–35 秒内密集进入；0.5 元至 30 秒档先退出，验证 slide_left reflow、重叠进出和六档颜色/时长。
+- 合成事件：6 个 handwritten 礼物，价格 0.5/5/20/75/300/1200 元，集中在片段 20–25 秒；0.5 元礼物低于 slide_right.gift.min_price_cny=1，预期不显示。
+- 合成事件：2 个 modified 会员，22s 和 24s，与礼物同段进入，验证 slide_right 共用队列。
