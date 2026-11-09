@@ -248,6 +248,11 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 >   - **GPU 版字体比旧版细，是 GPU 版的 bug**：旧版 ASS 的 R2L 样式是粗体（Bold=-1），libass 用的是 Microsoft YaHei **Bold**；`perf/prepare_gpu_plan.py` 却写死了常规体 `msyh.ttc`，字号也写死成 `60`，完全忽略了 RenderPlan 中每个事件 `style` 里的 `font`、`fontsize`。请改为**逐事件**读取 style 中的字体、字号、颜色、透明度、描边宽度和描边颜色，粗细按 ASS 样式（默认粗体）用 `sprites.resolve_font(family, bold)` 解析，不允许写死。
 >   - **PyAV 和 Pillow 直接装**：用户同意在 `perf/` 内建 Python 虚拟环境。只保留**一个** venv，装齐 cupy、PyNvVideoCodec、av、Pillow、numpy、psutil，去掉"DMR venv 预处理 + GPU venv 加载"的两段式流程，也去掉 ffprobe `avg_frame_rate` 兜底。
 > - **可调节（用户要求，作为验收标准）**：字体、字号、颜色、透明度、描边、弹幕速度（`screen_duration`）、间距（`vertical_gap`/`horizontal_gap`/边距）都必须能通过现有配置（`render_args.overlay` 的 `r2l`、`slide_left` 等）调节，GPU 版要和旧版一样跟随配置变化。原理：速度和间距在 `layout_compiler` 编译 RenderPlan 时就决定了，字体和颜色写在每个事件的 style 里，所以 GPU 版只要**完全按 RenderPlan 渲染、不写死任何样式**，就能自动跟随。验证方法：用两套不同的配置（例如字体换成另一种、字号 60→48、速度 8→12 秒、描边 1→3、颜色改一种）分别渲染同一段素材，旧版和 GPU 版的变化要一致，输出演示视频 `0X_1b-2_配置可调_…`。
+> - **补充素材：覆盖全部弹幕类型（用户要求，1b-2 之前做）**：之前的演示视频里没有 SC、礼物、会员和 VIP 药丸弹幕，无法验证这些轨道。请重新挑选素材：
+>   - **搜索范围是整个 `Tasks` 文件夹**（不再限定于某几个主播目录），只用已经录完的文件。
+>   - 扫描 JSONL，按 60 秒滑动窗口统计 `superchat`、`gift`（价格要达到配置里的 `min_price_cny`）、`member`、带 Emoji 或表情包的普通弹幕，以及 **VIP 用户弹幕**的数量。选出**同时包含尽量多种类型**的窗口，截取以它为中心的 2 到 5 分钟。一段覆盖不全时，可以选 2 到 3 段互相补充。新素材放到 `perf/samples/full_coverage/`，并更新 `samples.md`，列出每段素材中各类事件的数量。
+>   - **渲染时使用该素材所属任务的实际配置**（三层继承后的最终配置，包括任务自己的 `vip_users`、各轨道的 `enable` 和 `min_price_cny`），不要只用 `global.yml`，否则礼物和 VIP 药丸可能根本不会出现。如果所有任务都没有配置 `vip_users`，就在**测试用的配置副本**里把素材中发言最多的 1 到 2 个用户设为 VIP，并在汇报中说明。不要修改用户的正式配置。
+>   - 之后的对比截图和演示视频都**以这批素材为主**，每个演示视频的 `说明.txt` 要写明画面中 SC、礼物、会员、VIP 药丸、Emoji 各出现在第几秒。
 > - **1b-2：文字画质对齐**：逐帧对比 G 和 E 的输出，调整字体渲染（hinting、描边、阴影、透明度）；给出无弹幕区域的 PSNR 和弹幕区域的差异热力图；由用户目视确认。
 > - **1b-3：问题素材**：在 GPU 上实现 VFR→CFR 和分辨率中途变化时的缩放加黑边；跑通所有 `problem_*` 素材，输出视频供观看。
 > - **1b-4：接入 DMR**：新增 `engine: gpu_render` 配置，出错时自动回退到 `emoji_dmrender`；用全部 4 类素材做一次最终验收。
