@@ -248,6 +248,13 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 >   - **GPU 版字体比旧版细，是 GPU 版的 bug**：旧版 ASS 的 R2L 样式是粗体（Bold=-1），libass 用的是 Microsoft YaHei **Bold**；`perf/prepare_gpu_plan.py` 却写死了常规体 `msyh.ttc`，字号也写死成 `60`，完全忽略了 RenderPlan 中每个事件 `style` 里的 `font`、`fontsize`。请改为**逐事件**读取 style 中的字体、字号、颜色、透明度、描边宽度和描边颜色，粗细按 ASS 样式（默认粗体）用 `sprites.resolve_font(family, bold)` 解析，不允许写死。
 >   - **PyAV 和 Pillow 直接装**：用户同意在 `perf/` 内建 Python 虚拟环境。只保留**一个** venv，装齐 cupy、PyNvVideoCodec、av、Pillow、numpy、psutil，去掉"DMR venv 预处理 + GPU venv 加载"的两段式流程，也去掉 ffprobe `avg_frame_rate` 兜底。
 > - **可调节（用户要求，作为验收标准）**：字体、字号、颜色、透明度、描边、弹幕速度（`screen_duration`）、间距（`vertical_gap`/`horizontal_gap`/边距）都必须能通过现有配置（`render_args.overlay` 的 `r2l`、`slide_left` 等）调节，GPU 版要和旧版一样跟随配置变化。原理：速度和间距在 `layout_compiler` 编译 RenderPlan 时就决定了，字体和颜色写在每个事件的 style 里，所以 GPU 版只要**完全按 RenderPlan 渲染、不写死任何样式**，就能自动跟随。验证方法：用两套不同的配置（例如字体换成另一种、字号 60→48、速度 8→12 秒、描边 1→3、颜色改一种）分别渲染同一段素材，旧版和 GPU 版的变化要一致，输出演示视频 `0X_1b-2_配置可调_…`。
+> - **GPU 版绘制的完整性问题（Claude 审查 `prepare_gpu_plan.py`，1b-2 中必须修）**：GPU 版已经**完全不使用 libass**，所有事件都用 Pillow 画成精灵，再在 GPU 上叠加，这是正确的方向。但以下几处和旧版不一致：
+>   1. **VIP 药丸弹幕丢失了药丸**：RenderPlan 的 `visual["pill"]` 没有传给 `get_sprite(pill=...)`，所以只画出了文字。另外 `layout_compiler` 中 `is_raster = (self.engine == "emoji_dmrender" and pill is not None) or ...` 只认 `emoji_dmrender`，GPU 引擎（例如 `gpu_render`）也要包含进去。
+>   2. **SC、礼物、会员面板（`panel_sprite`）只画了圆角矩形和纯文字**，缺少：面板描边（`box_border_width`/`box_border_opacity`）、名字和内容的描边（`name_border_width`/`content_border_width`）、文字中的 Emoji 和表情包（应改用 `SpriteFactory` 绘制文字节点）、上下两色的处理是否和旧版一致。
+>   3. **进入和退出的淡入淡出**：旧版通过 `plan_ass._panel_fade` 在入场、退场、重排时做透明度渐变；GPU kernel 目前只用精灵自身固定的 alpha。需要在 RenderPlan 的 path 中（或者事件上）带上随时间变化的透明度，每帧按时间插值，作为每个活动事件的 opacity 参数传给 kernel。
+>   4. **面板绘制逻辑现在有两份**（`plan_ass.py` 的 ASS 绘图，和 `panel_sprite` 的 Pillow 绘图），以后改样式要改两处。建议把面板的 Pillow 绘制作为**唯一实现**，放进 `sprites.py`，让旧版 E 的面板也走 raster 路径（E 已经支持 raster 事件），这样两个渲染器的面板天然一致。是否这样改，请在汇报中给出评估（工作量、对 E 输出的影响）。
+>
+>   以上问题都要用 full_coverage 素材的**放大对比截图**逐项确认（VIP 药丸、SC 面板、礼物面板、入场和退场的中间帧）。
 > - **补充素材：覆盖全部弹幕类型（用户要求，1b-2 之前做）**：之前的演示视频里没有 SC、礼物、会员和 VIP 药丸弹幕，无法验证这些轨道。请重新挑选素材：
 >   - **搜索范围是整个 `Tasks` 文件夹**（不再限定于某几个主播目录），只用已经录完的文件。
 >   - 扫描 JSONL，按 60 秒滑动窗口统计 `superchat`、`gift`（价格要达到配置里的 `min_price_cny`）、`member`、带 Emoji 或表情包的普通弹幕，以及 **VIP 用户弹幕**的数量。选出**同时包含尽量多种类型**的窗口，截取以它为中心的 2 到 5 分钟。一段覆盖不全时，可以选 2 到 3 段互相补充。新素材放到 `perf/samples/full_coverage/`，并更新 `samples.md`，列出每段素材中各类事件的数量。
