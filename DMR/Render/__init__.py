@@ -143,7 +143,7 @@ class Render():
                 'status': 'waiting',
                 'progress': None,   # 渲染百分比（'45%'），由渲染引擎回调更新，供 WebUI 展示
             }
-            if task['mode'] in ('dmrender', 'emoji_dmrender'):
+            if task['mode'] in ('dmrender', 'emoji_dmrender', 'gpu_render'):
                 video = task.get('video')
                 events_path = getattr(video, 'dm_file_id', None)
                 if not events_path or not str(events_path).lower().endswith('.jsonl'):
@@ -225,6 +225,8 @@ class Render():
                 from .dmrender import DmRender as TargetRender
             elif mode == 'emoji_dmrender':
                 from .emoji_dmrender import EmojiDmRender as TargetRender
+            elif mode == 'gpu_render':
+                from .gpu_dmrender import GpuRender as TargetRender
             elif mode == 'transcode':
                 from .transcode import Transcoder as TargetRender
             else:
@@ -232,7 +234,7 @@ class Render():
 
             target_args = render_args
             render_kwargs = {}
-            if mode in ('dmrender', 'emoji_dmrender'):
+            if mode in ('dmrender', 'emoji_dmrender', 'gpu_render'):
                 output_dir = os.path.dirname(output)
                 if output_dir:
                     os.makedirs(output_dir, exist_ok=True)
@@ -345,6 +347,20 @@ class Render():
 
             if status:
                 self._gather(task, 'info', desc=info)
+            elif mode == 'gpu_render':
+                self.logger.warning('GPU 渲染失败，回退到 emoji_dmrender: %s', info)
+                from .emoji_dmrender import EmojiDmRender
+                fallback = EmojiDmRender(**target_args)
+                fallback_status, fallback_info = fallback.render_one(
+                    video=video,
+                    output=output,
+                    progress_cb=on_progress,
+                    **render_kwargs,
+                )
+                if fallback_status:
+                    self._gather(task, 'info', desc=fallback_info)
+                else:
+                    self._gather(task, 'error', desc=fallback_info)
             else:
                 self._gather(task, 'error', desc=info)
         except KeyboardInterrupt:

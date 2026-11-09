@@ -39,6 +39,7 @@ class EmojiDmRender(BaseRender):
     弹幕彩色 emoji 渲染引擎(方案2)：libass 烧普通弹幕 + Pillow 渲彩色 emoji/表情包贴图,
     整段单路 nv12 流水线。复用同目录的 emoji_render_mt.py。
     与 DmRender 同接口(render_one/stop),按 mode='emoji_dmrender' 选用。
+    该引擎保持为 GPU 不可用时的备用路径；GPU 面板的新功能只在 gpu_render 实现。
     """
     def __init__(self,
                  vencoder: str = "h264_nvenc",
