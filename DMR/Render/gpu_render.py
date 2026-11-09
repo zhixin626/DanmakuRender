@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-import argparse, json, os, pathlib, subprocess, time
+import argparse, json, itertools, os, pathlib, subprocess, time
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = ROOT / "perf" / "tmp" / "venv312" / "Lib" / "site-packages"
 NVC_PKG = PKG / "PyNvVideoCodec"
@@ -100,6 +100,19 @@ def frame_signature(arr):
     h = arr.shape[0]
     return int(arr[h // 4: h // 4 + 64, :64].sum())
 
+def low_level_frames(video):
+    """Decode packets through the native demuxer/decoder API.
+
+    SimpleDecoder on this FLV repeats one surface after about 55 frames and
+    reports a stuck PTS. The lower-level packet API keeps advancing through
+    the stream and returns changing frames.
+    """
+    demuxer = nvc.CreateDemuxer(filename=str(video))
+    decoder = nvc.CreateDecoder(gpuid=0, codec=demuxer.GetNvCodecId(), usedevicememory=True)
+    for packet in demuxer:
+        for decoded in decoder.Decode(packet):
+            yield decoded
+
 def run_probe(video, sprites, max_frames, probe_encoder):
     cp.cuda.Device(0).use()
     decoder = nvc.SimpleDecoder(str(video), gpu_id=0, use_device_memory=True, need_scanned_stream_metadata=False)
@@ -130,10 +143,12 @@ def run_probe(video, sprites, max_frames, probe_encoder):
 
 def run_full(video, sprites, max_frames, output):
     cp.cuda.Device(0).use()
-    decoder = nvc.SimpleDecoder(str(video), gpu_id=0, use_device_memory=True, need_scanned_stream_metadata=False)
-    first = decoder.get_batch_frames(1)
-    if not first: raise RuntimeError("NVDEC returned no frame")
-    width, height, pitch = plane_geometry(first[0])
+    decoded_iter = low_level_frames(video)
+    try:
+        first = next(decoded_iter)
+    except StopIteration:
+        raise RuntimeError("NVDEC returned no frame")
+    width, height, pitch = plane_geometry(first)
     kernel = kernel_for(width, height)
     encoder = nvc.CreateEncoder(width, height, "NV12", False, codec="hevc", bitrate=4000000, framerate=25, preset="P4")
     bitstream = output.with_suffix(".hevc")
@@ -141,21 +156,18 @@ def run_full(video, sprites, max_frames, output):
     frame = NV12Buffer(width, height)
     flat_y = frame.buf[:height].reshape(-1)
     signatures = []
-    pending = first; frames = 0; started = time.perf_counter()
+    frames = 0; started = time.perf_counter()
     with bitstream.open("wb") as fp:
-        while frames < max_frames:
-            batch = pending if pending else decoder.get_batch_frames(16); pending = []
-            if not batch: break
-            for decoded in batch:
-                frame.load(decoded)
-                if frames < 200 and frames % 10 == 0:
-                    signatures.append(frame_signature(frame.y))
-                kernel(((width + 31) // 32, (height + 7) // 8), (32, 8),
-                       (flat_y, cp.int32(width), cp.int32(height), cp.int32(width), cp.int32(sprites)))
-                for packet in encoder.Encode(frame):
-                    fp.write(packet["data"])
-                frames += 1
-                if frames >= max_frames: break
+        for decoded in itertools.chain((first,), decoded_iter):
+            frame.load(decoded)
+            if frames < 200 and frames % 10 == 0:
+                signatures.append(frame_signature(frame.y))
+            kernel(((width + 31) // 32, (height + 7) // 8), (32, 8),
+                   (flat_y, cp.int32(width), cp.int32(height), cp.int32(width), cp.int32(sprites)))
+            for packet in encoder.Encode(frame):
+                fp.write(packet["data"])
+            frames += 1
+            if frames >= max_frames: break
         for packet in encoder.EndEncode():
             fp.write(packet["data"])
     wall = time.perf_counter() - started

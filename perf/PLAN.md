@@ -209,5 +209,6 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - [x] 阶段 1a：Python GPU 原型 → `perf/results/phase1a.md`（解码、合成和 NVENC 闭环已通过）
 - [x] 阶段 1a-2：打通 NVENC，产出可播放视频
 - [ ] 阶段 1b-0：验证 1a-2 输出自检（1b-0、1b-0b 均未通过：输出画面静止；1b-0c 定位解码器问题）
+- [x] 阶段 1b-0c：定位并修复 SimpleDecoder 重复帧 → perf/results/phase1b0c.md
 - [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
 - [ ] 阶段 2：C++/libav + CUDA（按需）
