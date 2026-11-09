@@ -147,6 +147,19 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - 如果 PyNvVideoCodec 自带的读文件功能处理不了直播 flv（损坏包、时间戳），改为由 ffmpeg 负责读文件和拆包（`-c:v copy -f hevc/h264 -` 输出压缩码流），再交给 PyNvVideoCodec 解码。
 - **输出**：`perf/results/phase1a.md`。然后停下，由 Claude 判断是否继续。
 
+**1a-2：打通 NVENC，产出可播放视频（时间上限 1 小时，1a 审查后追加）**
+
+1a 已证明"显存解码 + CuPy 合成"可以把 CPU 降到 0.25 到 0.45 核。只差编码这一环：
+
+- **报错原因推测**：`encoder.Encode()` 收到的是 CuPy 数组。PyNvVideoCodec 判断 GPU 输入的方式，应该是看对象有没有 `cuda()` 方法（返回各平面的 CAI 列表，和解码帧对象一样），而不是看 `__cuda_array_interface__`。所以 CuPy 数组被当成了 CPU 缓冲区，报 "incorrect usage of CPU input buffer"。请对照 PyNvVideoCodec 自带的 GPU 输入编码示例（AppEncode 类示例中给帧对象实现 `cuda()` 的写法）确认。
+- **按顺序尝试，任意一种成功就停**：
+  1. 直接把解码得到的帧对象（已在原地合成）传给 `encoder.Encode(decoded)`；
+  2. 自己写一个包装类，实现 `cuda()`，返回 `[Y 平面, UV 平面]`，两个平面都带 CAI，Y 形状 `(H, W, 1)`，UV 形状 `(H/2, W/2, 2)`，strides 按实际 pitch 填；
+  3. 前两种都不行：退而求其次，用 `cp.asnumpy` 把合成后的 NV12 拷到页锁定内存，然后用 CPU 输入模式编码。这样会多一次显存到内存的下载，但没有管道和格式转换，CPU 预计仍然很低。记录这一路的 CPU 数据。
+- `Encode` 返回的码流写入 `.hevc` 文件，最后用 `ffmpeg -i out.hevc -i <源> -map 0:v -map 1:a -c copy` 封装成 mp4（帧率按 worker 的帧率设置）。输出放到 `perf/outputs/phase1a/normal_dense/<素材>/G_gpu_proto.mp4`，供用户观看（画面上只有压力测试的方块，属于正常现象）。
+- **顺手修正**：`width`/`height` 取自 `planes[0].shape`，而它的顺序是 (H, W, …)，竖屏素材的宽高被取反了，请改正；`ROOT = parents[1]` 指向的是 `DMR/`，不是仓库根目录，请改正 venv 的路径。
+- 结果追加到 `perf/results/phase1a.md`：完整链路（解码 + 合成 + 编码 + 封装）的墙钟时间、平均和峰值核数、核·秒、GPU/NVENC 占用，用 91 和 200 两档测试。完成后在 PR 下评论并停下。
+
 **1b：功能补全**
 - **普通弹幕也改成精灵**：根据 RenderPlan 中所有事件（包括原本走 libass 的 ass 模式事件）预先绘制精灵，彻底去掉 libass。文字绘制要尽量接近 libass 的效果（字体、字号、描边、阴影），用 E 的输出逐帧对比调整。
 - 在 GPU 上实现 VFR→CFR（按时间戳选帧或重复帧，与 ffmpeg 的 `fps=` 行为一致）、分辨率中途变化时的等比缩放加黑边补齐（与现有 `scale+pad` 一致）。
@@ -170,6 +183,7 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 
 - [x] 阶段 0：基线 → `perf/results/phase0.md`
 - [x] 阶段 0b：修正测量，重新挑选并分类素材，保留输出视频 → `perf/results/phase0b.md`
-- [ ] 阶段 1a：Python GPU 原型 → `perf/results/phase1a.md`
+- [ ] 阶段 1a：Python GPU 原型 → `perf/results/phase1a.md`（解码 + 合成已通过，待 1a-2 打通编码）
+- [ ] 阶段 1a-2：打通 NVENC，产出可播放视频
 - [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
 - [ ] 阶段 2：C++/libav + CUDA（按需）
