@@ -24,6 +24,8 @@ SPRITES_SPEC.loader.exec_module(SPRITES_MODULE)
 SpriteFactory = SPRITES_MODULE.SpriteFactory
 resolve_emoji_font = SPRITES_MODULE.resolve_emoji_font
 resolve_font = SPRITES_MODULE.resolve_font
+tokenize = SPRITES_MODULE.tokenize
+is_emoji = SPRITES_MODULE.is_emoji
 
 
 def parse_color(value: str, default: str = "FFFFFF") -> tuple[int, int, int]:
@@ -62,16 +64,44 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
             fill = parse_color(node.get("color", "#FFFFFF")) + (255,)
             x = int(node.get("x", 0))
             y = int(node.get("y", 0))
-            anchor = "ra" if node.get("anchor") == "top_right" else "la"
-            draw.text(
-                (x, y),
-                node.get("text", ""),
-                font=font,
-                fill=fill,
-                anchor=anchor,
-                stroke_width=max(0, int(node.get("outline", 0))),
-                stroke_fill=parse_color(node.get("outline_color", "#000000")) + (255,),
-            )
+            text = str(node.get("text", ""))
+            images = {}
+            for token, asset in (node.get("images") or {}).items():
+                if asset.get("path"):
+                    images[token.strip("[]").lower()] = asset["path"]
+            tokens = tokenize(text, images)
+            cursor = 0
+            token_widths = []
+            for kind, payload in tokens:
+                if kind == "png":
+                    with Image.open(payload).convert("RGBA") as source:
+                        ratio = int(node.get("size", 30)) / max(1, source.height)
+                        token_widths.append(max(1, int(round(source.width * ratio))))
+                elif kind == "emoji":
+                    emoji_font = ImageFont.truetype(resolve_emoji_font(None), int(node.get("size", 30)))
+                    token_widths.append(max(1, int(emoji_font.getlength(payload))))
+                else:
+                    token_widths.append(max(1, int(font.getlength(payload))))
+            total_width = sum(token_widths)
+            draw_x = x - total_width if node.get("anchor") == "top_right" else x
+            for (kind, payload), token_width in zip(tokens, token_widths):
+                if kind == "png":
+                    with Image.open(payload).convert("RGBA") as source:
+                        sprite = source.resize((token_width, int(node.get("size", 30))), Image.Resampling.LANCZOS)
+                    image.alpha_composite(sprite, (draw_x, y))
+                elif kind == "emoji":
+                    emoji_font = ImageFont.truetype(resolve_emoji_font(None), int(node.get("size", 30)))
+                    draw.text((draw_x, y), payload, font=emoji_font, fill=fill, embedded_color=True)
+                else:
+                    draw.text(
+                        (draw_x, y),
+                        payload,
+                        font=font,
+                        fill=fill,
+                        stroke_width=max(0, int(node.get("outline", 0))),
+                        stroke_fill=parse_color(node.get("outline_color", "#000000")) + (255,),
+                    )
+                draw_x += token_width
     return image
 
 

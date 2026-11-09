@@ -606,6 +606,7 @@ class LayoutCompiler:
                     slide_right_render,
                     panel_class="gift",
                     record=record,
+                    emoji_measurer=emoji_measurer,
                 )
                 new_panels[event_track].append(panel)
                 mark_accepted(event_track)
@@ -638,6 +639,7 @@ class LayoutCompiler:
                     slide_right_render,
                     panel_class="member",
                     record=record,
+                    emoji_measurer=emoji_measurer,
                 )
                 new_panels[event_track].append(panel)
                 mark_accepted(event_track)
@@ -657,6 +659,7 @@ class LayoutCompiler:
                     slide_left_render,
                     panel_class="superchat",
                     record=record,
+                    emoji_measurer=emoji_measurer,
                 )
                 new_panels[event_track].append(panel)
                 mark_accepted(event_track)
@@ -945,6 +948,7 @@ class LayoutCompiler:
         *,
         panel_class,
         record=None,
+        emoji_measurer=None,
     ):
         def panel_setting(key, default=None):
             # Event-level visual keys are accepted for legacy configurations;
@@ -994,6 +998,11 @@ class LayoutCompiler:
         content_outline = _pixels(panel_setting("content_border_width"), 1)
         name_outline_color = content_outline_color = "#000000"
 
+        def node_images(text_value):
+            if emoji_measurer is None:
+                return {}
+            return emoji_measurer.resolve_images(str(text_value or ""))
+
         nodes = [
             {
                 "type": "rect",
@@ -1038,6 +1047,7 @@ class LayoutCompiler:
                 "outline": name_outline,
                 "outline_color": name_outline_color,
                 "layer": 1,
+                "images": node_images(uname),
             },
         ]
         if price_text:
@@ -1055,6 +1065,7 @@ class LayoutCompiler:
                     "outline": name_outline,
                     "outline_color": name_outline_color,
                     "layer": 1,
+                    "images": node_images(price_text),
                 }
             )
         nodes.append(
@@ -1071,6 +1082,7 @@ class LayoutCompiler:
                 "outline": content_outline,
                 "outline_color": content_outline_color,
                 "layer": 1,
+                "images": node_images(content),
             }
         )
         visual = {

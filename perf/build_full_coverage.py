@@ -67,7 +67,7 @@ def synthetic_superchats(segment_start: float) -> list[dict]:
             "received_at": segment_start + 30 + index,
             "uid": f"synthetic-sc-{index}",
             "uname": "SC覆盖测试用户",
-            "content": f"覆盖SC{index + 1}",
+            "content": f"覆盖SC{index + 1}" + ("😀" if index == 0 else "[dog]" if index == 1 else ""),
             "price": int(price * 10),
             "price_unit": "电池",
             "price_cny": price,
