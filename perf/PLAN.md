@@ -244,6 +244,10 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 >   - (1) 换用底层 demuxer/decoder 后，91 档已经是 15.1 秒（E 为 24.2 秒，F 为 21.9 秒），速度已经达标，**并行化改为可选**：只有加上真实弹幕后慢于 E 时才做。每次运行都要按阶段 0b 的方式记录**进程树 CPU（平均/峰值核数、核·秒）和 GPU/NVENC/NVDEC 占用**（1b-0c 没有记录 CPU）。
 >   - (2) 用 RenderPlan 的**真实事件**替换合成方块：raster 事件复用 `emoji_render_mt.py` 里 `get_sprite` 的绘制逻辑（可以抽成公共函数），ass 事件先用 Pillow 按 RenderPlan 的字体、字号、颜色、描边画成精灵；精灵合成到一张图集里一次性上传；kernel 同时处理 Y 和 UV（UV 按 2×2 采样 alpha）；位置按 RenderPlan 的 path 插值。
 >   - 输出 `perf/outputs/phase1b/normal_dense/<素材>/G_gpu.mp4`，和 E 并排截取 5 张对比图（`perf/results/phase1b_shots/`，可以提交）。记录耗时和 CPU。
+> - **1b-2 的前置修复（用户反馈 + Claude 审查）**：
+>   - **GPU 版字体比旧版细，是 GPU 版的 bug**：旧版 ASS 的 R2L 样式是粗体（Bold=-1），libass 用的是 Microsoft YaHei **Bold**；`perf/prepare_gpu_plan.py` 却写死了常规体 `msyh.ttc`，字号也写死成 `60`，完全忽略了 RenderPlan 中每个事件 `style` 里的 `font`、`fontsize`。请改为**逐事件**读取 style 中的字体、字号、颜色、透明度、描边宽度和描边颜色，粗细按 ASS 样式（默认粗体）用 `sprites.resolve_font(family, bold)` 解析，不允许写死。
+>   - **PyAV 和 Pillow 直接装**：用户同意在 `perf/` 内建 Python 虚拟环境。只保留**一个** venv，装齐 cupy、PyNvVideoCodec、av、Pillow、numpy、psutil，去掉"DMR venv 预处理 + GPU venv 加载"的两段式流程，也去掉 ffprobe `avg_frame_rate` 兜底。
+> - **可调节（用户要求，作为验收标准）**：字体、字号、颜色、透明度、描边、弹幕速度（`screen_duration`）、间距（`vertical_gap`/`horizontal_gap`/边距）都必须能通过现有配置（`render_args.overlay` 的 `r2l`、`slide_left` 等）调节，GPU 版要和旧版一样跟随配置变化。原理：速度和间距在 `layout_compiler` 编译 RenderPlan 时就决定了，字体和颜色写在每个事件的 style 里，所以 GPU 版只要**完全按 RenderPlan 渲染、不写死任何样式**，就能自动跟随。验证方法：用两套不同的配置（例如字体换成另一种、字号 60→48、速度 8→12 秒、描边 1→3、颜色改一种）分别渲染同一段素材，旧版和 GPU 版的变化要一致，输出演示视频 `0X_1b-2_配置可调_…`。
 > - **1b-2：文字画质对齐**：逐帧对比 G 和 E 的输出，调整字体渲染（hinting、描边、阴影、透明度）；给出无弹幕区域的 PSNR 和弹幕区域的差异热力图；由用户目视确认。
 > - **1b-3：问题素材**：在 GPU 上实现 VFR→CFR 和分辨率中途变化时的缩放加黑边；跑通所有 `problem_*` 素材，输出视频供观看。
 > - **1b-4：接入 DMR**：新增 `engine: gpu_render` 配置，出错时自动回退到 `emoji_dmrender`；用全部 4 类素材做一次最终验收。
