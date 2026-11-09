@@ -248,6 +248,13 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 >   - **GPU 版字体比旧版细，是 GPU 版的 bug**：旧版 ASS 的 R2L 样式是粗体（Bold=-1），libass 用的是 Microsoft YaHei **Bold**；`perf/prepare_gpu_plan.py` 却写死了常规体 `msyh.ttc`，字号也写死成 `60`，完全忽略了 RenderPlan 中每个事件 `style` 里的 `font`、`fontsize`。请改为**逐事件**读取 style 中的字体、字号、颜色、透明度、描边宽度和描边颜色，粗细按 ASS 样式（默认粗体）用 `sprites.resolve_font(family, bold)` 解析，不允许写死。
 >   - **PyAV 和 Pillow 直接装**：用户同意在 `perf/` 内建 Python 虚拟环境。只保留**一个** venv，装齐 cupy、PyNvVideoCodec、av、Pillow、numpy、psutil，去掉"DMR venv 预处理 + GPU venv 加载"的两段式流程，也去掉 ffprobe `avg_frame_rate` 兜底。
 > - **可调节（用户要求，作为验收标准）**：字体、字号、颜色、透明度、描边、弹幕速度（`screen_duration`）、间距（`vertical_gap`/`horizontal_gap`/边距）都必须能通过现有配置（`render_args.overlay` 的 `r2l`、`slide_left` 等）调节，GPU 版要和旧版一样跟随配置变化。原理：速度和间距在 `layout_compiler` 编译 RenderPlan 时就决定了，字体和颜色写在每个事件的 style 里，所以 GPU 版只要**完全按 RenderPlan 渲染、不写死任何样式**，就能自动跟随。验证方法：用两套不同的配置（例如字体换成另一种、字号 60→48、速度 8→12 秒、描边 1→3、颜色改一种）分别渲染同一段素材，旧版和 GPU 版的变化要一致，输出演示视频 `0X_1b-2_配置可调_…`。
+> - **GPU 版绘制的完整性问题（Claude 审查 `prepare_gpu_plan.py`，1b-2 中必须修）**：GPU 版已经**完全不使用 libass**，所有事件都用 Pillow 画成精灵，再在 GPU 上叠加，这是正确的方向。但以下几处和旧版不一致：
+>   1. **VIP 药丸弹幕丢失了药丸**：RenderPlan 的 `visual["pill"]` 没有传给 `get_sprite(pill=...)`，所以只画出了文字。另外 `layout_compiler` 中 `is_raster = (self.engine == "emoji_dmrender" and pill is not None) or ...` 只认 `emoji_dmrender`，GPU 引擎（例如 `gpu_render`）也要包含进去。
+>   2. **SC、礼物、会员面板（`panel_sprite`）只画了圆角矩形和纯文字**，缺少：面板描边（`box_border_width`/`box_border_opacity`）、名字和内容的描边（`name_border_width`/`content_border_width`）、文字中的 Emoji 和表情包（应改用 `SpriteFactory` 绘制文字节点）、上下两色的处理是否和旧版一致。
+>   3. **进入和退出的淡入淡出**：旧版通过 `plan_ass._panel_fade` 在入场、退场、重排时做透明度渐变；GPU kernel 目前只用精灵自身固定的 alpha。需要在 RenderPlan 的 path 中（或者事件上）带上随时间变化的透明度，每帧按时间插值，作为每个活动事件的 opacity 参数传给 kernel。
+>   4. **面板绘制逻辑现在有两份**（`plan_ass.py` 的 ASS 绘图，和 `panel_sprite` 的 Pillow 绘图），以后改样式要改两处。建议把面板的 Pillow 绘制作为**唯一实现**，放进 `sprites.py`，让旧版 E 的面板也走 raster 路径（E 已经支持 raster 事件），这样两个渲染器的面板天然一致。是否这样改，请在汇报中给出评估（工作量、对 E 输出的影响）。
+>
+>   以上问题都要用 full_coverage 素材的**放大对比截图**逐项确认（VIP 药丸、SC 面板、礼物面板、入场和退场的中间帧）。
 > - **补充素材：覆盖全部弹幕类型（用户要求，1b-2 之前做）**：之前的演示视频里没有 SC、礼物、会员和 VIP 药丸弹幕，无法验证这些轨道。请重新挑选素材：
 >   - **搜索范围是整个 `Tasks` 文件夹**（不再限定于某几个主播目录），只用已经录完的文件。
 >   - 扫描 JSONL，按 60 秒滑动窗口统计 `superchat`、`gift`（价格要达到配置里的 `min_price_cny`）、`member`、带 Emoji 或表情包的普通弹幕，以及 **VIP 用户弹幕**的数量。选出**同时包含尽量多种类型**的窗口，截取以它为中心的 2 到 5 分钟。一段覆盖不全时，可以选 2 到 3 段互相补充。新素材放到 `perf/samples/full_coverage/`，并更新 `samples.md`，列出每段素材中各类事件的数量。
@@ -280,6 +287,39 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 
 触发条件（满足任意一条）：Python 版 CPU 无法达标；读文件或解码在问题素材上无法稳定处理；性能波动大。届时由 Claude 根据阶段 1 暴露的问题另写详细计划。思路是用 libavformat/libavcodec（NVDEC/NVENC）加 CUDA 混合 kernel 写成单个进程，Python 只负责传入 RenderPlan 和精灵。
 
+## 阶段 3：直播中途横竖屏切换的画布策略（最后做，GPU 渲染器接入 DMR 之后）
+
+**用户目标**：主播连麦等情况可能突然横竖屏切换，希望**尽量输出一个视频**；同时要考虑开播时分辨率不稳定，以及横竖屏的时长占比；有例外时可以分 P 上传。
+
+**现状和问题**（Claude 审查）：每个分段只在开始时探测一次直播流分辨率（`stream_downloader.py`），并据此决定整段的画布（`resolution.resolve_render_canvas`，`adaptive` 模式会参考上一段）；段内帧缩放加黑边到画布；`Merger.group_by_resolution` 把相邻同分辨率的段合并，不同的拆开，上传时分 P。问题在于：① 只看开头，开播时不稳定，或者开头横屏、后面一直竖屏，整段画布都会选错；② 没有时长占比信息；③ `adaptive` 的启发式规则是信息不足时的补救；④ 短暂的方向变化也会导致分 P。
+
+**方案**：
+1. **分辨率时间线**：每段渲染前，只读取关键帧的尺寸（`ffprobe -skip_frame nokey`，或者用 GPU demuxer 读取序列头），生成"时间区间 → 分辨率"的时间线。过滤噪声：**开头 `ignore_head_seconds`（默认 30 秒）不计入**；**短于 `min_span_seconds`（默认 60 秒）的片段不计入**。
+2. **段画布按时长占多数的方向决定**，少数方向的部分在段内缩放补黑边。时间线写入 `VideoInfo` 和会话记录，供合并时使用。
+3. **整场结束后决定输出一个视频还是分 P**：
+   - 所有段方向一致 → 合成一个视频；
+   - 少数方向的总时长 < `minority_ratio`（默认 15%）**或** < `minority_minutes`（默认 10 分钟）→ 把少数方向的段**按多数方向的画布用 GPU 重新渲染**，然后合成**一个视频**；
+   - 否则 → 按方向的连续区间**分 P**，按时间顺序排列。
+4. 所有阈值都做成配置；保留 `portrait`、`landscape` 强制选项以应对例外。确认新规则能覆盖之后，删除 `adaptive` 的启发式规则（遵守"删掉死代码"）。
+5. 验证：用 `problem_resolution` 素材和人为构造的时间线（开头不稳、短暂切换、长时间切换）覆盖三种结果，每种输出演示视频。
+
+开始前由 Claude 根据届时的代码再细化计划。
+
+## 阶段 4：连续送礼合并显示（最后做，阶段 3 之后）
+
+**用户需求**：同一个人在短时间内多次赠送同一种礼物（例如连送很多个 1 元礼物），应该合并显示为一个"送出 XX ×N"，而不是刷出一排礼物药丸。
+
+**现状**（Claude 查看）：`layout_compiler` 只用单条礼物自带的 `gift_count` 拼接 `×N` 后缀，**没有跨事件合并**；解析器已经取到了平台的连击字段（例如 B 站的 `combo_num`、`combo_id`），但还没有用来合并。
+
+**方案要点**（开始前由 Claude 再细化）：
+1. **合并键**：同一用户 + 同一礼物。平台提供 `combo_id` 时优先使用；否则按时间窗口合并：与上一条同键礼物间隔 ≤ `combo_window_seconds`（默认 10 秒，可配置）就并入同一组。
+2. **显示方式**（做成配置项）：
+   - `live`（默认）：药丸在第一次送礼时出现，数量 ×1→×2→…… 随后续送礼**实时累加**，显示时长从最后一次送礼开始重新计算，价格档按**累计金额**计算（颜色和时长随之升档）。实现方式：给每个数量状态各生成一张精灵，GPU 版只需在图集中切换，开销很小。
+   - `total`：只在第一次送礼时显示一个药丸，直接显示最终数量和总金额。
+3. **去重**：有的平台会对同一次连击同时下发"单次送礼"和"连击汇总"两种消息（之前用 `--dump-raw` 排查过礼物重复），合并时要避免重复计数。
+4. 旧渲染器 E 和 GPU 版都通过 RenderPlan 获得合并结果，合并逻辑只写一份，放在 `layout_compiler` 中。
+5. 验证：用真实的连击片段（必要时按补充规则构造），测试同一人连送、多人交替连送、间隔恰好在窗口边界上的情况，输出演示视频。
+
 ## 降噪（可与以上各阶段并行，可选）
 
 在 GPU 渲染器完成之前，可以先给现有渲染器加一个配置项：降低渲染子进程优先级（Windows 的 `BELOW_NORMAL_PRIORITY_CLASS`）和/或限制 CPU 亲和性（核数）。默认关闭，作为临时降噪手段。
@@ -299,3 +339,5 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - [x] 阶段 1b-1：真实 RenderPlan GPU 渲染与 CPU/GPU 验证 → perf/results/phase1b.md
 - [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
 - [ ] 阶段 2：C++/libav + CUDA（按需）
+- [ ] 阶段 3：横竖屏切换的画布策略（最后做）
+- [ ] 阶段 4：连续送礼合并显示（最后做）
