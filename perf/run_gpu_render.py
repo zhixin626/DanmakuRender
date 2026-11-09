@@ -10,6 +10,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SITE_PACKAGES = pathlib.Path(sys.executable).resolve().parent.parent / "Lib" / "site-packages"
+sys.path.insert(0, str(ROOT / "DMR" / "Render"))
 
 
 def configure_cuda_dlls() -> None:

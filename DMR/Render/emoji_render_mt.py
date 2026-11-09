@@ -31,6 +31,7 @@ from PIL import Image, ImageDraw, ImageFont
 try:
     from .plan_ass import render_plan_to_ass
     from .resolution import resolve_render_canvas
+    from .media import resolve_output_fps, source_frame_rate
     from .sprites import (
         DEFAULT_EMOJI_FONT,
         EMOTICON_PREFIX,
@@ -39,6 +40,7 @@ try:
         _STRIP,
         SpriteFactory,
         has_special,
+        is_emoji,
         load_pack,
         parse_pill,
         resolve_emoji_font,
@@ -47,6 +49,7 @@ try:
 except ImportError:
     from plan_ass import render_plan_to_ass
     from resolution import resolve_render_canvas
+    from media import resolve_output_fps, source_frame_rate
     from sprites import (
         DEFAULT_EMOJI_FONT,
         EMOTICON_PREFIX,
@@ -55,6 +58,7 @@ except ImportError:
         _STRIP,
         SpriteFactory,
         has_special,
+        is_emoji,
         load_pack,
         parse_pill,
         resolve_emoji_font,
@@ -81,19 +85,6 @@ def setup_log():
     log.addHandler(h)
     log.setLevel(logging.DEBUG)
     log.propagate = False
-
-
-def resolve_output_fps(source_fps, minimum_fps=None):
-    """Keep the source rate unless it is below the configured floor."""
-    source_fps = float(source_fps)
-    if not np.isfinite(source_fps) or source_fps <= 0:
-        raise ValueError("source fps must be a positive number")
-    if minimum_fps is None:
-        return source_fps
-    minimum_fps = float(minimum_fps)
-    if not np.isfinite(minimum_fps) or minimum_fps <= 0:
-        raise ValueError("minimum fps must be a positive number")
-    return max(source_fps, minimum_fps)
 
 
 def kill_tree(pid):
@@ -770,14 +761,8 @@ def main():
             height=H,
         )
         ass = generated_ass
-    # 输出帧率：取源的标称帧率(guessed_rate，干净的 60)而非 average_rate；
-    # --min-fps 表示最低帧率，只补低帧率源，不会把 60fps 源降成 30fps。
-    # (直播是可变帧率，average 会算成 62 这种)。配合解码滤镜里 fps 放在 subtitles 之前，
-    # 让 libass 在均匀的 CFR 时间轴上逐帧画弹幕 → 滚动弹幕顺滑，且几乎不增加耗时。
-    try:
-        source_fps = float(v.guessed_rate or v.average_rate)
-    except Exception:
-        source_fps = float(v.average_rate)
+    # Keep frame-rate selection identical between the old and GPU renderers.
+    source_fps = source_frame_rate(flv)
     minimum_fps = None
     if opt("--min-fps"):
         try:

@@ -274,5 +274,6 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - [x] 阶段 1a-2：打通 NVENC，产出可播放视频
 - [x] 阶段 1b-0：输出自检（经 1b-0b、1b-0c 修复：SimpleDecoder 在第 54 帧后重复返回同一帧，改用 CreateDemuxer + CreateDecoder）
 - [x] 阶段 1b-0c：定位并修复 SimpleDecoder 重复帧 → perf/results/phase1b0c.md
+- [x] 阶段 1b-1：真实 RenderPlan GPU 渲染与 CPU/GPU 验证 → perf/results/phase1b.md
 - [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
 - [ ] 阶段 2：C++/libav + CUDA（按需）
