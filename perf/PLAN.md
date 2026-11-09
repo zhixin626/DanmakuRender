@@ -198,6 +198,7 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 >   另外用 ffmpeg 对同一素材输出前 1000 帧的 Y 平面（`-f rawvideo -pix_fmt gray`），计算每帧校验值作为"正确答案"。找到能让 1000 帧都正常变化的变体后，把它接进 `run_full`，重新生成 91 档视频并按自检规则验证；如果 6 个变体都不行，就汇报并停下。结果写入 `perf/results/phase1b0c.md`。
 > - **1b-1：真实弹幕 + 流水线并行**
 >   - (0) **先整理 `gpu_render.py` 的结构**（Claude 代码审查意见，见 PR）：删除 `run_probe`、`apply_kernel` 和 SimpleDecoder 路径；拆成 `decode_frames()`（底层 demuxer + decoder，同时返回 pts）、`NV12Buffer`、`SpriteCompositor`（图集上传和 kernel 调用）、`encode_to_file()`、`mux_with_audio()` 五个部分，再加一个和 `EmojiDmRender.render_one` 参数一致的入口函数，方便 1b-4 接入 DMR；帧率和编码参数从源视频和配置中读取（复用 `resolve_output_fps`）；DLL 路径设置从 `DMR/` 移到 `perf/` 的启动脚本里。把 `get_sprite` 等绘制代码从 `emoji_render_mt.py` 抽到新的公共模块 `DMR/Render/sprites.py`，`emoji_render_mt.py` 改为从那里导入，确保旧渲染器的输出不变（用 E 重跑一次 normal_dense，对比截图）。
+>   - 第 (0) 步已完成：结构整理结果见 perf/results/phase1b1_0.md
 >   - (1) 换用底层 demuxer/decoder 后，91 档已经是 15.1 秒（E 为 24.2 秒，F 为 21.9 秒），速度已经达标，**并行化改为可选**：只有加上真实弹幕后慢于 E 时才做。每次运行都要按阶段 0b 的方式记录**进程树 CPU（平均/峰值核数、核·秒）和 GPU/NVENC/NVDEC 占用**（1b-0c 没有记录 CPU）。
 >   - (2) 用 RenderPlan 的**真实事件**替换合成方块：raster 事件复用 `emoji_render_mt.py` 里 `get_sprite` 的绘制逻辑（可以抽成公共函数），ass 事件先用 Pillow 按 RenderPlan 的字体、字号、颜色、描边画成精灵；精灵合成到一张图集里一次性上传；kernel 同时处理 Y 和 UV（UV 按 2×2 采样 alpha）；位置按 RenderPlan 的 path 插值。
 >   - 输出 `perf/outputs/phase1b/normal_dense/<素材>/G_gpu.mp4`，和 E 并排截取 5 张对比图（`perf/results/phase1b_shots/`，可以提交）。记录耗时和 CPU。
