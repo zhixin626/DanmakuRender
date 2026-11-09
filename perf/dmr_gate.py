@@ -34,11 +34,12 @@ QUIET_HOURS = range(4, 12)
 CHECK_MINUTES_QUIET = 10
 CHECK_MINUTES_BUSY = 30
 
-# If DMR is only recording (not rendering) we still accept the test once we
-# have waited this long without ever seeing DMR fully idle.
-ACCEPT_RECORDING_AFTER_HOURS = 2.0
-# ...and only if the machine is otherwise calm.
-MAX_BACKGROUND_CPU_PERCENT = 15.0
+# Recording alone is light, so testing during recording is fine. The real risk
+# is a 2-hour segment ending mid-test: DMR then starts rendering it. So we only
+# start when the current segment still has enough time left for one test run.
+SEGMENT_SECONDS = 7200          # download_args.live.segment in configs/global.yml
+DEFAULT_NEED_MINUTES = 40       # time one test run needs; override with --need-minutes
+MAX_BACKGROUND_CPU_PERCENT = 25.0
 
 RECORDER_NAMES = {"streamlink", "streamlink.exe", "streamgears", "streamgears.exe"}
 RENDER_SCRIPT_MARKERS = ("emoji_render_mt.py", "render_only.py", "merge_only.py")
@@ -79,9 +80,9 @@ def classify(proc: psutil.Process) -> str | None:
     return None
 
 
-def dmr_activity() -> dict[str, int]:
-    """Count DMR child processes by kind."""
-    counts = {"dmr_running": 0, "recording": 0, "rendering": 0}
+def dmr_activity() -> dict:
+    """Count DMR child processes by kind and remember when recorders started."""
+    counts = {"dmr_running": 0, "recording": 0, "rendering": 0, "recorder_started": []}
     for main in find_dmr_main():
         counts["dmr_running"] += 1
         try:
@@ -90,9 +91,27 @@ def dmr_activity() -> dict[str, int]:
             continue
         for child in children:
             kind = classify(child)
-            if kind:
-                counts[kind] += 1
+            if not kind:
+                continue
+            counts[kind] += 1
+            if kind == "recording":
+                try:
+                    counts["recorder_started"].append(child.create_time())
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
     return counts
+
+
+def minutes_to_next_segment(recorder_started: list[float]) -> float:
+    """Estimate minutes until the earliest recording reaches a segment boundary.
+
+    Assumes a segment boundary every SEGMENT_SECONDS after the recorder process
+    started. If DMR restarts the recorder for each segment this is exact; if it
+    keeps one process, the modulo still gives the right boundary.
+    """
+    now = time.time()
+    remaining = [SEGMENT_SECONDS - (now - start) % SEGMENT_SECONDS for start in recorder_started]
+    return min(remaining) / 60.0
 
 
 def waited_hours() -> float:
@@ -109,8 +128,9 @@ def remember_wait_start() -> None:
         WAIT_SINCE_FILE.write_text(str(time.time()))
 
 
-def decide() -> dict:
+def decide(need_minutes: float) -> dict:
     activity = dmr_activity()
+    recorder_started = activity.pop("recorder_started")
     now = dt.datetime.now()
     in_quiet_hours = now.hour in QUIET_HOURS
     result = {
@@ -126,13 +146,15 @@ def decide() -> dict:
         result.update(go=True, reason="DMR 空闲（未录制、未渲染）")
     else:
         background = psutil.cpu_percent(interval=10)
+        left = minutes_to_next_segment(recorder_started) if recorder_started else None
         result["background_cpu_percent"] = background
-        if result["waited_hours"] < ACCEPT_RECORDING_AFTER_HOURS:
-            result.update(go=False, reason="DMR 正在录制，继续等待完全空闲")
+        result["minutes_to_next_segment"] = None if left is None else round(left, 1)
+        if left is not None and left < need_minutes:
+            result.update(go=False, reason=f"录制分段约 {left:.0f} 分钟后结束，不够跑完测试，等这次渲染结束")
         elif background > MAX_BACKGROUND_CPU_PERCENT:
             result.update(go=False, reason="DMR 正在录制且后台 CPU 偏高")
         else:
-            result.update(go=True, reason="只有录制、后台平稳，已等待足够久")
+            result.update(go=True, reason="只在录制，离分段结束还有足够时间")
     if not result["go"]:
         remember_wait_start()
     return result
@@ -141,11 +163,13 @@ def decide() -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--reset", action="store_true", help="forget the waiting start time")
+    parser.add_argument("--need-minutes", type=float, default=DEFAULT_NEED_MINUTES,
+                        help="how long the planned test run takes (minutes)")
     args = parser.parse_args()
     if args.reset:
         WAIT_SINCE_FILE.unlink(missing_ok=True)
         return 0
-    result = decide()
+    result = decide(args.need_minutes)
     line = json.dumps(result, ensure_ascii=False)
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOG_FILE.open("a", encoding="utf-8") as log:
