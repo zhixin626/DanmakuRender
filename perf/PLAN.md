@@ -252,7 +252,8 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 >   1. **VIP 药丸弹幕丢失了药丸**：RenderPlan 的 `visual["pill"]` 没有传给 `get_sprite(pill=...)`，所以只画出了文字。另外 `layout_compiler` 中 `is_raster = (self.engine == "emoji_dmrender" and pill is not None) or ...` 只认 `emoji_dmrender`，GPU 引擎（例如 `gpu_render`）也要包含进去。
 >   2. **SC、礼物、会员面板（`panel_sprite`）只画了圆角矩形和纯文字**，缺少：面板描边（`box_border_width`/`box_border_opacity`）、名字和内容的描边（`name_border_width`/`content_border_width`）、文字中的 Emoji 和表情包（应改用 `SpriteFactory` 绘制文字节点）、上下两色的处理是否和旧版一致。
 >   3. **进入和退出的淡入淡出**：旧版通过 `plan_ass._panel_fade` 在入场、退场、重排时做透明度渐变；GPU kernel 目前只用精灵自身固定的 alpha。需要在 RenderPlan 的 path 中（或者事件上）带上随时间变化的透明度，每帧按时间插值，作为每个活动事件的 opacity 参数传给 kernel。
->   4. **面板绘制逻辑现在有两份**（`plan_ass.py` 的 ASS 绘图，和 `panel_sprite` 的 Pillow 绘图），以后改样式要改两处。建议把面板的 Pillow 绘制作为**唯一实现**，放进 `sprites.py`，让旧版 E 的面板也走 raster 路径（E 已经支持 raster 事件），这样两个渲染器的面板天然一致。是否这样改，请在汇报中给出评估（工作量、对 E 输出的影响）。
+>   4. **旧版 E 不再改动（用户决定）**：GPU 版稳定后会成为主力，E 只作为没有 NVIDIA 显卡或 GPU 出错时的备用方案。因此**不把 E 的面板改成 Pillow**（那样会让 E 的 Python 逐帧合成多出大块面板，CPU 更高，也没有必要）。约定：**Pillow 版（GPU）是面板绘制的唯一"新功能"实现**，后续新增的样式和功能（例如 SC 和礼物中的 Emoji、阶段 4 的连击累加）只做在 GPU 版；E 冻结在现状，`plan_ass.py` 的面板代码不再扩展。在 `gpu_render.py` 和 `emoji_dmrender.py` 的模块说明中写明这一点。
+>   5. **SC、礼物、会员面板支持 Emoji 和表情包（用户要求）**：SC 内容、用户名、礼物模板文字中的 Unicode Emoji 和平台表情（`[xxx]`），都要用 `SpriteFactory` 的 tokenize 逻辑绘制（彩色 Emoji 字体加表情包图片），和普通弹幕一致；行高和基线要对齐，不能把面板撑变形。full_coverage 素材里如果没有带 Emoji 的 SC，就按补充规则改写 1 到 2 条。
 >
 >   以上问题都要用 full_coverage 素材的**放大对比截图**逐项确认（VIP 药丸、SC 面板、礼物面板、入场和退场的中间帧）。
 > - **补充素材：覆盖全部弹幕类型（用户要求，1b-2 之前做）**：之前的演示视频里没有 SC、礼物、会员和 VIP 药丸弹幕，无法验证这些轨道。请重新挑选素材：
