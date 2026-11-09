@@ -16,7 +16,7 @@ PYTHON = ROOT / "perf" / "venv" / "Scripts" / "python.exe"
 LAUNCHER = ROOT / "perf" / "run_gpu_render.py"
 VIDEO = ROOT / "perf" / "samples" / "normal_dense" / "normal_dense_peak_7月30日20点23分" / "7月30日20点23分_clip.flv"
 PLAN = VIDEO.parent / "render_plan.json"
-SPRITES = ROOT / "perf" / "tmp" / "phase1b"
+SPRITES = ROOT / "perf" / "tmp" / "phase1b_unified"
 OUTPUT = ROOT / "perf" / "outputs" / "phase1b" / "normal_dense" / "normal_dense_peak_7月30日20点23分" / "G_gpu.mp4"
 
 
