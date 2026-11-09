@@ -1,0 +1,46 @@
+{
+  "times": [
+    {
+      "seconds": 30.0,
+      "baseline_psnr_db_no_event": 35.88944355167034,
+      "baseline_mad": 6.273713111877441,
+      "config_change_mad_e": 10.416265487670898,
+      "config_change_mad_g": 10.012838363647461,
+      "variant_psnr_db_no_event": 22.711674292214916
+    },
+    {
+      "seconds": 90.0,
+      "baseline_psnr_db_no_event": 33.582098663328075,
+      "baseline_mad": 8.113892555236816,
+      "config_change_mad_e": 16.242284774780273,
+      "config_change_mad_g": 13.974020004272461,
+      "variant_psnr_db_no_event": 18.262211342241095
+    },
+    {
+      "seconds": 150.0,
+      "baseline_psnr_db_no_event": 34.65836577072351,
+      "baseline_mad": 7.876188278198242,
+      "config_change_mad_e": 10.721155166625977,
+      "config_change_mad_g": 9.894954681396484,
+      "variant_psnr_db_no_event": 24.762291500050804
+    },
+    {
+      "seconds": 210.0,
+      "baseline_psnr_db_no_event": 35.50030889905392,
+      "baseline_mad": 6.164491176605225,
+      "config_change_mad_e": 11.465559005737305,
+      "config_change_mad_g": 8.80146598815918,
+      "variant_psnr_db_no_event": 19.763652656594967
+    },
+    {
+      "seconds": 270.0,
+      "baseline_psnr_db_no_event": 33.52946855401733,
+      "baseline_mad": 6.397593975067139,
+      "config_change_mad_e": 10.05031681060791,
+      "config_change_mad_g": 8.15280818939209,
+      "variant_psnr_db_no_event": 21.844793935504395
+    }
+  ],
+  "baseline_mean_psnr_db": 34.63193708775864,
+  "variant_mean_psnr_db": 21.46892474532124
+}
