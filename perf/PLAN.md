@@ -177,7 +177,7 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 >
 >   另外用 ffmpeg 对同一素材输出前 1000 帧的 Y 平面（`-f rawvideo -pix_fmt gray`），计算每帧校验值作为"正确答案"。找到能让 1000 帧都正常变化的变体后，把它接进 `run_full`，重新生成 91 档视频并按自检规则验证；如果 6 个变体都不行，就汇报并停下。结果写入 `perf/results/phase1b0c.md`。
 > - **1b-1：真实弹幕 + 流水线并行**
->   - (1) 解码和编码重叠执行：1a-2 中 NVENC 和 NVDEC 的利用率都只有约 30%，墙钟时间 24.2 秒，相当于解码时间加编码时间串行累加。用两个线程（或 CUDA stream）加一个有界队列，让解码、合成、编码重叠起来，目标 ≤ 15 秒。注意帧对象的生命周期：帧在编码完成之前不能被解码器复用。
+>   - (1) 换用底层 demuxer/decoder 后，91 档已经是 15.1 秒（E 为 24.2 秒，F 为 21.9 秒），速度已经达标，**并行化改为可选**：只有加上真实弹幕后慢于 E 时才做。每次运行都要按阶段 0b 的方式记录**进程树 CPU（平均/峰值核数、核·秒）和 GPU/NVENC/NVDEC 占用**（1b-0c 没有记录 CPU）。
 >   - (2) 用 RenderPlan 的**真实事件**替换合成方块：raster 事件复用 `emoji_render_mt.py` 里 `get_sprite` 的绘制逻辑（可以抽成公共函数），ass 事件先用 Pillow 按 RenderPlan 的字体、字号、颜色、描边画成精灵；精灵合成到一张图集里一次性上传；kernel 同时处理 Y 和 UV（UV 按 2×2 采样 alpha）；位置按 RenderPlan 的 path 插值。
 >   - 输出 `perf/outputs/phase1b/normal_dense/<素材>/G_gpu.mp4`，和 E 并排截取 5 张对比图（`perf/results/phase1b_shots/`，可以提交）。记录耗时和 CPU。
 > - **1b-2：文字画质对齐**：逐帧对比 G 和 E 的输出，调整字体渲染（hinting、描边、阴影、透明度）；给出无弹幕区域的 PSNR 和弹幕区域的差异热力图；由用户目视确认。
@@ -208,7 +208,7 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - [x] 阶段 0b：修正测量，重新挑选并分类素材，保留输出视频 → `perf/results/phase0b.md`
 - [x] 阶段 1a：Python GPU 原型 → `perf/results/phase1a.md`（解码、合成和 NVENC 闭环已通过）
 - [x] 阶段 1a-2：打通 NVENC，产出可播放视频
-- [ ] 阶段 1b-0：验证 1a-2 输出自检（1b-0、1b-0b 均未通过：输出画面静止；1b-0c 定位解码器问题）
+- [x] 阶段 1b-0：输出自检（经 1b-0b、1b-0c 修复：SimpleDecoder 在第 54 帧后重复返回同一帧，改用 CreateDemuxer + CreateDecoder）
 - [x] 阶段 1b-0c：定位并修复 SimpleDecoder 重复帧 → perf/results/phase1b0c.md
 - [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
 - [ ] 阶段 2：C++/libav + CUDA（按需）
