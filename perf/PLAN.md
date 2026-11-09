@@ -167,6 +167,15 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 >
 > - **1b-0（先做，≤ 30 分钟）：验证 1a-2 的花屏修复**。1a-2 的输出视频花屏（斜切条纹）而且没有声音。Claude 已修复 `gpu_render.py`（提交见 PR 评论）：宽高读取错误（CAI shape 是 (H, W)，竖屏被当成横屏）、行跨距被写死成 width（NVDEC 表面的 pitch 通常更大）、音频映射改为必选 `-map 1:a`。请重新跑 91 档，按上面的自检规则验证；如果仍然没有声音，用 ffprobe 检查截取的素材本身有没有音频流。
 > - **1b-0b（≤ 30 分钟）：修复"整段都是同一帧"**。1b-0 的视频有声音，但画面始终是同一帧（三张截图像素差为 0）。Claude 已修改 `gpu_render.py`：改为把每个解码帧拷贝到我们自己持有的固定 NV12 缓冲区（`NV12Buffer`），在缓冲区上合成，再交给 NVENC；同时记录解码帧的校验值（`decoded_signatures`）。请重新跑 91 档：若 `decoded_frames_change` 为 false，说明是解码器的问题（例如 `get_batch_frames` 一直返回同一帧），请在 PR 里汇报，不要继续；若为 true 而输出仍是静止画面，同样汇报。按更新后的自检规则验证（含截图像素差）。
+> - **1b-0c（≤ 45 分钟）：定位"解码器在约第 60 帧后停止变化"**。1b-0b 的数据显示：`decoded_signatures` 只有前 6 个采样（约前 60 帧）在变，之后保持不变；输出从 10% 起就几乎不动（10%→50% 平均差 0.03）。所以问题出在**解码端**，不在编码端（`decoded_frames_change=true` 只说明"至少变过一次"，不能说明解码正常）。请写一个**只解码**的脚本 `perf/diag_decoder.py`，不编码，对每一帧记录 Y 平面的全图校验值（`cp.sum`）以及帧对象上能拿到的时间戳或 pts，输出"最后一次变化发生在第几帧"。依次试以下变体，**每个变体只跑前 1000 帧**，汇总成表：
+>   1. 现状：`SimpleDecoder(use_device_memory=True, need_scanned_stream_metadata=False)`，`get_batch_frames(16)`；
+>   2. 改成 `get_batch_frames(1)`；
+>   3. 在 `get_batch_frames` 之后、拷贝之前，调用 `cp.cuda.runtime.deviceSynchronize()`；
+>   4. `need_scanned_stream_metadata=True`；
+>   5. `use_device_memory=False`（帧返回到内存），看 CPU 侧的数据是否在变；
+>   6. 改用 PyNvVideoCodec 的底层接口：`CreateDemuxer` + `CreateDecoder`，按 `demuxer → packet → decoder.Decode(packet)` 的方式解码（官方示例的写法）。
+>
+>   另外用 ffmpeg 对同一素材输出前 1000 帧的 Y 平面（`-f rawvideo -pix_fmt gray`），计算每帧校验值作为"正确答案"。找到能让 1000 帧都正常变化的变体后，把它接进 `run_full`，重新生成 91 档视频并按自检规则验证；如果 6 个变体都不行，就汇报并停下。结果写入 `perf/results/phase1b0c.md`。
 > - **1b-1：真实弹幕 + 流水线并行**
 >   - (1) 解码和编码重叠执行：1a-2 中 NVENC 和 NVDEC 的利用率都只有约 30%，墙钟时间 24.2 秒，相当于解码时间加编码时间串行累加。用两个线程（或 CUDA stream）加一个有界队列，让解码、合成、编码重叠起来，目标 ≤ 15 秒。注意帧对象的生命周期：帧在编码完成之前不能被解码器复用。
 >   - (2) 用 RenderPlan 的**真实事件**替换合成方块：raster 事件复用 `emoji_render_mt.py` 里 `get_sprite` 的绘制逻辑（可以抽成公共函数），ass 事件先用 Pillow 按 RenderPlan 的字体、字号、颜色、描边画成精灵；精灵合成到一张图集里一次性上传；kernel 同时处理 Y 和 UV（UV 按 2×2 采样 alpha）；位置按 RenderPlan 的 path 插值。
@@ -199,6 +208,6 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - [x] 阶段 0b：修正测量，重新挑选并分类素材，保留输出视频 → `perf/results/phase0b.md`
 - [x] 阶段 1a：Python GPU 原型 → `perf/results/phase1a.md`（解码、合成和 NVENC 闭环已通过）
 - [x] 阶段 1a-2：打通 NVENC，产出可播放视频
-- [x] 阶段 1b-0：验证 1a-2 输出自检 → perf/results/phase1b0.md
+- [ ] 阶段 1b-0：验证 1a-2 输出自检（1b-0、1b-0b 均未通过：输出画面静止；1b-0c 定位解码器问题）
 - [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
 - [ ] 阶段 2：C++/libav + CUDA（按需）
