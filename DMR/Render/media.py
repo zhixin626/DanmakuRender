@@ -6,7 +6,7 @@ import math
 
 
 def resolve_output_fps(source_fps: float, minimum_fps: float | None = None) -> float:
-    """Keep the source rate unless a configured minimum is higher."""
+    """Return the smallest integer multiple of the source rate meeting minimum."""
     source_fps = float(source_fps)
     if not math.isfinite(source_fps) or source_fps <= 0:
         raise ValueError("source fps must be a positive number")
@@ -15,7 +15,8 @@ def resolve_output_fps(source_fps: float, minimum_fps: float | None = None) -> f
     minimum_fps = float(minimum_fps)
     if not math.isfinite(minimum_fps) or minimum_fps <= 0:
         raise ValueError("minimum fps must be a positive number")
-    return max(source_fps, minimum_fps)
+    multiplier = max(1, math.ceil(minimum_fps / source_fps - 1e-9))
+    return source_fps * multiplier
 
 
 def source_frame_rate(video_path: str) -> float:

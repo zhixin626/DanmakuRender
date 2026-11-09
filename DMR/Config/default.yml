@@ -349,7 +349,8 @@ render_args:
 
     # 以下参数只供 emoji_dmrender 使用
     # 最低输出帧率；低于该值时补帧后逐帧渲染弹幕，高于该值时保持源帧率；~ 表示完全跟随源
-    min_fps: 30
+    # Minimum output fps; the renderer raises the source rate to an integer multiple.
+    min_fps: 50
     # 表情包目录；留空时按 JSONL 平台使用 ./emoji_pack/<platform>
     emoji_pack: ~
     # Pillow 绘制表情弹幕使用的字体；留空时自动选择

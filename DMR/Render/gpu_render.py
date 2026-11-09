@@ -142,6 +142,20 @@ def probe_source_fps(video: pathlib.Path) -> float:
     return source_frame_rate(str(video))
 
 
+def probe_source_duration(video: pathlib.Path) -> float:
+    """Read the source timeline duration for CFR tail padding."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", str(video),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return float(result.stdout.strip())
+
+
 def codec_name(video_encoder: str) -> str:
     """Convert an FFmpeg NVENC name into PyNvVideoCodec's codec name."""
     return video_encoder.removesuffix("_nvenc")
@@ -179,6 +193,39 @@ def decode_frames(video: pathlib.Path, nvc: Any, gpu_id: int) -> Iterator[tuple[
     for packet in demuxer:
         for decoded in decoder.Decode(packet):
             yield decoded, float(decoded.getPTS()) * time_base
+
+
+def cfr_frames(
+    decoded: Iterator[tuple[Any, float]],
+    first: tuple[Any, float],
+    output_fps: float,
+) -> tuple[tuple[Any, float], Iterator[tuple[Any, float]]]:
+    """Map decoded frames onto an output timeline without buffering the video."""
+    first_frame, first_pts = first
+    next_item = None
+    current = first_frame
+    last_relative = 0.0
+
+    def generate() -> Iterator[tuple[Any, float]]:
+        nonlocal current, next_item, last_relative
+        next_item = next(decoded, None)
+        frame_index = 1
+        while True:
+            target = frame_index / output_fps
+            while next_item is not None:
+                next_frame, next_pts = next_item
+                relative = max(0.0, next_pts - first_pts)
+                if relative > target:
+                    break
+                current = next_frame
+                last_relative = relative
+                next_item = next(decoded, None)
+            if next_item is None and target > last_relative + (0.5 / output_fps):
+                break
+            yield current, first_pts + target
+            frame_index += 1
+
+    return (first_frame, first_pts), generate()
 
 
 def frame_geometry(decoded: Any) -> tuple[int, int]:
@@ -379,6 +426,8 @@ def encode_to_file(
     geometry: tuple[int, int],
     frame_rate: float,
     config: RenderConfig,
+    source_frame_rate: float | None = None,
+    target_duration: float | None = None,
 ) -> dict[str, Any]:
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
@@ -401,18 +450,56 @@ def encode_to_file(
     frame_count = 0
     started = time.perf_counter()
     with bitstream.open("wb") as stream:
-        for decoded, pts in itertools.chain((first,), frames):
-            buffer.load(decoded)
-            if frame_count < 200 and frame_count % 10 == 0:
-                signatures.append(frame_signature(cupy, buffer))
-            relative_pts = max(0.0, pts - first_pts)
-            frame_time = frame_count / frame_rate
-            active_counts.append(compositor.apply(buffer, frame_time))
-            for packet in encoder.Encode(buffer):
-                stream.write(packet["data"])
-            frame_count += 1
-            if config.max_frames is not None and frame_count >= config.max_frames:
-                break
+        if source_frame_rate and frame_rate > source_frame_rate + 1e-6:
+            raw_current = first
+            source_buffer = NV12Buffer(cupy, width, height)
+            while raw_current is not None:
+                decoded, pts = raw_current
+                source_buffer.load(decoded)
+                next_item = next(frames, None)
+                if next_item is None:
+                    repeats = 1
+                else:
+                    next_pts = max(0.0, next_item[1] - first_pts)
+                    current_pts = max(0.0, pts - first_pts)
+                    repeats = max(1, int(round((next_pts - current_pts) * frame_rate)))
+                for _ in range(repeats):
+                    buffer.buffer[...] = source_buffer.buffer
+                    if frame_count < 200 and frame_count % 10 == 0:
+                        signatures.append(frame_signature(cupy, buffer))
+                    relative_pts = max(0.0, pts - first_pts)
+                    frame_time = frame_count / frame_rate
+                    active_counts.append(compositor.apply(buffer, frame_time))
+                    for packet in encoder.Encode(buffer):
+                        stream.write(packet["data"])
+                    frame_count += 1
+                    if config.max_frames is not None and frame_count >= config.max_frames:
+                        break
+                if config.max_frames is not None and frame_count >= config.max_frames:
+                    break
+                raw_current = next_item
+            if target_duration and frame_rate > (source_frame_rate or 0):
+                while frame_count / frame_rate < target_duration - 1e-6:
+                    buffer.buffer[...] = source_buffer.buffer
+                    relative_pts = max(0.0, target_duration - (1.0 / frame_rate))
+                    frame_time = frame_count / frame_rate
+                    active_counts.append(compositor.apply(buffer, frame_time))
+                    for packet in encoder.Encode(buffer):
+                        stream.write(packet["data"])
+                    frame_count += 1
+        else:
+            for decoded, pts in itertools.chain((first,), frames):
+                buffer.load(decoded)
+                if frame_count < 200 and frame_count % 10 == 0:
+                    signatures.append(frame_signature(cupy, buffer))
+                relative_pts = max(0.0, pts - first_pts)
+                frame_time = frame_count / frame_rate
+                active_counts.append(compositor.apply(buffer, frame_time))
+                for packet in encoder.Encode(buffer):
+                    stream.write(packet["data"])
+                frame_count += 1
+                if config.max_frames is not None and frame_count >= config.max_frames:
+                    break
         for packet in encoder.EndEncode():
             stream.write(packet["data"])
     elapsed = time.perf_counter() - started
@@ -483,6 +570,8 @@ def render_one(video: Any, output: str, progress_cb: Any = None, **kwargs: Any) 
     frame_rate = config.fps or resolve_output_fps(probe_source_fps(source), config.minimum_fps)
     decoded = decode_frames(source, nvc, config.gpu_id)
     first = next(decoded)
+    source_fps = probe_source_fps(source)
+    source_duration = probe_source_duration(source)
     width, height = frame_geometry(first[0])
     bitstream = destination.with_suffix(".hevc")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -495,6 +584,8 @@ def render_one(video: Any, output: str, progress_cb: Any = None, **kwargs: Any) 
         (width, height),
         frame_rate,
         config,
+        source_frame_rate=source_fps,
+        target_duration=source_duration,
     )
     mux_with_audio(bitstream, source, destination, frame_rate)
     result.update({"video": str(source), "output": str(destination), "width": width, "height": height, "frame_rate": frame_rate})
