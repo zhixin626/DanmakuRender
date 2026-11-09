@@ -50,3 +50,10 @@
 - 合成事件：6 个 handwritten SC，价格 0.5/5/20/75/300/1200 元，在 30–35 秒内密集进入；0.5 元至 30 秒档先退出，验证 slide_left reflow、重叠进出和六档颜色/时长。
 - 合成事件：6 个 handwritten 礼物，价格 0.5/5/20/75/300/1200 元，集中在片段 20–25 秒；0.5 元礼物低于 slide_right.gift.min_price_cny=1，预期不显示。
 - 合成事件：2 个 modified 会员，22s 和 24s，与礼物同段进入，验证 slide_right 共用队列。
+
+## final_2h/少年不太冷 11月9日14点20分
+- 原始视频：D:\DanmakuRender\Tasks文件\少年不太冷\11月9日14点20分.flv
+- 原始弹幕：D:\DanmakuRender\Tasks文件\少年不太冷\11月9日14点20分.jsonl
+- 隔离副本：D:\DanmakuRender-perf\perf\samples\final_2h; 增强弹幕：D:\DanmakuRender-perf\perf\samples\final_2h\少年不太冷_11月9日14点20分_augmented.jsonl; 类型统计：{'danmaku': 885, 'gift': 97, 'superchat': 36, 'member': 12}
+- 合成事件：每 20 分钟一批，SC/礼物各六档价格、会员共用 slide_right、VIP 药丸和 Emoji；0.5 元礼物按 min_price_cny=1 预期不显示。
+- 三层配置副本：D:\DanmakuRender-perf\perf\tmp\final_2h_config；任务配置保留正式 VIP 用户 187495453/199828655/9881469。
