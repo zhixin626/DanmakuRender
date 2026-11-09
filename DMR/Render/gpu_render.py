@@ -116,7 +116,8 @@ def run_full(video, sprites, max_frames, output):
             fp.write(packet["data"])
     wall = time.perf_counter() - started
     mux = ["ffmpeg", "-v", "error", "-y", "-nostdin", "-f", "hevc", "-r", "25", "-i", str(bitstream),
-           "-i", str(video), "-map", "0:v:0", "-map", "1:a", "-c:v", "copy", "-c:a", "copy", "-shortest", str(output)]
+           "-i", str(video), "-map", "0:v:0", "-map", "1:a", "-c:v", "copy", "-c:a", "copy",
+           "-t", f"{frames / 25.0:.6f}", str(output)]
     mux_run = subprocess.run(mux, capture_output=True, text=True)
     if mux_run.returncode:
         raise RuntimeError(mux_run.stderr[-1000:])

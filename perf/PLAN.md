@@ -198,5 +198,6 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - [x] 阶段 0b：修正测量，重新挑选并分类素材，保留输出视频 → `perf/results/phase0b.md`
 - [x] 阶段 1a：Python GPU 原型 → `perf/results/phase1a.md`（解码、合成和 NVENC 闭环已通过）
 - [x] 阶段 1a-2：打通 NVENC，产出可播放视频
+- [x] 阶段 1b-0：验证 1a-2 输出自检 → perf/results/phase1b0.md
 - [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
 - [ ] 阶段 2：C++/libav + CUDA（按需）
