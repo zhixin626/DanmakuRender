@@ -140,7 +140,10 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 **1a：原型（只验证性能，不管画质）**
 - 链路：PyNvVideoCodec 解码，帧留在显存（NV12）→ 用 CuPy 的 RawKernel 把若干张 RGBA 精灵按坐标和 alpha 混合到 NV12 上 → PyNvVideoCodec 编码，使用 HEVC 和 4M 码率，参数与 E 一致 → 封装输出。音频直接复制。
 - 精灵在开始时一次性上传到显存；每帧在 CPU 上只计算活动事件的坐标（用扫描线，不遍历全部事件）。
-- 用 `normal_dense` 素材，以真实 RenderPlan 里的 raster 事件作为精灵，测墙钟时间、CPU（按进程拆分）、GPU 占用（`nvidia-smi dmon` 采样）。
+- 用 `normal_dense` 素材，**以 RenderPlan 里的全部事件（raster 和 ass）都当作精灵**（文字可以先用 Pillow 简单画，不求一致），测墙钟时间、CPU（按进程拆分）、GPU 占用（`nvidia-smi dmon` 采样）。
+- **压力测试**：现有素材的 Emoji 都不密集，因此额外用同一视频叠加合成精灵：同屏 50 个和 200 个、尺寸 300×60、从右向左滚动，各测一次，看 CPU 和速度是否随同屏数量明显上升。
+- 对比对象：阶段 0b 中 `normal_dense` 的 E（24.2 秒，3.47 核，84.6 核·秒）和 F（21.9 秒，1.55 核，33.8 核·秒）。
+- 时间控制：每项只跑 1 次，背景采样 10 秒；只要原型能跑通并拿到上面三组数字，就停下汇报，**总时长不超过 2 小时**。如果卡在依赖安装或接口问题上超过 1 小时，就在 PR 里说明卡点并停下。
 - 如果 PyNvVideoCodec 自带的读文件功能处理不了直播 flv（损坏包、时间戳），改为由 ffmpeg 负责读文件和拆包（`-c:v copy -f hevc/h264 -` 输出压缩码流），再交给 PyNvVideoCodec 解码。
 - **输出**：`perf/results/phase1a.md`。然后停下，由 Claude 判断是否继续。
 
