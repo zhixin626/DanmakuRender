@@ -252,7 +252,8 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 >   1. **VIP 药丸弹幕丢失了药丸**：RenderPlan 的 `visual["pill"]` 没有传给 `get_sprite(pill=...)`，所以只画出了文字。另外 `layout_compiler` 中 `is_raster = (self.engine == "emoji_dmrender" and pill is not None) or ...` 只认 `emoji_dmrender`，GPU 引擎（例如 `gpu_render`）也要包含进去。
 >   2. **SC、礼物、会员面板（`panel_sprite`）只画了圆角矩形和纯文字**，缺少：面板描边（`box_border_width`/`box_border_opacity`）、名字和内容的描边（`name_border_width`/`content_border_width`）、文字中的 Emoji 和表情包（应改用 `SpriteFactory` 绘制文字节点）、上下两色的处理是否和旧版一致。
 >   3. **进入和退出的淡入淡出**：旧版通过 `plan_ass._panel_fade` 在入场、退场、重排时做透明度渐变；GPU kernel 目前只用精灵自身固定的 alpha。需要在 RenderPlan 的 path 中（或者事件上）带上随时间变化的透明度，每帧按时间插值，作为每个活动事件的 opacity 参数传给 kernel。
->   4. **面板绘制逻辑现在有两份**（`plan_ass.py` 的 ASS 绘图，和 `panel_sprite` 的 Pillow 绘图），以后改样式要改两处。建议把面板的 Pillow 绘制作为**唯一实现**，放进 `sprites.py`，让旧版 E 的面板也走 raster 路径（E 已经支持 raster 事件），这样两个渲染器的面板天然一致。是否这样改，请在汇报中给出评估（工作量、对 E 输出的影响）。
+>   4. **旧版 E 不再改动（用户决定）**：GPU 版稳定后会成为主力，E 只作为没有 NVIDIA 显卡或 GPU 出错时的备用方案。因此**不把 E 的面板改成 Pillow**（那样会让 E 的 Python 逐帧合成多出大块面板，CPU 更高，也没有必要）。约定：**Pillow 版（GPU）是面板绘制的唯一"新功能"实现**，后续新增的样式和功能（例如 SC 和礼物中的 Emoji、阶段 4 的连击累加）只做在 GPU 版；E 冻结在现状，`plan_ass.py` 的面板代码不再扩展。在 `gpu_render.py` 和 `emoji_dmrender.py` 的模块说明中写明这一点。
+>   5. **SC、礼物、会员面板支持 Emoji 和表情包（用户要求）**：SC 内容、用户名、礼物模板文字中的 Unicode Emoji 和平台表情（`[xxx]`），都要用 `SpriteFactory` 的 tokenize 逻辑绘制（彩色 Emoji 字体加表情包图片），和普通弹幕一致；行高和基线要对齐，不能把面板撑变形。full_coverage 素材里如果没有带 Emoji 的 SC，就按补充规则改写 1 到 2 条。
 >
 >   以上问题都要用 full_coverage 素材的**放大对比截图**逐项确认（VIP 药丸、SC 面板、礼物面板、入场和退场的中间帧）。
 > - **补充素材：覆盖全部弹幕类型（用户要求，1b-2 之前做）**：之前的演示视频里没有 SC、礼物、会员和 VIP 药丸弹幕，无法验证这些轨道。请重新挑选素材：
@@ -282,6 +283,14 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - 接入 `emoji_dmrender` 的配置：新增 `engine: gpu_render`，或者用开关控制；出错时自动回退。
 - 用全部素材分类测试，输出视频供用户观看；画质对比脚本输出 PSNR 和差异热力图截图。
 - **输出**：`perf/results/phase1b.md`，并在 PR 下评论，附上输出视频的路径。
+
+## 阶段 1c：两小时真实录播最终验收（1b-4 完成后做）
+
+- **素材**：从 `Tasks` 中找一段**最近产生、已经录完、约 2 小时**的真实录制分段（正常 1080p，最好有 Emoji、礼物和 SC）。复制到 `perf/samples/final_2h/`，原文件不动。
+- **补齐弹幕**：如果 VIP、礼物、SC、会员不够丰富，按"补充规则"（平移 → 改写 → 手写，并加 `_synthetic` 标记）补齐。要求在 2 小时内**分散**出现：SC 和礼物各价格档（覆盖所有持续时间和颜色档）、密集进入和陆续退出、长持续时间的 SC 互相重叠、VIP 药丸、带 Emoji 的 SC，以及 0.5 元礼物这类反向测试。补充事件的清单写进 `samples.md`。
+- **对比**：用该任务的真实三层配置（VIP 和 `min_fps` 用测试副本），分别以**旧版 E** 和 **GPU 版 G** 渲染完整 2 小时。记录：墙钟时间、平均和峰值 CPU 核数、核·秒、GPU/NVENC/NVDEC 占用、输出文件大小、帧数、时长、音画同步误差。每个版本跑 1 次即可（2 小时的素材本身就足够长，数据比较稳定）。
+- **时间安排**：E 预计要跑 20 到 40 分钟，用 `dmr_gate.py --need-minutes 90` 确认在分段结束前能跑完；必要时 E 和 G 分在不同的空闲时段跑。
+- **输出**：`perf/results/final_2h.md`（对比表 + 每 10 分钟一张 G 的截图）。演示视频：`0X_最终验收_2小时_左旧版右GPU版_精选.mp4`，从 2 小时中剪出约 3 分钟的精选片段（拼接 SC 密集、礼物密集、VIP、横竖屏等时刻），`说明.txt` 里写明每一段来自原片的第几分钟。
 
 ## 阶段 2：C++ / libav + CUDA（只有阶段 1 达不到验收标准时才做）
 
@@ -338,6 +347,7 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - [x] 阶段 1b-0c：定位并修复 SimpleDecoder 重复帧 → perf/results/phase1b0c.md
 - [x] 阶段 1b-1：真实 RenderPlan GPU 渲染与 CPU/GPU 验证 → perf/results/phase1b.md
 - [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
+- [ ] 阶段 1c：两小时真实录播最终验收
 - [ ] 阶段 2：C++/libav + CUDA（按需）
 - [ ] 阶段 3：横竖屏切换的画布策略（最后做）
 - [ ] 阶段 4：连续送礼合并显示（最后做）
