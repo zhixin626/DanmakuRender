@@ -81,8 +81,15 @@ class NV12Buffer:
         self.uv = self.buf[height:].reshape(height // 2, width // 2, 2)
     def load(self, decoded):
         planes = decoded.cuda()
-        src_y = cp.asarray(planes[0])
-        src_uv = cp.asarray(planes[1])
+        # PyNvVideoCodec exposes CAI metadata with list-valued shape/strides;
+        # CuPy expects tuples when importing the device view.
+        def as_cupy(view):
+            cai = view.__cuda_array_interface__
+            shape = tuple(cai["shape"])
+            strides = tuple(cai["strides"]) if cai.get("strides") else None
+            return cp.asarray(CaiView(view, shape, strides), copy=False)
+        src_y = as_cupy(planes[0])
+        src_uv = as_cupy(planes[1])
         self.y[...] = src_y.reshape(self.y.shape)
         self.uv[...] = src_uv.reshape(self.uv.shape)
     def cuda(self):
@@ -154,7 +161,7 @@ def run_full(video, sprites, max_frames, output):
     wall = time.perf_counter() - started
     mux = ["ffmpeg", "-v", "error", "-y", "-nostdin", "-f", "hevc", "-r", "25", "-i", str(bitstream),
            "-i", str(video), "-map", "0:v:0", "-map", "1:a", "-c:v", "copy", "-c:a", "copy",
-           "-t", f"{frames / 25.0:.6f}", str(output)]
+           str(output)]
     mux_run = subprocess.run(mux, capture_output=True, text=True)
     if mux_run.returncode:
         raise RuntimeError(mux_run.stderr[-1000:])
