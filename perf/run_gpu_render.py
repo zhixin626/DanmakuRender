@@ -20,6 +20,9 @@ def configure_cuda_dlls() -> None:
         SITE_PACKAGES / "nvidia" / "cuda_nvrtc" / "bin",
         SITE_PACKAGES / "nvidia" / "cuda_runtime" / "bin",
     )
+    cuda_root = SITE_PACKAGES / "nvidia" / "cuda_nvrtc"
+    if cuda_root.exists():
+        os.environ.setdefault("CUDA_PATH", str(cuda_root))
     for directory in candidates:
         if not directory.exists():
             continue

@@ -171,13 +171,14 @@ def parse_bitrate(value: Any) -> int:
     return int(float(text) * multiplier)
 
 
-def decode_frames(video: pathlib.Path, nvc: Any, gpu_id: int) -> Iterator[tuple[Any, int]]:
-    """Decode packets with the native API and yield each frame with its PTS."""
+def decode_frames(video: pathlib.Path, nvc: Any, gpu_id: int) -> Iterator[tuple[Any, float]]:
+    """Decode packets and convert PTS to seconds using the stream time base."""
     demuxer = nvc.CreateDemuxer(filename=str(video))
     decoder = nvc.CreateDecoder(gpuid=gpu_id, codec=demuxer.GetNvCodecId(), usedevicememory=True)
+    time_base = demuxer.GetTimebaseNum() / demuxer.GetTimebaseDen()
     for packet in demuxer:
         for decoded in decoder.Decode(packet):
-            yield decoded, int(decoded.getPTS())
+            yield decoded, float(decoded.getPTS()) * time_base
 
 
 def frame_geometry(decoded: Any) -> tuple[int, int]:
@@ -216,15 +217,37 @@ def event_position(event: dict[str, Any], timestamp: float) -> tuple[int, int] |
     return int(round(path[-1][1])), int(round(path[-1][2]))
 
 
-def active_events(events: list[dict[str, Any]], timestamp: float) -> list[tuple[dict[str, Any], int, int]]:
-    """Return only events visible at the current frame time."""
-    active = []
-    for event in events:
-        if float(event["start"]) <= timestamp <= float(event["end"]):
+class EventScanner:
+    """Maintain active events with a start-time scanline."""
+
+    def __init__(self, events: list[dict[str, Any]]):
+        self.events = events
+        self.start_order = sorted(range(len(events)), key=lambda index: (events[index]["start"], index))
+        self.next_start = 0
+        self.active: set[int] = set()
+        self.last_timestamp = float("-inf")
+
+    def visible(self, timestamp: float) -> list[tuple[dict[str, Any], int, int]]:
+        """Advance the scanline and return active events in source order."""
+        if timestamp < self.last_timestamp:
+            raise ValueError("RenderPlan timestamps must be monotonic")
+        self.last_timestamp = timestamp
+        while self.next_start < len(self.start_order):
+            index = self.start_order[self.next_start]
+            if float(self.events[index]["start"]) > timestamp:
+                break
+            self.active.add(index)
+            self.next_start += 1
+        self.active = {
+            index for index in self.active if float(self.events[index]["end"]) >= timestamp
+        }
+        visible = []
+        for index in sorted(self.active):
+            event = self.events[index]
             position = event_position(event, timestamp)
             if position is not None:
-                active.append((event, position[0], position[1]))
-    return active
+                visible.append((event, position[0], position[1]))
+        return visible
 
 
 class NV12Buffer:
@@ -268,6 +291,7 @@ class SpriteCompositor:
         self.height = height
         self.pressure_sprites = pressure_sprites
         self.plan_assets = plan_assets
+        self.event_scanner = EventScanner(plan_assets["events"]) if plan_assets else None
         source = PLAN_KERNEL if plan_assets else PRESSURE_KERNEL
         name = "blend_plan" if plan_assets else "blend_pressure"
         self.kernel = cupy.RawKernel(source, name)
@@ -294,7 +318,7 @@ class SpriteCompositor:
 
     def _apply_plan(self, frame: NV12Buffer, timestamp: float) -> int:
         """Upload active event metadata and blend the shared YUV atlas."""
-        active = active_events(self.plan_assets["events"], timestamp)
+        active = self.event_scanner.visible(timestamp)
         if not active:
             return 0
         px = self.cupy.asarray([item[1] for item in active], dtype=self.cupy.int32)
@@ -363,6 +387,7 @@ def encode_to_file(
     compositor = SpriteCompositor(cupy, width, height, config.pressure_sprites, plan_assets)
     signatures: list[int] = []
     active_counts: list[int] = []
+    first_pts = first[1]
     frame_count = 0
     started = time.perf_counter()
     with bitstream.open("wb") as stream:
@@ -370,7 +395,9 @@ def encode_to_file(
             buffer.load(decoded)
             if frame_count < 200 and frame_count % 10 == 0:
                 signatures.append(frame_signature(cupy, buffer))
-            active_counts.append(compositor.apply(buffer, pts / 1000.0))
+            relative_pts = max(0.0, pts - first_pts)
+            frame_time = frame_count / frame_rate
+            active_counts.append(compositor.apply(buffer, frame_time))
             for packet in encoder.Encode(buffer):
                 stream.write(packet["data"])
             frame_count += 1
@@ -388,6 +415,8 @@ def encode_to_file(
         "plan_events": len(plan_assets["events"]) if plan_assets else 0,
         "active_events_avg": sum(active_counts) / len(active_counts) if active_counts else 0.0,
         "active_events_peak": max(active_counts) if active_counts else 0,
+        "first_pts_seconds": first_pts,
+        "last_relative_pts_seconds": relative_pts if frame_count else 0.0,
     }
 
 

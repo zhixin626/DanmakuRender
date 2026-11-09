@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import subprocess
-
 import math
 
 
@@ -23,18 +20,8 @@ def resolve_output_fps(source_fps: float, minimum_fps: float | None = None) -> f
 
 def source_frame_rate(video_path: str) -> float:
     """Use PyAV's guessed rate, then average rate, like the old renderer."""
-    try:
-        import av
-    except ModuleNotFoundError:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "json", video_path],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        rate = json.loads(result.stdout)["streams"][0]["avg_frame_rate"]
-        numerator, denominator = rate.split("/")
-        return float(numerator) / float(denominator)
+    import av
+
     container = av.open(video_path)
     try:
         stream = container.streams.video[0]

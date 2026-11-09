@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import pathlib
 import sys
@@ -14,10 +15,15 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from DMR.Render.sprites import SpriteFactory
-
-
-DEFAULT_FONT = pathlib.Path(r"C:\Windows\Fonts\msyh.ttc")
+SPRITES_PATH = ROOT / "DMR" / "Render" / "sprites.py"
+SPRITES_SPEC = importlib.util.spec_from_file_location("dmr_shared_sprites", SPRITES_PATH)
+if SPRITES_SPEC is None or SPRITES_SPEC.loader is None:
+    raise ImportError(f"unable to load {SPRITES_PATH}")
+SPRITES_MODULE = importlib.util.module_from_spec(SPRITES_SPEC)
+SPRITES_SPEC.loader.exec_module(SPRITES_MODULE)
+SpriteFactory = SPRITES_MODULE.SpriteFactory
+resolve_emoji_font = SPRITES_MODULE.resolve_emoji_font
+resolve_font = SPRITES_MODULE.resolve_font
 
 
 def parse_color(value: str, default: str = "FFFFFF") -> tuple[int, int, int]:
@@ -46,7 +52,9 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
                 fill=fill,
             )
         if node.get("type") == "text":
-            font = ImageFont.truetype(str(DEFAULT_FONT), int(node.get("size", 30)))
+            family = str(node.get("font", "Microsoft YaHei"))
+            font_path = resolve_font(family, True)
+            font = ImageFont.truetype(font_path, int(node.get("size", 30)))
             fill = parse_color(node.get("color", "#FFFFFF")) + (255,)
             x = int(node.get("x", 0))
             y = int(node.get("y", 0))
@@ -76,9 +84,8 @@ def main() -> None:
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     args.output.mkdir(parents=True, exist_ok=True)
-    font_name = "C:\\Windows\\Fonts\\msyh.ttc"
-    emoji_name = "C:\\Windows\\Fonts\\seguiemj.ttf"
-    factory = SpriteFactory(font_name, emoji_name, {}, 60)
+    emoji_name = resolve_emoji_font(None)
+    factories: dict[tuple[str, str, float], SpriteFactory] = {}
     atlas: list[list[int]] = [[], [], [], []]
     metadata = []
     for event in plan.get("events", []):
@@ -97,7 +104,14 @@ def main() -> None:
             image = panel_sprite(visual, width, height)
             arrays = rgba_to_yuv(image)
         else:
-            sprite = factory.get_sprite(
+            family = str(style.get("font", "Microsoft YaHei"))
+            bold = bool(style.get("bold", True))
+            size = float(style.get("size", 60))
+            font_name = resolve_font(family, bold)
+            factory_key = (font_name, emoji_name, size)
+            if factory_key not in factories:
+                factories[factory_key] = SpriteFactory(font_name, emoji_name, {}, size)
+            sprite = factories[factory_key].get_sprite(
                 visual.get("text", ""),
                 rgb,
                 event_pack=image_pack or None,

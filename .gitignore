@@ -36,6 +36,7 @@ DMR-**.yml
 # 字幕编辑器已独立到 D:\Editor字幕编辑器，不随本项目发布
 /editor/
 perf/tmp/
+perf/venv/
 perf/samples/
 perf/outputs/
 演示视频/
