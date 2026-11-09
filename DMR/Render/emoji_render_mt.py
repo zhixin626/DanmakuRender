@@ -1253,7 +1253,7 @@ def main():
             FFMPEG, "-v", "error", "-y",
             "-i", full, "-i", fixed_audio,
             "-map", "0:v", "-map", "1:a:0",
-            "-c", "copy", "-shortest",
+            "-c", "copy",
         ]
     else:
         mux_cmd = [
