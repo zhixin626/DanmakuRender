@@ -114,44 +114,58 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - 每组仍跑 3 次，各组交替执行。
 - **输出**：`perf/results/phase0b.md`。完成后在 PR 下评论，然后停下。
 
-## 阶段 1：低风险 Python 优化（只有确认 D 或 E 是主要瓶颈时才做）
+## 最终目标与验收标准（用户确认）
 
-拆成两个提交，分别测量：
+**目标**：在渲染速度和画质不下降的前提下，让电脑风扇尽可能安静，最好完全静音。
 
-**1a：零拷贝 + 扫描线（要求输出逐字节一致）**
-- 预先分配 `bytearray(fb)` 缓冲池（数量不少于 QDEPTH+2），reader 用 `readinto` 读入；用 numpy 视图原地合成；writer 直接写 `memoryview`。去掉 `copy()` 和 `tobytes()`。
-- 事件按 `s` 排序，用一个指针追加新进入的事件，并移除 `e < t` 的事件。**活动列表必须保持原始 `emoji_events` 的顺序**，因为叠加顺序会影响结果。可以用原始下标排序，或者维护一个有序结构。
-- 注意缓冲区复用的生命周期：缓冲区要等 writer 写完才能归还给 reader，否则会出现画面撕裂。
+路线：阶段 1 用 Python 做全 GPU 渲染器；如果它达不到标准，阶段 2 改用 C++/libav + CUDA。原先的 CPU 侧 Python 优化（零拷贝、整数混合、numba）**不再单独做**，现有渲染器保持不变，作为回退路径。
 
-**1b：整数混合（允许每个采样值差 ±1）**
-- 每个事件预先计算：`alpha_u8 = round(A*op*255)`；Y、U、V 精灵为 uint8；alpha 预先降采样到 UV 尺寸（注意 dx0、dy0 的奇偶会影响对齐，要处理成和旧逻辑相同的采样位置）。
-- 混合公式：`dst = (src*a + dst*(255-a) + 127) // 255`，在 uint16 下计算，尽量写成原地运算。
+验收以阶段 0b 中 `normal_dense` 素材上的当前 emoji 渲染器（E）为基准：
 
-**校验**：新增 `perf/compare_frames.py`。用环境变量 `DMR_EMOJI_DUMP=<path>` 把合成后的 nv12 原始帧写到文件（只取前 N 帧，或每隔 K 帧取一帧），新旧版本逐帧比较：
-- 1a：必须完全一致。
-- 1b：报告最大差值、差值大于 1 的像素占比、PSNR（应 ≥ 50dB）。另外抽 3 帧截图，人工看一下 Emoji、药丸、描边和透明度。
+| 项目 | 标准 |
+|---|---|
+| 速度 | 墙钟时间 ≤ E |
+| CPU（噪音） | 进程树平均 ≤ 0.5 核，峰值 ≤ 1.5 核 |
+| 画质 | 与 E 输出对比：没有弹幕的区域 PSNR ≥ 45dB；弹幕区域由用户目视确认（字体、描边、Emoji、表情包、SC 药丸、透明度、运动是否顺滑） |
+| 正确性 | 所有 `problem_*` 素材都能正确输出：分辨率切换、帧率不稳、损坏包等情况不能花屏、错位或崩溃；时长和音画同步与 E 一致 |
+| 回退 | 没有 NVIDIA 显卡、依赖缺失或运行出错时，自动回退到现有 emoji 渲染器，并打印日志 |
 
-**输出**：`perf/results/phase1.md`（按阶段 0 的格式重测 D、E 两组，并附校验结果）。
+每个阶段的输出视频都按阶段 0b 的目录结构放进 `perf/outputs/<阶段>/...`，供用户观看。
 
-## 阶段 2：numba 加速合成（只有阶段 1 之后合成仍占主导时才做）
+## 阶段 1：Python 全 GPU 渲染器（PyNvVideoCodec + CuPy）
 
-- 把单个事件的 Y 和 UV 混合写成 `@njit(cache=True)` 函数，事件之间的循环仍放在 Python 里。
-- `import numba` 失败时自动回退到 1b 的 numpy 实现，并打印一条 INFO 日志。
-- 校验标准同 1b。
+先做原型验证可行性，再补全功能。新代码放在新文件 `DMR/Render/gpu_render.py` 中，不修改现有渲染器的默认行为。
 
-## 阶段 3：解码侧（只有阶段 0 显示 A、B、C 占主导时才做，届时由 Claude 另写计划）
+**1a：原型（只验证性能，不管画质）**
+- 链路：PyNvVideoCodec 解码，帧留在显存（NV12）→ 用 CuPy 的 RawKernel 把若干张 RGBA 精灵按坐标和 alpha 混合到 NV12 上 → PyNvVideoCodec 编码，使用 HEVC 和 4M 码率，参数与 E 一致 → 封装输出。音频直接复制。
+- 精灵在开始时一次性上传到显存；每帧在 CPU 上只计算活动事件的坐标（用扫描线，不遍历全部事件）。
+- 用 `normal_dense` 素材，以真实 RenderPlan 里的 raster 事件作为精灵，测墙钟时间、CPU（按进程拆分）、GPU 占用（`nvidia-smi dmon` 采样）。
+- 如果 PyNvVideoCodec 自带的读文件功能处理不了直播 flv（损坏包、时间戳），改为由 ffmpeg 负责读文件和拆包（`-c:v copy -f hevc/h264 -` 输出压缩码流），再交给 PyNvVideoCodec 解码。
+- **输出**：`perf/results/phase1a.md`。然后停下，由 Claude 判断是否继续。
 
-可能的方向：源已是目标尺寸时跳过 scale 和 pad；调整解码线程和 `-hwaccel` 选项；评估 C++ 或 libav 单进程方案。
+**1b：功能补全**
+- **普通弹幕也改成精灵**：根据 RenderPlan 中所有事件（包括原本走 libass 的 ass 模式事件）预先绘制精灵，彻底去掉 libass。文字绘制要尽量接近 libass 的效果（字体、字号、描边、阴影），用 E 的输出逐帧对比调整。
+- 在 GPU 上实现 VFR→CFR（按时间戳选帧或重复帧，与 ffmpeg 的 `fps=` 行为一致）、分辨率中途变化时的等比缩放加黑边补齐（与现有 `scale+pad` 一致）。
+- 接入 `emoji_dmrender` 的配置：新增 `engine: gpu_render`，或者用开关控制；出错时自动回退。
+- 用全部素材分类测试，输出视频供用户观看；画质对比脚本输出 PSNR 和差异热力图截图。
+- **输出**：`perf/results/phase1b.md`，并在 PR 下评论，附上输出视频的路径。
 
-## 降噪（与以上各阶段独立，可选）
+## 阶段 2：C++ / libav + CUDA（只有阶段 1 达不到验收标准时才做）
 
-渲染不是实时任务，可以降低渲染子进程优先级（Windows 用 `BELOW_NORMAL_PRIORITY_CLASS`），或者限制 ffmpeg 的 `-threads`，做成配置项，默认关闭。
+触发条件（满足任意一条）：Python 版 CPU 无法达标；读文件或解码在问题素材上无法稳定处理；性能波动大。届时由 Claude 根据阶段 1 暴露的问题另写详细计划。思路是用 libavformat/libavcodec（NVDEC/NVENC）加 CUDA 混合 kernel 写成单个进程，Python 只负责传入 RenderPlan 和精灵。
+
+## 降噪（可与以上各阶段并行，可选）
+
+在 GPU 渲染器完成之前，可以先给现有渲染器加一个配置项：降低渲染子进程优先级（Windows 的 `BELOW_NORMAL_PRIORITY_CLASS`）和/或限制 CPU 亲和性（核数）。默认关闭，作为临时降噪手段。
+
+## 附录：已搁置的 CPU 侧优化
+
+零拷贝 + 扫描线、整数混合、numba：只在需要改进回退路径时再考虑。原始设计见 git 历史中 `perf/PLAN.md` 的旧版本（提交 5306001）。
 
 ## 进度
 
 - [x] 阶段 0：基线 → `perf/results/phase0.md`
-- [ ] 阶段 0b：修正帧率与进程树 CPU，拆分进程，补充 Emoji 密集素材 → `perf/results/phase0b.md`
-- [ ] 阶段 1a：零拷贝 + 扫描线
-- [ ] 阶段 1b：整数混合
-- [ ] 阶段 2：numba
-- [ ] 阶段 3：解码侧（待定）
+- [ ] 阶段 0b：修正测量，重新挑选并分类素材，保留输出视频 → `perf/results/phase0b.md`
+- [ ] 阶段 1a：Python GPU 原型 → `perf/results/phase1a.md`
+- [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
+- [ ] 阶段 2：C++/libav + CUDA（按需）
