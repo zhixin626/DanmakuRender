@@ -119,7 +119,9 @@ def test_segment_render_and_state_progression(
     monkeypatch.setattr(emoji.subprocess, "Popen", emoji_process)
     monkeypatch.setattr("DMR.Render.time.sleep", lambda _: None)
     send = queue.Queue()
-    plugin = Render((send, queue.Queue()))
+    plugin = Render(
+        (send, queue.Queue()), failed_tasks_file=str(tmp_path / "failed.json")
+    )
     plugin.stoped = False
     progress = []
     gather = plugin._gather
@@ -147,10 +149,7 @@ def test_segment_render_and_state_progression(
         assert handler.event_dict["render/stopped"](completion) == []
         assert slot["status"] == "stopped" and slot["wait"] == []
         assert observed_ready == ["rendering", "stopped"]
-        assert (
-            len(handler.held_tasks) == 1
-            and next(iter(handler.held_tasks.values()))["cancelled"]
-        )
+        assert not handler.held_tasks and len(plugin.failed_tasks) == 1
         assert not list((tmp_path / "rendered").glob("*.mp4"))
         assert len(gpu_calls) == (3 if outcome == "fallback_stopped" else 1)
         assert len(fallback_calls) == (1 if outcome == "fallback_stopped" else 0)

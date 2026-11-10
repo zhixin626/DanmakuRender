@@ -50,7 +50,9 @@ def test_gpu_result_runs_through_render_end_and_live_state(monkeypatch, tmp_path
 
     monkeypatch.setattr(gpu, "render_one", rendered)
     send = queue.Queue()
-    plugin = Render((send, queue.Queue()))
+    plugin = Render(
+        (send, queue.Queue()), failed_tasks_file=str(tmp_path / "failed.json")
+    )
     plugin.stoped = False
     task = dict(
         uuid="render-id",

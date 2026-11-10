@@ -14,11 +14,12 @@ from typing import Tuple
 
 from DMR.utils import (
     VideoInfo,
-    DateTimeEncoder,
     DateTimeDecoder,
     FFprobe,
     uuid,
     PipeMessage,
+    StreamerInfo,
+    atomic_json_dump,
 )
 from .baserender import RenderStopped
 
@@ -89,8 +90,10 @@ class Render():
         self.render_tasks = {}
         self.failed_tasks = {}
         self.completed_tasks = []   # 渲染成功的视频记录（最近若干条）
-        self.failed_tasks_file = '.temp/failed_renders.json'
-        # self.load_failed_tasks()
+        self.failed_tasks_file = kwargs.get(
+            "failed_tasks_file", ".temp/failed_renders.json"
+        )
+        self.load_failed_tasks()
 
         self._render_class = {}
         self.render_executors = ThreadPoolExecutor(max_workers=self.nrenders)
@@ -105,10 +108,20 @@ class Render():
                     data = json.load(f, cls=DateTimeDecoder)
                     for uuid, task in data.items():
                         if task.get('video'):
+                            for key in ("ctime", "segment_start_time"):
+                                if isinstance(task["video"].get(key), str):
+                                    task["video"][key] = datetime.fromisoformat(
+                                        task["video"][key]
+                                    )
+                            if isinstance(task["video"].get("streamer"), dict):
+                                task["video"]["streamer"] = StreamerInfo(
+                                    **task["video"]["streamer"]
+                                )
                             task['video'] = VideoInfo(**task['video'])
-                            # Update config as well
-                            # if 'config' in task and 'video' in task['config']:
-                            #     task['config']['video'] = task['video']
+                            task["config"]["video"] = task["video"]
+                        if task.get("status") not in ("stopped", "error"):
+                            task["status"] = "stopped"
+                            task["error"] = "程序退出时尚未完成，可独立重试"
                         self.failed_tasks[uuid] = task
                 self.logger.info(f'Loaded {len(self.failed_tasks)} failed render tasks.')
             except Exception as e:
@@ -116,29 +129,32 @@ class Render():
 
     def save_failed_tasks(self):
         try:
-            with open(self.failed_tasks_file, 'w', encoding='utf-8') as f:
-                json.dump(self.failed_tasks, f, cls=DateTimeEncoder, ensure_ascii=False, indent=4)
+            atomic_json_dump(self.failed_tasks_file, self.failed_tasks)
         except Exception as e:
             self.logger.error(f'Failed to save failed tasks: {e}')
 
-    def retry_task(self, uuid):
+    def retry_task(self, task_id):
         with self._lock:
-            if uuid in self.failed_tasks:
-                task = self.failed_tasks.pop(uuid)
-                # self.save_failed_tasks()
+            if task_id in self.failed_tasks and task_id not in self.render_tasks:
+                task = self.failed_tasks[task_id]
 
                 # Re-submit
                 task['status'] = 'waiting'
+                task["request_id"] = uuid()
+                task["config"]["_independent_retry"] = True
+                task.pop("layout_track_key", None)
+                task.pop("layout_sequence", None)
                 self.render_tasks[task['uuid']] = task
+                self.save_failed_tasks()
                 self.render_executors.submit(self._render_subprocess, task)
                 return True
             return False
 
     def delete_failed_task(self, uuid):
         with self._lock:
-            if uuid in self.failed_tasks:
+            if uuid in self.failed_tasks and uuid not in self.render_tasks:
                 self.failed_tasks.pop(uuid)
-                # self.save_failed_tasks()
+                self.save_failed_tasks()
                 return True
             return False
 
@@ -227,7 +243,10 @@ class Render():
         with self._lock:
             self.render_tasks.pop(task['uuid'], None)
             if status == "stopped":
-                self.failed_tasks.pop(task["uuid"], None)
+                task["status"] = "stopped"
+                task["error"] = str(desc)
+                self.failed_tasks[task["uuid"]] = task
+                self.save_failed_tasks()
                 self._pipeSend(
                     event="stopped",
                     msg=f"视频{task['output']}渲染已停止",
@@ -236,6 +255,11 @@ class Render():
                     data=desc,
                 )
             elif status == "error":
+                if task["config"].get("_independent_retry"):
+                    task["status"] = "error"
+                    task["error"] = str(desc)
+                    self.failed_tasks[task["uuid"]] = task
+                    self.save_failed_tasks()
                 # 渲染失败已交由 liveevents 挂起转人工（见 onRenderError），不再留存 failed_tasks
                 self._pipeSend(
                     event='error',
@@ -247,6 +271,8 @@ class Render():
                 )
             else:
                 # 记录渲染成功的视频（最新在前），只保留最近 200 条避免无限增长
+                if self.failed_tasks.pop(task["uuid"], None) is not None:
+                    self.save_failed_tasks()
                 output_path = getattr(desc, 'path', None) or task.get('output')
                 video = task.get('video')
                 self.completed_tasks.append({
@@ -273,6 +299,16 @@ class Render():
 
     def _compile_layout(self, task, mode):
         """Use the same historical checkpoint when changing fallback backend."""
+        if task["config"].get("_independent_retry"):
+            from .layout_compiler import LayoutCompiler
+
+            return LayoutCompiler(
+                task["args"], engine=mode, engine_config=task["args"]
+            ).compile(
+                video=task["video"],
+                events_path=task["video"].dm_file_id,
+                work_dir=os.path.dirname(task["output"]) or None,
+            )
         return self.layout_tracks.compile_segment(
             track_key=task.get("layout_track_key"),
             sequence=task.get("layout_sequence"),
@@ -485,6 +521,6 @@ class Render():
             for uuid, task in self.render_tasks.items():
                 if uuid not in self.failed_tasks:
                     self.failed_tasks[uuid] = task
-            # self.save_failed_tasks()
+            self.save_failed_tasks()
 
         self.logger.info('Render stopped.')

@@ -1,4 +1,4 @@
-"""Cancellation must survive memory reclamation and permit real redispatch."""
+"""Stopped renders remain independently retryable without live-group storage."""
 
 import json
 import queue
@@ -12,18 +12,19 @@ import yaml
 from DMR.Task.liveevents import LiveEvents
 from DMR.Render import Render
 from DMR.Render import gpu_render as gpu
-from DMR.Render.baserender import BaseRender, RenderStopped
-from DMR.Merger import Merger
-from DMR.utils import VideoInfo, FFprobe, PipeMessage
+from DMR.Render.baserender import RenderStopped
 from DMR.Render.sprites import resolve_font
+from DMR.WebService.webapi import WebApi
+from DMR.utils import VideoInfo, FFprobe, PipeMessage
 
 
-def configuration(tmp_path):
+@pytest.mark.parametrize("restart", [False, True])
+def test_stop_finishes_group_and_failed_list_can_retry(monkeypatch, tmp_path, restart):
     options = yaml.safe_load(Path("DMR/Config/default.yml").read_text(encoding="utf8"))[
         "render_args"
     ]["overlay"]
     options.update(engine="gpu_render", output_dir=str(tmp_path / "rendered"))
-    return {
+    config = {
         "download_args": {"output_dir": str(tmp_path), "dltype": "live"},
         "render_args": {"overlay": options},
         "common_event_args": {
@@ -32,16 +33,12 @@ def configuration(tmp_path):
             "auto_merge": True,
             "auto_clean": False,
         },
-        "merge_args": {"merge_type": ["dm_video"], "remove_source": False},
+        "merge_args": {"merge_type": ["dm_video"]},
     }
-
-
-@pytest.mark.parametrize("restart", [False, True])
-def test_stop_idle_resume_complete_merge(monkeypatch, tmp_path, restart):
-    config = configuration(tmp_path)
     handler = LiveEvents("test", config)
+    monkeypatch.setattr(handler, "_collect_session_data", lambda _: None)
     source = tmp_path / "source.flv"
-    source.write_bytes(b"video fixture")
+    source.write_bytes(b"source")
     events = tmp_path / "source.jsonl"
     events.write_text(
         '{"type":"meta","schema":1,"platform":"bilibili","segment_start_time":0}\n',
@@ -58,54 +55,23 @@ def test_stop_idle_resume_complete_merge(monkeypatch, tmp_path, restart):
         ctime=datetime.now(),
     )
     monkeypatch.setattr(FFprobe, "get_timeline_duration", lambda _: 1)
-    monkeypatch.setattr(handler, "_collect_session_data", lambda _: None)
-    attempts = []
+    calls = []
 
     def worker(video, output, stop_event, **kwargs):
-        attempts.append(output)
-        if len(attempts) == 1:
+        calls.append(output)
+        if len(calls) == 1:
             stop_event.set()
-            raise RenderStopped("test stop")
-        Path(output).write_bytes(b"rendered fixture")
+            raise RenderStopped("user stop")
+        Path(output).write_bytes(b"completed independently")
         return {"width": 1920, "height": 1080, "frames": 50, "frame_rate": 50}
 
     monkeypatch.setattr(gpu, "render_one", worker)
     send = queue.Queue()
-    plugin = Render((send, queue.Queue()), subprocess=1, render_thread=1)
-    merger = Merger((send, queue.Queue()))
+    failed_file = tmp_path / "failed.json"
+    plugin = Render((send, queue.Queue()), failed_tasks_file=str(failed_file))
     plugin.stoped = False
-    merger.stoped = False
     try:
         handler.session_data["session"] = {"is_live_end": False}
-        earlier = VideoInfo(
-            **dict(
-                video,
-                path=str(tmp_path / "earlier.flv"),
-                file_id="earlier",
-                segment_id=0,
-            )
-        )
-        Path(earlier.path).write_bytes(b"earlier source")
-        messages = handler.onLiveSegment(
-            PipeMessage("downloader", "test", "livesegment", data=earlier)
-        )
-        (earlier_dispatch,) = [
-            m for m in messages if m.target == "render" and m.event == "newtask"
-        ]
-        rendered = tmp_path / "earlier.mp4"
-        rendered.write_bytes(b"earlier rendered")
-        earlier_output = BaseRender.output_info(
-            earlier, str(rendered), (1920, 1080), None
-        )
-        handler.onRenderEnd(
-            PipeMessage(
-                "render",
-                "test",
-                "end",
-                request_id=earlier_dispatch.request_id,
-                data={"config": {"mode": "gpu_render"}, "output": earlier_output},
-            )
-        )
         messages = handler.onLiveSegment(
             PipeMessage("downloader", "test", "livesegment", data=video)
         )
@@ -114,109 +80,93 @@ def test_stop_idle_resume_complete_merge(monkeypatch, tmp_path, restart):
         ]
         handler.onLiveEnd(PipeMessage("downloader", "test", "liveend", data="session"))
         plugin.add_task(dispatch)
-        completion = send.get(timeout=5)
-        assert completion.event == "stopped"
-        handler.onRenderStop(completion)
-        assert (
-            "session" not in handler.state_dict
-        )  # durable archive, not leaked live state
-        assert handler.is_idle_for_restart()
-        (hold_id,) = handler.held_tasks
-        assert handler._resume_path.exists() and source.exists()
+        stopped = send.get(timeout=5)
+        assert stopped.event == "stopped"
+        handler.onRenderStop(stopped)
+        assert handler._group_is_done("session") and handler.is_idle_for_restart()
+        assert not handler.state_dict and not handler.held_tasks
+        assert not (tmp_path / ".dmr").exists()
+        (task_id,) = plugin.failed_tasks
+        assert task_id in json.loads(failed_file.read_text(encoding="utf8"))
         if restart:
-            handler.onExit()
-            handler = LiveEvents("test", config)
-            ready = handler.onReady()
-            (retry,) = [m for m in ready if m.target == "render"]
-            assert not isinstance(retry.data["video"].ctime, str)
-            second_ready = handler.onReady()
-            assert (
-                isinstance(second_ready, PipeMessage)
-                and second_ready.target == "downloader"
+            plugin.stop()
+            plugin.render_executors.shutdown()
+            plugin = Render((send, queue.Queue()), failed_tasks_file=str(failed_file))
+            plugin.stoped = False
+            assert task_id in plugin.failed_tasks and isinstance(
+                plugin.failed_tasks[task_id]["video"].ctime, datetime
             )
-        else:
-            (retry,) = handler.onRetry(
-                PipeMessage("webservice", "test", "retry", data={"hold_id": hold_id})
-            )
-        assert retry.request_id != dispatch.request_id
-        assert not handler.is_idle_for_restart()
-        plugin.add_task(retry)
-        completion = send.get(timeout=5)
-        assert completion.event == "end"
-        followups = handler.onRenderEnd(completion)
-        (merge,) = [m for m in followups if m.target == "merger"]
-
-        def merge_worker(paths, args, meta):
-            assert len(paths) == 2 and str(rendered) in paths
-            out = tmp_path / "merged.mp4"
-            out.write_bytes(b"merged fixture")
-            return [
-                VideoInfo(
-                    path=str(out),
-                    group_id=meta["group_id"],
-                    dtype="dm_video",
-                    resolution=(1920, 1080),
-                )
-            ]
-
-        monkeypatch.setattr(merger, "_merge_pipeline", merge_worker)
-        merger.add_task(merge)
-        completion = send.get(timeout=5)
-        assert completion.event == "end" and completion.source == "merger"
-        handler.onMergeEnd(completion)
-        assert handler.is_idle_for_restart() and not handler.state_dict
-        assert (
-            json.loads(handler._resume_path.read_text(encoding="utf8"))["groups"] == {}
+        engine = SimpleNamespace(
+            plugin_dict={"render": {"class": plugin}}, task_dict={}, notifications=[]
+        )
+        api = WebApi((queue.Queue(), queue.Queue()), engine=engine, force_login=False)
+        app = api.create_app()
+        client = app.test_client()
+        status = client.get("/api/tasks").get_json()
+        assert status["notifications"]["failed"] == 1
+        rows = status["held_tasks"]
+        (row,) = [row for row in rows if row["hold_id"] == "render:" + task_id]
+        assert row["independent_render"] and row["task"] == "test"
+        response = client.post(
+            "/api/retry", json={"task": "test", "hold_id": "render:" + task_id}
+        )
+        assert response.status_code == 200
+        done = send.get(timeout=5)
+        assert done.event == "end" and done.request_id != dispatch.request_id
+        assert handler.onRenderEnd(done) == []  # no group recreation, merge or upload
+        assert Path(done.data["output"].path).is_file()
+        assert not plugin.failed_tasks and not json.loads(
+            failed_file.read_text(encoding="utf8")
         )
     finally:
         plugin.render_executors.shutdown()
-        merger.merge_executors.shutdown()
 
 
-def test_exit_recovers_inflight_and_preserves_input(monkeypatch, tmp_path):
-    config = configuration(tmp_path)
-    config["common_event_args"]["auto_clean"] = True
-    config["clean_args"] = {
-        "src_video_pre": [{"method": "delete", "trigger": "onLiveEnd"}]
+def test_failed_retry_is_not_lost_and_can_be_ignored(tmp_path, monkeypatch):
+    plugin = Render(
+        (queue.Queue(), queue.Queue()), failed_tasks_file=str(tmp_path / "failed.json")
+    )
+    plugin.stoped = False
+    video = VideoInfo(path="missing.flv", group_id="released")
+    task = {
+        "uuid": "id",
+        "source": "replay/test",
+        "request_id": "old",
+        "video": video,
+        "mode": "gpu_render",
+        "args": {},
+        "config": {"mode": "gpu_render"},
+        "output": "out.mp4",
     }
-    handler = LiveEvents("test", config)
-    monkeypatch.setattr(handler, "_collect_session_data", lambda _: None)
-    video = VideoInfo(
-        path=str(tmp_path / "source.flv"), group_id="session", file_id="src"
+    plugin._gather(task, "stopped", RenderStopped("stop"))
+    monkeypatch.setattr(
+        plugin,
+        "_render_subprocess",
+        lambda task: plugin._gather(task, "error", RuntimeError("bad source")),
     )
-    Path(video.path).write_bytes(b"source")
-    handler.session_data["session"] = {"is_live_end": False}
-    handler.onLiveSegment(PipeMessage("downloader", "test", "livesegment", data=video))
-    followups = handler.onLiveEnd(
-        PipeMessage("downloader", "test", "liveend", data="session")
-    )
-    assert not any(m.target == "cleaner" for m in followups)
-    handler.onExit()
-    restored = LiveEvents("test", config)
-    messages = restored.onReady()
-    assert len([m for m in messages if m.target == "render"]) == 1
-    assert Path(video.path).exists()
-
-
-def test_failed_checkpoint_does_not_free_stopped_work(monkeypatch, tmp_path):
-    config = configuration(tmp_path)
-    handler = LiveEvents("test", config)
-    video = VideoInfo(path=str(tmp_path / "source.flv"), group_id="session")
-    messages = handler.onLiveSegment(
-        PipeMessage("downloader", "test", "livesegment", data=video)
-    )
-    (dispatch,) = [m for m in messages if m.target == "render" and m.event == "newtask"]
-    handler.ended_dict["session"] = 1
-
-    def fail(*_):
-        raise OSError("disk full")
-
-    monkeypatch.setattr("DMR.Task.liveevents.atomic_json_dump", fail)
-    handler.onRenderStop(
-        PipeMessage("render", "test", "stopped", request_id=dispatch.request_id)
-    )
-    assert "session" in handler.state_dict
-    assert not handler.is_idle_for_restart()
+    try:
+        assert plugin.retry_task("id")
+        plugin.render_executors.shutdown()
+        assert plugin.failed_tasks["id"]["status"] == "error"
+        assert json.loads((tmp_path / "failed.json").read_text(encoding="utf8"))
+        engine = SimpleNamespace(
+            plugin_dict={"render": {"class": plugin}}, task_dict={}, notifications=[]
+        )
+        client = (
+            WebApi((queue.Queue(), queue.Queue()), engine=engine, force_login=False)
+            .create_app()
+            .test_client()
+        )
+        assert (
+            client.post(
+                "/api/resume",
+                json={"task": "test", "hold_id": "render:id", "result": "__ignore__"},
+            ).status_code
+            == 200
+        )
+        assert not plugin.failed_tasks
+    finally:
+        plugin.render_executors.shutdown()
 
 
 @pytest.mark.parametrize("bold", [False, True])
