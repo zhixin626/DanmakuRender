@@ -140,6 +140,9 @@ def load_cuda_modules() -> tuple[Any, Any]:
         if os.environ.get("CUDA_PATH") and _dll_handles:
             warnings.filterwarnings("ignore", message=r"CUDA path could not be detected\..*", category=UserWarning)
         import cupy
+    # Sequential decoding does not use FLV seeking. Keep SDK errors visible,
+    # and honor an explicit user LOGGER_LEVEL when diagnosing the codec.
+    os.environ.setdefault('LOGGER_LEVEL','ERROR')
     import PyNvVideoCodec
 
     return cupy, PyNvVideoCodec
