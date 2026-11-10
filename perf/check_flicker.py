@@ -11,64 +11,9 @@ import numpy as np
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from perf.overlay_signal import OverlaySignal, find_dropouts
+from tests.render_checks import OverlaySignal, find_dropouts, frame_stream
 from DMR.Render.sprites import build_atlas
 from DMR.utils import FFprobe
-
-
-def frame_stream(
-    path: Path, fps: float, frames: int, start: float = 0, size=(270, 480), indices=None
-):
-    """Decode a bounded stream once instead of spawning ffmpeg per frame."""
-    width, height = size
-    # Match the renderer's common audio/video origin: source video can start
-    # after audio, so explicitly retain its first frame back to grid time zero.
-    filters = [f"fps={fps}:start_time=0", f"trim=start={start}", "setpts=PTS-STARTPTS"]
-    if indices is not None:
-        expression = "+".join(f"eq(n,{index})" for index in indices)
-        filters.append(f"select='{expression}'")
-    filters += [
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-        "format=rgb24",
-    ]
-    process = subprocess.Popen(
-        [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-i",
-            str(path),
-            "-frames:v",
-            str(frames),
-            "-vf",
-            ",".join(filters),
-            "-fps_mode",
-            "passthrough",
-            "-f",
-            "rawvideo",
-            "-",
-        ],
-        stdout=subprocess.PIPE,
-    )
-    size = width * height * 3
-    last = None
-    try:
-        for _ in range(frames):
-            data = process.stdout.read(size)
-            if len(data) != size:
-                break
-            last = (
-                np.frombuffer(data, dtype=np.uint8)
-                .reshape(height, width, 3)
-                .astype(np.float32)
-            )
-            yield last
-    finally:
-        if process.poll() is None:
-            process.terminate()
-        process.stdout.close()
-        process.wait()
 
 
 def main() -> None:

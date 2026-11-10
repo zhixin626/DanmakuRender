@@ -1,27 +1,42 @@
-# NVIDIA GPU 渲染
+# GPU 弹幕渲染
 
-本轮验证环境：Python 3.12、仓库根目录 `venv/`。`DMR/` 和离线渲染入口不依赖 `perf/`。
+`gpu_render` 用 NVDEC 解码、CuPy 叠加文字/表情/面板、NVENC 编码，减少 CPU 管道拷贝。支持当前的 H.264/HEVC、8-bit NV12 路径，沿用任务的三层配置、整数倍输出帧率及合并/上传流程。
 
-```powershell
-python -m venv venv
-venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
-venv\Scripts\python.exe -m pytest tests -q
-```
+## 环境与安装
 
-已有完整环境无需重建。`requirements-gpu.txt` 包含常规 DMR 依赖以及可选 NVIDIA/CUDA 和测试依赖。引擎读取现有 `vencoder_args` 的 `-b:v`、`-maxrate`、`-bufsize`；未配置项使用编码器默认值。
+需要支持所选编码和解码格式的 NVIDIA 显卡、匹配的 NVIDIA 驱动、可运行的 FFmpeg/ffprobe。参考 [NVIDIA 系统要求](https://docs.nvidia.com/video-technologies/pynvvideocodec/read-me/latest/system-requirements-common.html)及[编解码支持矩阵](https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new)。本分支实测环境为 Windows x64、Python 3.12、RTX 4070 Ti SUPER、驱动 610.88；其他组合需验证。
 
-单文件渲染：
+在正式 DMR 维护窗口、使用它自己的 venv 安装（不要复制开发 worktree 的 venv）：
 
 ```powershell
-venv\Scripts\python.exe render_only.py --task 月亮3 --video 输入.flv --danmaku 输入.jsonl --output 输出.mp4
+.\venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
+nvidia-smi
+ffmpeg -version
 ```
 
-`--task` 从 `configs/` 读取任务，按 default → global → task 合并渲染参数。任务即使停用也可手工离线渲染，不会启动录制或上传。四个参数必须同时给出；已有输出不会覆盖。批量交互模式继续保留。
+依赖文件包含基础运行依赖、PyNvVideoCodec、CuPy CUDA12 和配套 CUDA runtime/NVRTC wheel。代码从当前解释器查找 DLL，不需要写死开发机路径。请配置已安装且支持中文的字体，平台表情放在 `emoji_pack/<平台>/`，纯 emoticon 缓存统一在其 `emoticon/` 子目录。
 
-「月亮3」的录制、GPU 渲染和上传入口为根目录 **DMR-月亮3.bat**。双击并确认 Y 后，只为本次启动生成 `.temp/month-session/` 配置副本，启用月亮3任务；原 `configs/DMR-月亮3.yml` 仍保持停用，全局文件不变。此入口只运行当前目录中的 DMR，WebUI 地址为 `http://127.0.0.1:5001`。不要同时在两个 DMR 实例中录制同一房间。
+## 启用与回退
 
-配置沿用既有 B 站账号 `b站_不可一世冷狗`，房间为 `24486091`。账号凭据位于当前仓库 `.login_info/`；未登录时首次上传按程序提示扫码。配置文件只记录凭据路径，不包含凭据内容。首次验收保留原始录像和成片，未启用自动清理。
+任务配置只覆盖需要的项：
 
-当前月亮3配置按用户手工设置保留 `auto_upload: false`、VIP名单和 `is_only_self: 1`。启动时自动录制与渲染；已配置好上传参数，但不会自动上传，上传开关由用户控制。
+```yaml
+render_args:
+  overlay:
+    engine: gpu_render
+```
 
-GPU 渲染通过百分比回调更新现有 WebUI 进度；`GpuRender.stop()` 可中止图集准备、逐帧编码及封装等待。未完成文件放在本任务临时目录，停止后清理，既有成片不受影响。用户停止不会触发旧引擎回退。
+`vencoder` 及 `vencoder_args` 沿用原配置。GPU 读取其中的 `-b:v`、`-maxrate`、`-bufsize` 等参数，不使用校准倍率。已运行的 DMR 要在空闲时重启才能加载新代码。
+
+GPU 初始化或渲染失败时自动回退到 `emoji_dmrender`，并从同一布局检查点重编译 E 计划。用户停止不会触发回退或重试；未知引擎名直接报错。回退仍沿用原编码器配置：无 NVENC 的机器需要自行配置可用的软件编码器，回退不会自动改编码器。
+
+## 只渲染已有录像
+
+```powershell
+.\venv\Scripts\python.exe render_only.py
+.\venv\Scripts\python.exe render_only.py --task 月亮3 --video "D:\录像\原片.flv" --danmaku "D:\录像\原片.jsonl" --output "D:\录像\成片.mp4"
+```
+
+不带参数时按视频/弹幕→任务→输出→确认逐步选择，也支持文件夹批量。参数模式不提问；`--output test.mp4` 可使用当前目录。输出已存在时，交互模式可覆盖/改名/跳过，参数模式会报错。
+
+代码只依赖仓库的 `DMR/`、`configs/` 和安装依赖，不需要 `perf/`、演示素材或开发机目录。维护后先用少量已录完素材验证录制→渲染→合并/上传衔接，再恢复自动任务。

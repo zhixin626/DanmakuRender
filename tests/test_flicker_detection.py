@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 
 from DMR.Render.sprites import build_atlas
-from perf.overlay_signal import OverlaySignal, find_dropouts
+from tests.render_checks import OverlaySignal, find_dropouts
 
 
 def test_user_video_dropout_is_detected_but_fixed_frames_are_not():

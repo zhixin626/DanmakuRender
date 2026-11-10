@@ -4,7 +4,7 @@ import subprocess
 
 import numpy as np
 
-from perf.check_flicker import frame_stream
+from tests.render_checks import frame_stream
 
 
 def test_delayed_video_keeps_first_frame_back_to_audio_origin(tmp_path):
