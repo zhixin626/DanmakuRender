@@ -37,6 +37,14 @@
    - **配置注释**（`min_fps` 的值**不改**）：`engine` 的注释中加入 `gpu_render`；`min_fps` 的说明改为整数倍规则，删除过时的中文说明和新加的英文注释，统一用中文；"以下参数只供 emoji_dmrender 使用"改为同时适用于 `gpu_render`；
    - **`dmr_gate.py` 识别 worktree 中运行的 DMR**（例如 `DMR-月亮3.bat` 启动的实例）：它渲染时也要避让。
 
+6. **引擎与 DMR 的约定统一（用户确认，修复 BAT 实测中 `onRenderEnd` 崩溃）**
+   - **返回值约定**：在 `baserender.py` 的 `BaseRender` 中写明 `render_one(video, output, **kwargs) -> tuple[bool, VideoInfo | Exception]`，并新增一个公共方法生成输出的 `VideoInfo`（复制源 VideoInfo，设置 `dtype="dm_video"`、`path`、**画布分辨率**、`file_id`、`size`、`ctime`、`dm_file_id=None`、`src_video_id`，保留 `group_id`/`segment_id` 等身份信息）。`dmrender.py`、`emoji_dmrender.py`、`gpu_render.py` **全部改为调用它**，删除 dmrender/emoji_dmrender 中复制的那两段代码。GPU 的统计数据只写日志，不放进返回值。
+   - **引擎登记表**：在 `DMR/Render/__init__.py` 中定义**唯一**一份引擎登记表（名称 → 类、显示名称、是否支持 raster/药丸）。`liveevents.py`、`Render/__init__.py`、`layout_compiler.py`、`render_only.py` 中所有写死的引擎名单都改为查这份表；配置里出现未知的引擎名时**直接报错**，不要悄悄回退。测试中搜索代码，确认 `'emoji_dmrender'`、`'gpu_render'` 等字符串只出现在登记表和各自的引擎文件中。
+   - **衔接点检查**：GPU 失败时回退到 E；用户停止时不回退、不重试，且 DMR 收到的消息被正确识别为"已停止"；进度消息的格式和 E 一致。
+   - **主流程回归测试（必须）**：不启动 `main.py`，直接构造 `Render` 插件 + `LiveEvents`，模拟"录制分段完成 → 派发 gpu_render → 完成消息 → `onRenderEnd`"，断言状态变为 ready，并且后续 `reconcile`（合并/上传派发）正常。对 E 和 G 各跑一遍；再覆盖 G 失败回退、G 被停止两种情况。**只验证 render_only 能输出 mp4 不算通过。**
+   - 封装改用 PyAV 后出现了 x265 初始化日志（`encoded 0 frames`）：确认 `opaque=True` 后日志消失、封装只复制数据，并在汇报中写明。
+   - 完成后提醒用户：需要在月亮3实例空闲时重启 `DMR-月亮3.bat`，修复才会生效。
+
 完成后逐项汇报，演示视频放进新文件夹，然后停下。
 
 ---
