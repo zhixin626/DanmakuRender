@@ -11,10 +11,10 @@ import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE_JSONL = ROOT / "perf" / "samples" / "final_2h" / "少年不太冷_11月9日14点20分.jsonl"
+SOURCE_JSONL = ROOT / "perf" / "samples" / "final_2h" / "原始" / "少年不太冷_11月9日14点20分.jsonl"
 CONFIG_SOURCE = ROOT.parent / "DanmakuRender" / "configs"
-OUTPUT_JSONL = ROOT / "perf" / "samples" / "final_2h" / "少年不太冷_11月9日14点20分_augmented.jsonl"
-CONFIG_DIR = ROOT / "perf" / "tmp" / "final_2h_config"
+OUTPUT_JSONL = ROOT / "perf" / "samples" / "final_2h" / "补充" / "少年不太冷_11月9日14点20分_augmented.jsonl"
+CONFIG_DIR = ROOT / "perf" / "samples" / "final_2h" / "配置"
 
 
 def main() -> None:

@@ -10,7 +10,7 @@ import sys
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -40,6 +40,10 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
     """Render panel nodes with configured fills, borders and text outlines."""
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
+    panel_mask = Image.new("L", (width, height), 0)
+    panel_outline = 0
+    panel_outline_color = (0, 0, 0)
+    panel_outline_alpha = 0
     for node in sorted(visual.get("nodes", []), key=lambda item: item.get("layer", 0)):
         if node.get("type") == "rect":
             x = int(node.get("x", 0))
@@ -61,16 +65,14 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
                 mask_draw.rectangle((0, 0, w, h - radius), fill=255)
             layer = Image.new("RGBA", (w, h), fill)
             image.paste(layer, (x, y), mask)
-            draw.rounded_rectangle(
-                (x, y, x + w, y + h),
-                radius=radius,
-                outline=outline + (outline_alpha,),
-                width=max(0, int(node.get("outline", 0))),
-            )
+            panel_mask.paste(mask, (x, y), mask)
+            panel_outline = max(panel_outline, int(node.get("outline", 0)))
+            panel_outline_color = outline
+            panel_outline_alpha = max(panel_outline_alpha, outline_alpha)
         if node.get("type") == "text":
-            family = str(node.get("font", "Microsoft YaHei"))
+            family = str(node["font"])
             font_path = resolve_font(family, True)
-            size = float(node.get("size", 30))
+            size = float(node["size"])
             text = str(node.get("text", ""))
             images = {
                 token.strip("[]").lower(): asset["path"]
@@ -86,7 +88,7 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
             opacity = max(0.0, min(1.0, float(node.get("opacity", 1.0))))
             x = int(node.get("x", 0))
             y = int(node.get("y", 0))
-            line_height = int(node.get("size", 30))
+            line_height = int(node["size"])
             lines = text.splitlines() or [""]
             for line_index, line in enumerate(lines):
                 sprite = factory.get_sprite_image(
@@ -101,6 +103,15 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
                     sprite.putalpha(alpha)
                 line_x = x - sprite.width if node.get("anchor") == "top_right" else x
                 image.alpha_composite(sprite, (line_x, y + line_index * line_height))
+    if panel_outline > 0:
+        inner = panel_mask.filter(ImageFilter.MinFilter(panel_outline * 2 + 1))
+        border = ImageChops.subtract(panel_mask, inner)
+        outline_layer = Image.new(
+            "RGBA",
+            (width, height),
+            panel_outline_color + (panel_outline_alpha,),
+        )
+        image.paste(outline_layer, (0, 0), border)
     return image
 
 
@@ -135,7 +146,6 @@ def main() -> None:
         width = max(1, int(bounds.get("width", 1)))
         height = max(1, int(bounds.get("height", 1)))
         style = visual.get("style") or {}
-        rgb = parse_color(style.get("color", "#FFFFFF"))
         image_pack = {}
         for token, asset in (visual.get("images") or {}).items():
             key = str(token).strip("[]").lower()
@@ -145,9 +155,10 @@ def main() -> None:
             image = panel_sprite(visual, width, height)
             arrays = rgba_to_yuv(image)
         else:
-            family = str(style.get("font", "Microsoft YaHei"))
-            bold = bool(style.get("bold", True))
-            size = float(style.get("size", 60))
+            rgb = parse_color(style["color"])
+            family = str(style["font"])
+            bold = bool(style["bold"])
+            size = float(style["size"])
             font_name = resolve_font(family, bold)
             factory_key = (font_name, emoji_name, size)
             if factory_key not in factories:
@@ -165,10 +176,10 @@ def main() -> None:
                     else None
                 ),
                 event_pack=image_pack or None,
-                outline=style.get("outline", 1),
-                outline_rgb=parse_color(style.get("outline_color", "#000000")),
+                outline=style["outline"],
+                outline_rgb=parse_color(style["outline_color"]),
             )
-            opacity = float(style.get("opacity", 1.0))
+            opacity = float(style["opacity"])
             arrays = (sprite[0], sprite[1], sprite[2], np.rint(sprite[3] * opacity * 255).astype(np.uint8))
             width = int(sprite[4])
             height = int(sprite[5])

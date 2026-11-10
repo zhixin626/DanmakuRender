@@ -12,9 +12,9 @@ import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-VIDEO = ROOT / "perf" / "samples" / "full_coverage" / "峰哥_8月18日14点19分_1860-2160.flv"
-JSONL = ROOT / "perf" / "samples" / "full_coverage" / "峰哥_8月18日14点19分_1860-2160_augmented.jsonl"
-BASE_CONFIG = ROOT / "perf" / "tmp" / "full_coverage_config"
+VIDEO = ROOT / "perf" / "samples" / "full_coverage" / "原始" / "峰哥_8月18日14点19分_1860-2160.flv"
+JSONL = ROOT / "perf" / "samples" / "full_coverage" / "补充" / "峰哥_8月18日14点19分_1860-2160_augmented.jsonl"
+BASE_CONFIG = ROOT / "perf" / "samples" / "full_coverage" / "配置"
 
 
 def copy_config(source: pathlib.Path, destination: pathlib.Path, variant: bool) -> pathlib.Path:

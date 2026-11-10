@@ -490,6 +490,7 @@ class LayoutCompiler:
         style = {
             "font": font,
             "size": fontsize,
+            "bold": bool(dan_render.get("bold", True)),
             "color": "#FFFFFF",
             "opacity": float(dan_render.get("opacity", 0.8) or 0.8),
             "outline": _pixels(dan_render.get("outline_size"), 1.0),

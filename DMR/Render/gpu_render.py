@@ -104,6 +104,7 @@ class RenderConfig:
     gpu_id: int
     render_plan: pathlib.Path | None
     sprite_data: pathlib.Path | None
+    gpu_rc_args: dict[str, Any]
 
 
 class CaiView:
@@ -431,19 +432,23 @@ def encode_to_file(
 ) -> dict[str, Any]:
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
+    rc_args = dict(config.gpu_rc_args)
+    missing = [key for key in ("rc", "maxbitrate", "vbvbufsize") if rc_args.get(key) in (None, "")]
+    if missing:
+        raise ValueError(
+            "gpu_rc_args 缺少编码参数: " + ", ".join(missing)
+            + "；请在 render_args.overlay.gpu_rc_args 或测试命令中显式配置"
+        )
     encoder = nvc.CreateEncoder(
         width,
         height,
         "NV12",
         False,
         codec=encoder_config(config.video_encoder),
-        rc="vbr",
-        # PyNvVideoCodec's VBR target is measured below the requested value on
-        # this NVENC driver; a 1.2 calibration keeps the resulting stream near
-        # the legacy FFmpeg target while preserving the configured bitrate API.
-        bitrate=str(int(config.bitrate * 1.2)),
-        maxbitrate=str(int(config.bitrate * 1.5)),
-        vbvbufsize=str(int(config.bitrate * 2.4)),
+        rc=str(rc_args["rc"]),
+        bitrate=str(config.bitrate),
+        maxbitrate=str(parse_bitrate(rc_args["maxbitrate"])),
+        vbvbufsize=str(parse_bitrate(rc_args["vbvbufsize"])),
         framerate=frame_rate,
         preset=config.preset,
     )
@@ -477,8 +482,13 @@ def encode_to_file(
                     frame_time = frame_count / frame_rate
                     active_counts.append(compositor.apply(buffer, frame_time))
                     cupy.cuda.Stream.null.synchronize()
+                    cupy.cuda.runtime.deviceSynchronize()
                     for packet in encoder.Encode(buffer):
                         stream.write(packet["data"])
+                    # The encoder may retain the input surface until Encode
+                    # returns; wait before reusing the shared NV12 buffer.
+                    cupy.cuda.Stream.null.synchronize()
+                    cupy.cuda.runtime.deviceSynchronize()
                     frame_count += 1
                     if config.max_frames is not None and frame_count >= config.max_frames:
                         break
@@ -495,8 +505,11 @@ def encode_to_file(
                     frame_time = frame_count / frame_rate
                     active_counts.append(compositor.apply(buffer, frame_time))
                     cupy.cuda.Stream.null.synchronize()
+                    cupy.cuda.runtime.deviceSynchronize()
                     for packet in encoder.Encode(buffer):
                         stream.write(packet["data"])
+                    cupy.cuda.Stream.null.synchronize()
+                    cupy.cuda.runtime.deviceSynchronize()
                     frame_count += 1
         else:
             for decoded, pts in itertools.chain((first,), frames):
@@ -507,8 +520,11 @@ def encode_to_file(
                 frame_time = frame_count / frame_rate
                 active_counts.append(compositor.apply(buffer, frame_time))
                 cupy.cuda.Stream.null.synchronize()
+                cupy.cuda.runtime.deviceSynchronize()
                 for packet in encoder.Encode(buffer):
                     stream.write(packet["data"])
+                cupy.cuda.Stream.null.synchronize()
+                cupy.cuda.runtime.deviceSynchronize()
                 frame_count += 1
                 if config.max_frames is not None and frame_count >= config.max_frames:
                     break
@@ -574,6 +590,7 @@ def render_one(video: Any, output: str, progress_cb: Any = None, **kwargs: Any) 
         gpu_id=int(kwargs.get("gpu_id", 0)),
         render_plan=pathlib.Path(kwargs["render_plan"]) if kwargs.get("render_plan") else None,
         sprite_data=pathlib.Path(kwargs["sprite_data"]) if kwargs.get("sprite_data") else None,
+        gpu_rc_args=dict(kwargs.get("gpu_rc_args") or {}),
     )
     if bool(config.render_plan) != bool(config.sprite_data):
         raise ValueError("render_plan and sprite_data must be supplied together")
@@ -611,6 +628,9 @@ def main() -> None:
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--vencoder", default="hevc_nvenc")
     parser.add_argument("--bitrate", type=int, required=True)
+    parser.add_argument("--rc", default=None)
+    parser.add_argument("--maxbitrate", default=None)
+    parser.add_argument("--vbvbufsize", default=None)
     parser.add_argument("--preset", default="P4")
     parser.add_argument("--fps", type=float)
     parser.add_argument("--min-fps", type=float)
@@ -633,6 +653,7 @@ def main() -> None:
         gpu_id=args.gpu_id,
         render_plan=args.render_plan,
         sprite_data=args.sprite_data,
+        gpu_rc_args={"rc": args.rc, "maxbitrate": args.maxbitrate, "vbvbufsize": args.vbvbufsize},
     )
     print(json.dumps(result, ensure_ascii=False))
 

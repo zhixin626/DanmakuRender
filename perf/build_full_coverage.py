@@ -145,7 +145,7 @@ def main() -> None:
     """Create the full_coverage sample, config copy, and manifest entry."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=pathlib.Path, default=ROOT / "perf" / "samples" / "full_coverage")
-    parser.add_argument("--config-output", type=pathlib.Path, default=ROOT / "perf" / "tmp" / "full_coverage_config")
+    parser.add_argument("--config-output", type=pathlib.Path, default=ROOT / "perf" / "samples" / "full_coverage" / "配置")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     metadata, events = read_events(SOURCE_JSONL)
@@ -159,8 +159,10 @@ def main() -> None:
     )
     all_events = selected + synthetic
     all_events.sort(key=lambda event: event["received_at"])
-    output_video = args.output / "峰哥_8月18日14点19分_1860-2160.flv"
-    output_jsonl = args.output / "峰哥_8月18日14点19分_1860-2160_augmented.jsonl"
+    output_video = args.output / "原始" / "峰哥_8月18日14点19分_1860-2160.flv"
+    output_jsonl = args.output / "补充" / "峰哥_8月18日14点19分_1860-2160_augmented.jsonl"
+    output_video.parent.mkdir(parents=True, exist_ok=True)
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", str(START_SECONDS), "-i", str(SOURCE_VIDEO), "-t", str(DURATION_SECONDS), "-c", "copy", str(output_video)], check=True)
     with output_jsonl.open("w", encoding="utf-8") as target:
         target.write(json.dumps({**metadata, "segment_start_time": selected_start}, ensure_ascii=False) + "\n")

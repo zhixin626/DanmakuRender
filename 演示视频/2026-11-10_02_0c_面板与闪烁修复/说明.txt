@@ -1,0 +1,21 @@
+02_1b-2_文字画质对齐_左E右GPU_v2.mp4：同一时刻 E/G 对比；面板字号使用 SpriteFactory/SCALE=0.75。
+03_1b-2_配置可调_左配置A右配置B_v2.mp4：配置 A/B 对比；A/B 同时修改 r2l、slide_left、slide_right 的字体、颜色、圆角、字号和速度。
+04_1b-3_帧率_左30fps右50fps_v2.mp4：左 E 30fps、右 GPU 50fps；辅助对比，另可分别播放各自源视频检查顺滑度。
+04_E_30fps_独立.mp4：与 04_G_50fps_独立.mp4 同一素材、同一时间段（18–48 秒），独立播放检查，不做 hstack 帧率统一。
+04_G_50fps_独立.mp4：与 E 同时段同长度，50fps；用于观察弹幕滚动和镜头运动，不会因另一侧视频较短而卡在最后一帧。
+配置 A/B 完整差异：
+- r2l font: Microsoft YaHei → SimSun；r2l.danmaku font 同步改变。
+- r2l/r2l.danmaku fontsize: 60 → 48。
+- r2l.danmaku opacity: 0.78 → 0.90。
+- r2l.danmaku outline_size: 1px → 3px；outline_color: #000000 → #202020。
+- r2l vertical_gap: 10px → 16px；r2l screen_duration: 6s → 12s。
+- slide_left/slide_right font: Microsoft YaHei → SimSun；fontsize: 30 → 26。
+- slide_left/slide_right name_color: #666666 → #2E5D9F；content_color: #FFFFFF → #FFF2C7；corner_radius: 40px → 24px；top_opacity: 0.7 → 0.85。
+- GPU v2 额外修复：面板按上下圆角 shape 绘制，SC 多行逐行 SpriteFactory 绘制，Encode 前同步 CUDA stream。
+
+0c 补充证据（2026-11-10）：
+- `perf/results/phase1d_0c_shots/pill_E_G_54s_3x.png`：E/G 同一时刻、药丸区域放大 3 倍并排；上半部分下边缘与下半部分上边缘为直线相接，外轮廓只在整体最上/最下端圆角。
+- `perf/results/phase1d_0c_shots/sc30_E_G_花心痒痒_三行_3x.png`：`花心痒痒 ¥30` 三行 SC 的 E/G 并排放大 3 倍。
+- 04 卡住原因：原对比视频把 50fps GPU 1500 帧（约 30 秒）与另一侧更长的 E 片段直接 `hstack`；短侧结束后，hstack 保留最后一帧，画面看起来像卡住。现在改为同一时段、同 30 秒的独立文件：`04_E_30fps_独立.mp4`（30.10s，903 帧）和 `04_G_50fps_独立.mp4`（30.014s，1500 帧）。
+- 逐帧检查输出：03/25fps 和 04/50fps 均解码 1500/1500 帧；检查脚本只把“前后两帧都有叠加、当前帧孤立消失”计为闪烁，两个输出均为 0。弹幕区域 1% 分位数与中位数写入 `perf/results/phase1d_0c.md`。
+- 保留常量说明：`check_flicker.py` 的 270×480 是全分辨率 1080×1920 的 1/4 缩放，用于逐帧检查；32 像素是缩放后最小有效区域，排除只剩边缘的进出场像素；10.0 是 99 分位像素差的存在性阈值；0.1 是用中位信号估计掉叠加阈值的比例；`gpu_render.py` 中 32/8 是 CUDA tile 大小，2 是 NV12 UV 平面抽样，`SCALE=0.75` 是 ASS/Pillow 单位换算。其余字体、字号、颜色、描边均来自 RenderPlan 字段，缺字段会抛出 KeyError。

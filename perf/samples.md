@@ -43,10 +43,10 @@
 ## full_coverage/峰哥 8月18日14点19分
 - 原始视频：D:\DanmakuRender\Tasks文件\峰哥\8月18日14点19分.flv
 - 原始弹幕：D:\DanmakuRender\Tasks文件\峰哥\8月18日14点19分.jsonl
-- 截取：1860s–2160s；输出：D:\DanmakuRender-perf\perf\samples\full_coverage\峰哥_8月18日14点19分_1860-2160.flv
-- 增强弹幕：D:\DanmakuRender-perf\perf\samples\full_coverage\峰哥_8月18日14点19分_1860-2160_augmented.jsonl；真实事件数量：392；总事件数量：406；类型：{'danmaku': 274, 'member': 3, 'gift': 117, 'superchat': 12, 'emoji_or_emoticon': 56}
+- 截取：1860s–2160s；输出：D:\DanmakuRender-perf\perf\samples\full_coverage\原始\峰哥_8月18日14点19分_1860-2160.flv
+- 增强弹幕：D:\DanmakuRender-perf\perf\samples\full_coverage\补充\峰哥_8月18日14点19分_1860-2160_augmented.jsonl；真实事件数量：392；总事件数量：406；类型：{'danmaku': 274, 'member': 3, 'gift': 117, 'superchat': 12, 'emoji_or_emoticon': 56}
 - 真实 SC 价格（片段相对秒）：30 元（54.1s）, 50 元（121.5s）, 2 元（153.9s）, 30 元（192.8s）, 50 元（235.7s）, 30 元（297.9s）
-- 测试配置副本：D:\DanmakuRender-perf\perf\tmp\full_coverage_config\global.yml；三层继承快照：D:\DanmakuRender-perf\perf\tmp\full_coverage_config\resolved_DMR-峰哥.yml；VIP 用户：477061263（原配置无 vip_users，未修改正式配置）
+- 测试配置副本：D:\DanmakuRender-perf\perf\samples\full_coverage\配置\global.yml；三层继承快照：D:\DanmakuRender-perf\perf\samples\full_coverage\配置\resolved_DMR-峰哥.yml；VIP 用户：477061263（原配置无 vip_users，未修改正式配置）
 - 合成事件：6 个 handwritten SC，价格 0.5/5/20/75/300/1200 元，在 30–35 秒内密集进入；0.5 元至 30 秒档先退出，验证 slide_left reflow、重叠进出和六档颜色/时长。
 - 合成事件：6 个 handwritten 礼物，价格 0.5/5/20/75/300/1200 元，集中在片段 20–25 秒；0.5 元礼物低于 slide_right.gift.min_price_cny=1，预期不显示。
 - 合成事件：2 个 modified 会员，22s 和 24s，与礼物同段进入，验证 slide_right 共用队列。
@@ -54,6 +54,6 @@
 ## final_2h/少年不太冷 11月9日14点20分
 - 原始视频：D:\DanmakuRender\Tasks文件\少年不太冷\11月9日14点20分.flv
 - 原始弹幕：D:\DanmakuRender\Tasks文件\少年不太冷\11月9日14点20分.jsonl
-- 隔离副本：D:\DanmakuRender-perf\perf\samples\final_2h; 增强弹幕：D:\DanmakuRender-perf\perf\samples\final_2h\少年不太冷_11月9日14点20分_augmented.jsonl; 类型统计：{'danmaku': 885, 'gift': 97, 'superchat': 36, 'member': 12}
+- 隔离副本：D:\DanmakuRender-perf\perf\samples\final_2h\原始\（视频和原始弹幕）；增强弹幕：D:\DanmakuRender-perf\perf\samples\final_2h\补充\少年不太冷_11月9日14点20分_augmented.jsonl；类型统计：{'danmaku': 885, 'gift': 97, 'superchat': 36, 'member': 12}
 - 合成事件：每 20 分钟一批，SC/礼物各六档价格、会员共用 slide_right、VIP 药丸和 Emoji；0.5 元礼物按 min_price_cny=1 预期不显示。
-- 三层配置副本：D:\DanmakuRender-perf\perf\tmp\final_2h_config；任务配置保留正式 VIP 用户 187495453/199828655/9881469。
+- 三层配置副本：D:\DanmakuRender-perf\perf\samples\final_2h\配置；任务配置保留正式 VIP 用户 187495453/199828655/9881469。
