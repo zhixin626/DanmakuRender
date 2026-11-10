@@ -114,7 +114,7 @@
 Claude 对全部改动做了代码审查，以下按优先级排列：
 
 **今晚的工作循环（用户要求，必须遵守）**：
-1. 每完成一个字母组（A、B、C……）：提交并推送 → 用 `gh pr comment 1 --body-file` 发一条简短汇报 → 用 `gh pr view 1 --comments` **拉取 PR 评论**，查看自上次拉取以来 Claude 的新评论。
+1. 每完成一个字母组（A、B、C……）：提交并推送 → 用 `gh pr comment 1 --body-file` 发一条简短汇报 → **等待 5 分钟**（`Start-Sleep -Seconds 300`，用户要求，给 Claude 审查的时间）→ 用 `gh pr view 1 --comments` **拉取 PR 评论**，查看自上次拉取以来 Claude 的新评论。
 2. 如果 Claude 的新评论里有"必须修"的问题，**先修掉再进入下一组**（修完同样推送和汇报）；只是建议的，记下来，在总汇报里说明是否采纳。
 3. **不要停下等人回复**，按 A → I 的顺序一直做下去。
 4. 最后一组（I）完成后：推送并发总汇报 → **等待 5 分钟**（PowerShell：`Start-Sleep -Seconds 300`）→ 再拉取一次 PR 评论：
@@ -127,6 +127,11 @@ Claude 对全部改动做了代码审查，以下按优先级排列：
 1. **"停止"状态会卡住整场直播的后续流程**：`liveevents.onRenderStop()` 把槽位标为 `'stopped'`，但 `_group_is_done()`（第 819 行起）的终态列表里没有 `'stopped'`，所以这一场永远不会被判为完成：不会释放内存，`restart_when_idle` 永远等不到空闲，合并也可能一直等待。请明确语义并实现：用户停止渲染（或程序退出）后，这一段应当**可以恢复**（下次启动或在 WebUI 中重试时重新派发渲染），而不是永远挂起；在恢复之前不阻塞空闲重启。写主流程回归测试：停止 → 判定空闲 → 重新派发 → 渲染完成 → 合并。
 2. **字体找不到时会悄悄换成不支持中文的字体**：`sprites.resolve_font()` 使用 `findfont(..., fallback_to_default=True)`，配置的字体不存在（例如写了中文字体名或没有安装的字体）时，会返回 matplotlib 默认的 DejaVu Sans，中文显示成方框，而且没有任何警告。之前有一张对比图里 G 的面板字体变成了细的衬线体，可能就是这个原因。请改为：`fallback_to_default=False`，找不到时**记录 warning**，并回退到支持中文的系统字体（Windows 下为微软雅黑，按粗细选择），同时在单元测试中覆盖"字体不存在"的情况。
 3. `sprites.py` 中其余几处 `except Exception: pass`（emoticon 注册表读取、平台识别等）：至少记录 debug 或 warning 日志，不要静默吞掉。
+
+**A2. 停止渲染改用简单方案（用户已决定，在当前组完成后立即做）**
+- **删除** A 组新增的 `.dmr/render_<任务>.json` 检查点机制（`liveevents.py` 中 `_resume_path`、`_read_render_state`、`_save_render_state`、`_restore_render_group`、`_restore_render_tasks` 及相关调用和测试），回到项目"不把 liveevents 状态落盘"的设计。
+- 改为：`'stopped'` 和渲染出错一样视为**转人工的终态**，不阻塞空闲重启和内存回收；被停止的渲染任务进入 `Render` 插件**已有的** `failed_tasks`（`.temp/failed_renders.json`），在 WebUI 中通过已有的"重试"重新渲染。不需要在重启后自动恢复合并。
+- 主流程测试：停止 → 该组被判定为完成（空闲重启不再被阻塞）→ 任务出现在 failed_tasks 中 → 调用 retry 能重新渲染。删除不再适用的检查点相关测试。
 
 **B. 排版质量（用户已确认的小问题）**
 4. **换行规则**：英文和数字按**单词**换行（单个单词超过整行宽度时才在单词内部断开）；中文标点（。，、！？；：」』）以及右括号**不放在行首**，左括号不放在行尾（简单的避头尾规则）。只修改 Pillow 的 `PillowText.wrap`（GPU 引擎使用的那个），并写单元测试。
