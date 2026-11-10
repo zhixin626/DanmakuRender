@@ -30,10 +30,32 @@ def test_canvas_pixels_and_black_bars():
             self.__cuda_array_interface__ = dict(array.__array_interface__)
             self.__cuda_array_interface__['strides'] = array.strides
     class CP:
-        empty, uint8, int32, arange, minimum = np.empty, np.uint8, np.int32, np.arange, np.minimum
+        empty, uint8, int32, float32 = np.empty, np.uint8, np.int32, np.float32
+        arange, minimum, maximum = np.arange, np.minimum, np.maximum
         @staticmethod
         def asarray(view, copy=False):
             return arrays[view.__cuda_array_interface__['data'][0]]
+        @staticmethod
+        def RawKernel(code,name):
+            # CPU implementation of the sampling contract; native CUDA pixels
+            # are independently compared to a scalar reference in perf.
+            def run(grid,block,args):
+                sy,suv,dst = args[:3]
+                cw,ch,fw,fh,ox,oy = map(int,args[3:9])
+                targets = [dst[:ch],dst[ch:].reshape(ch//2,cw//2,2)]
+                targets[0].fill(16)
+                targets[1].fill(128)
+                for index,(src,target) in enumerate(zip((sy,suv),targets)):
+                    factor = 2**index
+                    x,wx,y,wy = args[16+4*index:20+4*index]
+                    x1,y1 = np.minimum(x+1,src.shape[1]-1),np.minimum(y+1,src.shape[0]-1)
+                    if index:
+                        wx,wy = wx[:,None],wy[:,None]
+                    top = src[y[:,None],x[None,:]]*(1-wx)+src[y[:,None],x1[None,:]]*wx
+                    bottom = src[y1[:,None],x[None,:]]*(1-wx)+src[y1[:,None],x1[None,:]]*wx
+                    values = np.floor(top*(1-wy[:,None])+bottom*wy[:,None]+.5).astype(np.uint8)
+                    target[oy//factor:(oy+fh)//factor,ox//factor:(ox+fw)//factor] = values
+            return run
     y = np.full((8,10,1),200,np.uint8)
     uv = np.full((4,5,2),90,np.uint8)
     arrays = {a.__array_interface__['data'][0]:a for a in (y,uv)}
@@ -104,7 +126,7 @@ def test_decoder_drains_tail_with_empty_packet(monkeypatch):
         calls.append(item)
         return [SimpleNamespace(getPTS=lambda: 0 if item is packet else 1)]
     nvc=SimpleNamespace(CreateDemuxer=lambda **_:Demux(), CreateDecoder=lambda **_:SimpleNamespace(Decode=decode), PacketData=lambda:eof)
-    cp=SimpleNamespace(cuda=SimpleNamespace(Stream=SimpleNamespace(null=SimpleNamespace(synchronize=lambda:None))))
+    cp=SimpleNamespace(cuda=SimpleNamespace(Event=lambda **_:SimpleNamespace(record=lambda:None,synchronize=lambda:None)))
     monkeypatch.setattr(gpu,'load_cuda_modules',lambda:(cp,nvc))
     monkeypatch.setattr(gpu,'frame_geometry',lambda _:(2,2))
     monkeypatch.setattr(gpu,'NV12Buffer',lambda *_:SimpleNamespace(load=lambda _:None))

@@ -59,7 +59,8 @@ def check_layer_pixels():
     return {'pixels':pixels.tolist(),'expected_text_y':210,'passed':True}
 
 
-def render_coverage(only=None, delivery=DELIVERY):
+def render_coverage(only=None, delivery=DELIVERY, video_path=VIDEO, events_path=EVENTS,
+                    rescale=False, names=None, config_name='覆盖配置'):
     """Render the same isolated source-task settings through both public engines."""
     gate = decide(15)
     if not gate['go']:
@@ -68,24 +69,27 @@ def render_coverage(only=None, delivery=DELIVERY):
     config = Config(str(MATERIAL/'配置/global.yml'))
     config.config_dir = str(MATERIAL/'配置')
     options = config.get_render_args('峰哥')
+    if rescale:
+        options.update(rescale_to_1080p=True,rescale_orientation='auto')
     # Validation-only overrides; production/personal YAML is never written.
     options['slide_right']['gift']['min_price_cny'] = 0
     options['slide_left']['superchat']['use_event_background_colors'] = False
     for side in ('slide_left','slide_right'):
         options[side]['corner_radius'] = '20px'
     delivery.mkdir(exist_ok=True)
-    (delivery/'覆盖配置.json').write_text(json.dumps(options,ensure_ascii=False,indent=2),encoding='utf8')
+    WORK.mkdir(parents=True,exist_ok=True)
+    (delivery/f'{config_name}.json').write_text(json.dumps(options,ensure_ascii=False,indent=2),encoding='utf8')
     summary_file = delivery/'覆盖渲染.json'
     result_summary = json.loads(summary_file.read_text(encoding='utf8')) if summary_file.exists() else {}
-    for name,engine_name in [('02_增强素材_旧版E','emoji_dmrender'),('03_增强素材_GPU_G','gpu_render')]:
+    for name,engine_name in names or [('02_增强素材_旧版E','emoji_dmrender'),('03_增强素材_GPU_G','gpu_render')]:
         if only and engine_name!=only:
             continue
         if dmr_activity()['rendering']:
             raise RuntimeError('DMR started rendering; discard this test')
-        video = VideoInfo(path=str(VIDEO),dm_file_id=str(EVENTS),duration=FFprobe.get_timeline_duration(str(VIDEO)),
-                          resolution=FFprobe.get_resolution(str(VIDEO)),group_id='coverage',segment_id=1,file_id='source')
+        video = VideoInfo(path=str(video_path),dm_file_id=str(events_path),duration=FFprobe.get_timeline_duration(str(video_path)),
+                          resolution=FFprobe.get_resolution(str(video_path)),group_id='coverage',segment_id=1,file_id='source')
         compiled = LayoutCompiler(options,engine=engine_name,engine_config=options).compile(
-            video=video,events_path=str(EVENTS),work_dir=str(WORK))
+            video=video,events_path=str(events_path),work_dir=str(WORK))
         plan = delivery/f'{name}_plan.json'
         plan.write_bytes(Path(compiled.render_plan_path).read_bytes())
         renderer = get_engine(engine_name).load()(**options)

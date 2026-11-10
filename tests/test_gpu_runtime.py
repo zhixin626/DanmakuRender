@@ -61,7 +61,7 @@ def test_cancel_cleans_partial_and_releases_decoder(monkeypatch,tmp_path):
     monkeypatch.setattr(gpu,'load_cuda_modules',lambda:(cp,None))
     monkeypatch.setattr(gpu,'decode_frames',frames)
     monkeypatch.setattr(gpu,'source_frame_rate',lambda _:25)
-    monkeypatch.setattr(gpu.FFprobe,'run_ffprobe',lambda _:{'format':{'duration':1,'start_time':0}})
+    monkeypatch.setattr(gpu.FFprobe,'run_ffprobe',lambda _:{'format':{'duration':1,'start_time':0},'streams':[{}]})
     def interrupt(*args,**kwargs):
         args[4].write_bytes(b'unfinished')
         kwargs['stop_event'].set()

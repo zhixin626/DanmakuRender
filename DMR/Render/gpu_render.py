@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import math
@@ -20,20 +19,11 @@ from dataclasses import dataclass
 from typing import Any, Iterator
 from fractions import Fraction
 
-try:
-    from .layout_models import RenderEvent
-    from .resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
-    from ..utils.ffprobe import source_frame_rate
-    from .baserender import BaseRender, RenderStopped
-    from .sprites import build_atlas
-except ImportError:  # standalone perf launcher
-    import sys
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-    from DMR.Render.layout_models import RenderEvent
-    from DMR.Render.resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
-    from DMR.utils.ffprobe import source_frame_rate
-    from DMR.Render.baserender import BaseRender, RenderStopped
-    from DMR.Render.sprites import build_atlas
+from .layout_models import RenderEvent
+from .resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
+from ..utils.ffprobe import source_frame_rate
+from .baserender import BaseRender, RenderStopped
+from .sprites import build_atlas
 
 
 logger = logging.getLogger(__name__)
@@ -98,6 +88,58 @@ const int* widths, const int* heights, const int* event_alpha, int count,
     uv[uy * width + ux * 2 + 1] = (unsigned char)vvalue;
 }
 """
+
+
+SCALE_KERNEL = r"""
+extern "C" __global__
+void scale_nv12(const unsigned char* sy, const unsigned char* suv, unsigned char* dst,
+    int cw, int ch, int fw, int fh, int ox, int oy, int sw, int sh,
+    int sy_row, int sy_col, int uv_row, int uv_col, int uv_channel,
+    const int* yx, const float* ywx, const int* yy, const float* ywy,
+    const int* ux, const float* uwx, const int* uy, const float* uwy) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= cw * ch * 3 / 2) return;
+    bool luma = index < cw * ch;
+    int local = luma ? index : index - cw * ch;
+    int out_x = local % cw;
+    int x = luma ? out_x - ox : out_x / 2 - ox / 2;
+    int y = local / cw - (luma ? oy : oy / 2);
+    int width = luma ? fw : fw / 2;
+    int height = luma ? fh : fh / 2;
+    if (x < 0 || y < 0 || x >= width || y >= height) {
+        dst[index] = luma ? 16 : 128;
+        return;
+    }
+    int x0 = luma ? yx[x] : ux[x];
+    int y0 = luma ? yy[y] : uy[y];
+    int x1 = min(x0 + 1, (luma ? sw : sw / 2) - 1);
+    int y1 = min(y0 + 1, (luma ? sh : sh / 2) - 1);
+    float wx = luma ? ywx[x] : uwx[x];
+    float wy = luma ? ywy[y] : uwy[y];
+    const unsigned char* src = luma ? sy : suv;
+    int row = luma ? sy_row : uv_row;
+    int col = luma ? sy_col : uv_col;
+    int channel = luma ? 0 : (out_x % 2) * uv_channel;
+    float top = src[y0 * row + x0 * col + channel] * (1 - wx)
+              + src[y0 * row + x1 * col + channel] * wx;
+    float bottom = src[y1 * row + x0 * col + channel] * (1 - wx)
+                 + src[y1 * row + x1 * col + channel] * wx;
+    dst[index] = (unsigned char)(top * (1 - wy) + bottom * wy + 0.5f);
+}
+"""
+
+# Phases in the half-resolution chroma grid, relative to luma pixel centres.
+# The encoder emits ordinary MPEG/H.26x left-sited NV12 (x=.25, y=.5).
+CHROMA_PHASES = {'left': (.25, .5), 'center': (.5, .5), 'topleft': (.25, .25),
+                'top': (.5, .25), 'bottomleft': (.25, .75), 'bottom': (.5, .75)}
+
+
+def sample_axis(cupy: Any, source: int, target: int, source_phase=.5, target_phase=.5):
+    """Return clamped lower indices and bilinear weights for pixel centres."""
+    positions = (cupy.arange(target, dtype=cupy.float32) + target_phase) * (source / target) - source_phase
+    positions = cupy.minimum(cupy.maximum(positions, 0), source - 1)
+    lower = positions.astype(cupy.int32)
+    return lower, (positions - lower).astype(cupy.float32)
 
 
 @dataclass(frozen=True)
@@ -206,17 +248,44 @@ def decode_frames(video: pathlib.Path, nvc: Any, gpu_id: int) -> Iterator[tuple[
     cupy, _ = load_cuda_modules()
 
     def retain(decoded):
-        owned = NV12Buffer(cupy, *frame_geometry(decoded))
+        nonlocal next_slot, copied
+        slot = next_slot % len(buffers)
+        geometry = frame_geometry(decoded)
+        owned = buffers[slot]
+        if owned is None or (owned.width, owned.height) != geometry:
+            owned = buffers[slot] = NV12Buffer(cupy, *geometry)
+            owned.ready = cupy.cuda.Event(disable_timing=True)
         owned.load(decoded)
-        cupy.cuda.Stream.null.synchronize()
+        owned.ready.record()
+        copied = owned.ready
+        next_slot += 1
         return owned, float(decoded.getPTS()) * time_base
 
-    for packet in demuxer:
-        for decoded in decoder.Decode(packet):
+    # The CFR scheduler holds current + lookahead, then asks for one more frame
+    # before yielding. Three slots keep those references distinct, even in VFR.
+    buffers = [None] * 3
+    next_slot = 0
+    copied = None
+
+    def decode(packet):
+        nonlocal copied
+        # Decode may reuse its output surfaces. Fence only the latest D2D copy
+        # before letting the SDK advance; other CUDA work need not be drained.
+        if copied is not None:
+            copied.synchronize()
+            copied = None
+        return decoder.Decode(packet)
+
+    try:
+        for packet in demuxer:
+            for decoded in decode(packet):
+                yield retain(decoded)
+        # The installed SDK drains delayed frames on an empty PacketData.
+        for decoded in decode(nvc.PacketData()):
             yield retain(decoded)
-    # PyNvVideoCodec drains delayed frames on an empty PacketData (bsl=0).
-    for decoded in decoder.Decode(nvc.PacketData()):
-        yield retain(decoded)
+    finally:
+        if copied is not None:
+            copied.synchronize()
 
 
 def schedule_frames(
@@ -353,6 +422,10 @@ class NV12Buffer:
         self.buffer = cupy.empty((height * 3 // 2, width), dtype=cupy.uint8)
         self.y = self.buffer[:height].reshape(height, width, 1)
         self.uv = self.buffer[height:].reshape(height // 2, width // 2, 2)
+        self.ready = None
+        self.chroma_location = 'left'
+        self.scale_tables = {}
+        self.scale_kernel = None
 
     def load(self, decoded: Any) -> None:
         """Copy decoder planes into the stable NV12 allocation."""
@@ -365,45 +438,45 @@ class NV12Buffer:
 
     def load_into_canvas(self, decoded: Any) -> None:
         """Copy a decoded NV12 frame, scaling and letterboxing on the GPU."""
-        planes = decoded.cuda()
-        y_source = planes[0]
-        y_cai = y_source.__cuda_array_interface__
-        y_shape = tuple(int(value) for value in y_cai["shape"])
-        y_strides = tuple(int(value) for value in (y_cai["strides"] or y_source.strides))
-        source_height, source_width = y_shape[:2]
-        source_y = self.cupy.asarray(CaiView(y_source, y_shape, y_strides), copy=False).reshape(source_height, source_width)
+        ready = getattr(decoded, 'ready', None)
+        if ready is not None:
+            self.cupy.cuda.get_current_stream().wait_event(ready)
+        views = []
+        for source in decoded.cuda():
+            cai = source.__cuda_array_interface__
+            shape = tuple(int(value) for value in cai['shape'])
+            strides = tuple(int(value) for value in (cai['strides'] or source.strides))
+            views.append(self.cupy.asarray(CaiView(source, shape, strides), copy=False))
+        source_height, source_width = views[0].shape[:2]
+        source_y = views[0].reshape(source_height, source_width)
+        source_uv = views[1].reshape(source_height // 2, source_width // 2, 2)
         if source_width == self.width and source_height == self.height:
             self.y[..., 0] = source_y
-            uv_source = planes[1]
-            uv_cai = uv_source.__cuda_array_interface__
-            uv_shape = tuple(int(value) for value in uv_cai["shape"])
-            uv_strides = tuple(int(value) for value in (uv_cai["strides"] or uv_source.strides))
-            self.uv[...] = self.cupy.asarray(CaiView(uv_source, uv_shape, uv_strides), copy=False).reshape(self.uv.shape)
+            self.uv[...] = source_uv
             return
+        self._scale(source_y, source_uv)
+
+    def _scale(self, source_y: Any, source_uv: Any) -> None:
+        """Scale both planes in one kernel, using cached centre/siting tables."""
+        source_height, source_width = source_y.shape
         scaled_width, scaled_height, offset_x, offset_y = fit_canvas(
             (source_width, source_height), (self.width, self.height))
-        scale_x, scale_y = scaled_width / source_width, scaled_height / source_height
-        self.y[..., 0] = 16
-        x_indices = self.cupy.minimum(
-            (self.cupy.arange(scaled_width) / scale_x).astype(self.cupy.int32), source_width - 1
-        )
-        y_indices = self.cupy.minimum(
-            (self.cupy.arange(scaled_height) / scale_y).astype(self.cupy.int32), source_height - 1
-        )
-        self.y[offset_y:offset_y + scaled_height, offset_x:offset_x + scaled_width, 0] = source_y[y_indices[:, None], x_indices[None, :]]
-        uv_source = planes[1]
-        uv_cai = uv_source.__cuda_array_interface__
-        uv_shape = tuple(int(value) for value in uv_cai["shape"])
-        uv_strides = tuple(int(value) for value in (uv_cai["strides"] or uv_source.strides))
-        source_uv = self.cupy.asarray(CaiView(uv_source, uv_shape, uv_strides), copy=False).reshape(source_height // 2, source_width // 2, 2)
-        self.uv[...] = 128
-        uv_x = self.cupy.minimum(
-            (self.cupy.arange(scaled_width // 2) / scale_x).astype(self.cupy.int32), source_width // 2 - 1
-        )
-        uv_y = self.cupy.minimum(
-            (self.cupy.arange(scaled_height // 2) / scale_y).astype(self.cupy.int32), source_height // 2 - 1
-        )
-        self.uv[offset_y // 2:offset_y // 2 + scaled_height // 2, offset_x // 2:offset_x // 2 + scaled_width // 2] = source_uv[uv_y[:, None], uv_x[None, :]]
+        key = (source_width, source_height, self.width, self.height, self.chroma_location)
+        if key not in self.scale_tables:
+            phase_x, phase_y = CHROMA_PHASES[self.chroma_location]
+            axes = ((source_width, scaled_width, .5, .5),
+                    (source_height, scaled_height, .5, .5),
+                    (source_width // 2, scaled_width // 2, phase_x, .25),
+                    (source_height // 2, scaled_height // 2, phase_y, .5))
+            self.scale_tables[key] = tuple(value for axis in axes for value in sample_axis(self.cupy, *axis))
+        if self.scale_kernel is None:
+            self.scale_kernel = self.cupy.RawKernel(SCALE_KERNEL, 'scale_nv12')
+        geometry = (self.width, self.height, scaled_width, scaled_height, offset_x, offset_y,
+                    source_width, source_height, *source_y.strides, *source_uv.strides)
+        count = self.width * self.height * 3 // 2
+        self.scale_kernel(((count + 255) // 256,), (256,),
+            (source_y, source_uv, self.buffer,
+             *(self.cupy.int32(value) for value in geometry), *self.scale_tables[key]))
 
     def cuda(self) -> list[Any]:
         """Expose the two NV12 planes through the encoder protocol."""
@@ -517,12 +590,15 @@ def encode_to_file(
     progress_cb=None,
     expected_frames: int | None = None,
     stop_event=None,
+    chroma_location='left',
 ) -> dict[str, Any]:
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
     encode_stream = cupy.cuda.Stream(non_blocking=True)
     encoder = create_encoder(nvc, width, height, frame_rate, config.video_encoder, config.encoder_options, encode_stream)
     ring = FrameRing(cupy, width, height, encode_stream)
+    for buffer in ring.buffers:
+        buffer.chroma_location = chroma_location
     plan_assets = upload_atlas(cupy, config.atlas)
     event_count = len(plan_assets['events'])
     compositor = SpriteCompositor(cupy, width, height, plan_assets)
@@ -715,7 +791,14 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
     cupy.cuda.Device(config.gpu_id).use()
     source_fps = source_frame_rate(str(source))
     frame_rate = config.fps or resolve_output_fps(source_fps, config.minimum_fps)
-    timing = FFprobe.run_ffprobe(str(source))["format"]
+    metadata = FFprobe.run_ffprobe(str(source))
+    timing = metadata['format']
+    # Missing/unspecified metadata follows the H.26x left-sited convention.
+    chroma_location = metadata['streams'][0].get('chroma_location', 'left')
+    if chroma_location in ('unknown', 'unspecified'):
+        chroma_location = 'left'
+    if chroma_location not in CHROMA_PHASES:
+        raise ValueError(f'unsupported source chroma location: {chroma_location}')
     source_duration, source_start = float(timing["duration"]), float(timing.get("start_time", 0))
     expected = int(round(source_duration * frame_rate))
     if config.max_frames is not None:
@@ -736,7 +819,8 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
             partial = pathlib.Path(work) / destination.name
             result = encode_to_file(decoded, first, cupy, nvc, bitstream, (width, height), frame_rate, config,
                                     source_frame_rate=source_fps, start_offset=max(0.0, first[1] - source_start),
-                                    progress_cb=progress_cb, expected_frames=expected, stop_event=stop_event)
+                                    progress_cb=progress_cb, expected_frames=expected, stop_event=stop_event,
+                                    chroma_location=chroma_location)
             check_stop(stop_event)
             video_duration = result["frames"] / frame_rate
             truncated = config.max_frames is not None and video_duration < source_duration - 1 / frame_rate
@@ -786,46 +870,3 @@ class GpuRender(BaseRender):
 
     def stop(self):
         self.stop_event.set()
-
-
-def main() -> None:
-    """Run the standalone prototype launcher used by perf tests."""
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--video", type=pathlib.Path, required=True)
-    parser.add_argument("--output", type=pathlib.Path, required=True)
-    parser.add_argument("--vencoder", default="hevc_nvenc")
-    parser.add_argument("--bitrate", type=int)
-    parser.add_argument("--venc-args", default="[]")
-    parser.add_argument("--canvas-resolution")
-    parser.add_argument("--rescale-to-1080p", action="store_true")
-    parser.add_argument("--rc", default=None)
-    parser.add_argument("--maxbitrate", default=None)
-    parser.add_argument("--vbvbufsize", default=None)
-    parser.add_argument("--preset")
-    parser.add_argument("--fps", type=float)
-    parser.add_argument("--min-fps", type=float)
-    parser.add_argument("--max-frames", type=int)
-    parser.add_argument("--gpu-id", type=int, default=0)
-    parser.add_argument("--render-plan", type=pathlib.Path)
-    args = parser.parse_args()
-    result = render_one(
-        args.video,
-        str(args.output),
-        vencoder=args.vencoder,
-        vencoder_args=json.loads(args.venc_args) + [value for flag, item in (
-            ("-b:v", args.bitrate), ("-maxrate", args.maxbitrate), ("-bufsize", args.vbvbufsize),
-            ("-rc", args.rc), ("-preset", args.preset)) if item is not None for value in (flag, str(item))],
-        canvas_resolution=tuple(map(int, args.canvas_resolution.split("x"))) if args.canvas_resolution else None,
-        rescale_to_1080p=args.rescale_to_1080p,
-        fps=args.fps,
-        min_fps=args.min_fps,
-        max_frames=args.max_frames,
-        gpu_id=args.gpu_id,
-        render_plan=args.render_plan,
-    )
-    print(json.dumps(result, ensure_ascii=False))
-
-
-if __name__ == "__main__":
-    main()

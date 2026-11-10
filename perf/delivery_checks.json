@@ -1,15 +1,22 @@
 [
   {
-    "source": "演示视频\\00_素材与旧版\\bilibili_峰哥_7月30日20点23分_中段\\7月30日20点23分_中段.flv",
-    "output": "演示视频\\2026-11-11_07_层级与长SC\\02_增强素材_旧版E.mp4",
+    "source": "perf\\samples\\problem_resolution\\problem_resolution_7月30日22点50分\\7月30日22点50分_clip.flv",
+    "output": "演示视频\\2026-11-11_08_缩放与持有缓冲\\02_problem_resolution_旧版E.mp4",
     "fps": 50,
     "bitrate": 4000000
   },
   {
-    "source": "演示视频\\00_素材与旧版\\bilibili_峰哥_7月30日20点23分_中段\\7月30日20点23分_中段.flv",
-    "output": "演示视频\\2026-11-11_07_层级与长SC\\03_增强素材_GPU_G.mp4",
+    "source": "perf\\samples\\problem_resolution\\problem_resolution_7月30日22点50分\\7月30日22点50分_clip.flv",
+    "output": "演示视频\\2026-11-11_08_缩放与持有缓冲\\03_problem_resolution_GPU_G.mp4",
     "fps": 50,
     "bitrate": 4000000,
-    "plan": "演示视频\\2026-11-11_07_层级与长SC\\03_增强素材_GPU_G_plan.json"
+    "plan": "演示视频\\2026-11-11_08_缩放与持有缓冲\\03_problem_resolution_GPU_G_plan.json"
+  },
+  {
+    "source": "演示视频\\00_素材与旧版\\bilibili_峰哥_7月30日20点23分_中段\\7月30日20点23分_中段.flv",
+    "output": "演示视频\\2026-11-11_08_缩放与持有缓冲\\05_完整增强素材_GPU_G_缓冲回归.mp4",
+    "fps": 50,
+    "bitrate": 4000000,
+    "plan": "演示视频\\2026-11-11_08_缩放与持有缓冲\\05_完整增强素材_GPU_G_缓冲回归_plan.json"
   }
 ]

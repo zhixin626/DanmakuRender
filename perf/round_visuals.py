@@ -120,3 +120,13 @@ def coverage(delivery):
     report['overlap'] = {'area':best[0],'seconds':best[1],'crop':best[2],'text':best[3],'panel':best[4]}
     (delivery/'截图验收.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf8')
     return report
+
+
+def resolution(delivery,source):
+    outputs = {'E':delivery/'02_problem_resolution_旧版E.mp4',
+               'G':delivery/'03_problem_resolution_GPU_G.mp4'}
+    report = media_shots(source,outputs,'08')
+    for label,box in [('发丝',(500,45,710,165)),('衣物文字',(350,950,470,1060))]:
+        compare([frame(path,30).crop(box) for path in outputs.values()],SHOTS/f'08_{label}_EG_3x.png')
+    (delivery/'截图验收.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf8')
+    return report
