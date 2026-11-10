@@ -206,6 +206,15 @@ def ask_output(video: str, directory: str, name: str, ask_name: bool, protected:
         if choice=='1':
             return output, True
         if choice=='2':
+            stem, extension = os.path.splitext(name)
+            candidate = 2
+            while True:
+                suggested = f'{stem}_{candidate}{extension}'
+                suggested_path = os.path.abspath(join(directory, suggested))
+                if not exists(suggested_path) and os.path.normcase(os.path.realpath(suggested_path)) not in protected:
+                    name = suggested
+                    break
+                candidate += 1
             ask_name = True
         elif choice=='3':
             return None, False

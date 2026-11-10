@@ -567,17 +567,85 @@ class PillowText:
                 yield from value
 
     def wrap(self, text: str, budget_px: int) -> list[str]:
+        """Wrap words/kinsoku clusters; indivisible overwide groups fit on draw."""
         if budget_px <= 0:
             raise ValueError('panel text width must be positive')
+        opening = set('（([{【《〈「『〔〖〘〚')
+        closing = set('。，、！？；：」』）》】〕〉〗〙〛）)]},.!?;:')
+
+        def ascii_word(unit):
+            return len(unit) == 1 and unit.isascii() and (unit.isalnum() or unit == '_')
+
+        def atoms(paragraph):
+            units = list(self.units(paragraph))
+            tokens = []
+            word = ''
+            for index, unit in enumerate(units):
+                following = units[index + 1] if index + 1 < len(units) else ''
+                connector = unit in ('.', "'", '’', '-', '/') or (unit == ',' and word[-1:].isdigit())
+                if ascii_word(unit) or (word and connector and ascii_word(following)):
+                    word += unit
+                    continue
+                if word:
+                    tokens.append(word)
+                    word = ''
+                tokens.append(unit)
+            if word:
+                tokens.append(word)
+            # Only a word wider than the whole line may break internally.
+            for token in tokens:
+                if token and ascii_word(token[0]) and self.measure(token) > budget_px:
+                    fragment = ''
+                    for char in token:
+                        if fragment and self.measure(fragment + char) > budget_px:
+                            yield fragment
+                            fragment = ''
+                        fragment += char
+                    if fragment:
+                        yield fragment
+                else:
+                    yield token
+
         lines = []
         for paragraph in str(text).split('\n'):
+            paragraph_start = len(lines)
+            groups = []
+            prefix = ''
+            for atom in atoms(paragraph):
+                if atom in opening or (prefix and atom.isspace()):
+                    prefix += atom
+                elif atom in closing:
+                    if prefix:
+                        groups.append(prefix + atom)
+                        prefix = ''
+                    else:
+                        spaces = ''
+                        while groups and groups[-1].isspace():
+                            spaces = groups.pop() + spaces
+                        if groups:
+                            groups[-1] += spaces + atom
+                        else:
+                            groups.append(spaces + atom)
+                else:
+                    groups.append(prefix + atom)
+                    prefix = ''
+            if prefix:
+                if groups:
+                    groups[-1] += prefix
+                else:
+                    groups.append(prefix)
             current = ''
-            for unit in self.units(paragraph):
-                if current and self.measure(current + unit) > budget_px:
-                    lines.append(current)
+            for group in groups:
+                if group.isspace() and not current:
+                    continue
+                if current and self.measure(current + group) > budget_px:
+                    lines.append(current.rstrip())
                     current = ''
-                current += unit
-            lines.append(current)
+                if group.isspace() and not current:
+                    continue
+                current += group
+            if current or len(lines) == paragraph_start:
+                lines.append(current.rstrip())
         return lines
 
     def truncate(self, text: str, budget_px: int, ellipsis='...') -> str:

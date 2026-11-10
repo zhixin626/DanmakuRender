@@ -149,3 +149,11 @@ def test_argument_mode_never_prompts(monkeypatch,tmp_path):
     monkeypatch.setattr(cli,'get_engine',lambda _:SimpleNamespace(raster=True,label='test',load=lambda:Renderer))
     monkeypatch.setattr(sys,'argv',['render_only.py','--task','demo','--video',str(video),'--danmaku',str(dm),'--output',str(output)])
     assert cli.main()==0 and output.read_bytes()==b'encoded'
+
+
+def test_rename_enter_uses_nonconflicting_suggestion(monkeypatch,tmp_path,capsys):
+    for filename in ('out.mp4','out_2.mp4'):
+        (tmp_path/filename).touch()
+    answers(monkeypatch,['2',''])
+    output,overwrite = cli.ask_output('source.flv',str(tmp_path),'out.mp4',False,set())
+    assert output==str(tmp_path/'out_3.mp4') and not overwrite

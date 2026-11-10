@@ -83,3 +83,45 @@ def test_panel_order_keeps_r2l_on_top_and_stable_within_track():
     for item in active:
         frame.alpha_composite(Image.new('RGBA',(2,2),colors[item[0].id]))
     assert frame.getpixel((1,1))==(255,0,0,255)
+
+
+def test_wrap_keeps_words_numbers_and_explicit_paragraphs():
+    measure = PillowText('Microsoft YaHei',30)
+    budget = measure.measure('alpha beta')
+    assert measure.wrap('alpha beta gamma',budget)==['alpha beta','gamma']
+    assert measure.wrap('12345 67890',measure.measure('12345'))==['12345','67890']
+    assert measure.wrap('123.456 789.012',measure.measure('123.456'))==['123.456','789.012']
+    assert measure.wrap('one\n\nsecond',300)==['one','','second']
+    assert measure.wrap('alpha ',measure.measure('alpha'))==['alpha']
+
+
+def test_only_words_wider_than_whole_line_split_inside():
+    measure = PillowText('Microsoft YaHei',30,1)
+    word = 'Supercalifragilisticexpialidocious123456789'
+    lines = measure.wrap(word,90)
+    assert ''.join(lines)==word and len(lines)>1
+    assert all(measure.measure(line)<=90 for line in lines)
+
+
+@pytest.mark.parametrize('width',[90,130,210,300])
+def test_wrap_cjk_kinsoku_and_pixel_width(width):
+    measure = PillowText('Microsoft YaHei',30,1)
+    text = '这是一句中文，后面还有（括号）和「引号」。还有English 12345！'
+    lines = measure.wrap(text,width)
+    assert ''.join(lines).replace(' ','')==text.replace(' ','')
+    assert all(not line.startswith(tuple('。，、！？；：」』）》】）)]}')) for line in lines)
+    assert all(not line.endswith(tuple('（([{【《〈「『')) for line in lines)
+    # Verify actual drawing, including the existing uniform fit for a word
+    # that fits alone but cannot fit together with its attached punctuation.
+    assert all(measure.factory.get_sprite_image(line,(255,255,255),outline=1,fit_width=width).width<=width for line in lines)
+
+
+def test_indivisible_number_and_punctuation_fit_without_reordering():
+    measure = PillowText('Microsoft YaHei',30,1)
+    text = '12345！'
+    width = measure.measure('12345')+measure.measure('！')//2
+    assert measure.measure('12345')<=width<measure.measure(text)
+    assert measure.wrap(text,width)==[text]
+    raw = measure.factory.get_sprite_image(text,(255,255,255),outline=1)
+    actual = measure.factory.get_sprite_image(text,(255,255,255),outline=1,fit_width=width)
+    assert actual.width==width and actual.height==round(raw.height*width/raw.width)
