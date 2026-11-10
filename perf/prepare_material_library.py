@@ -188,6 +188,38 @@ def enhance_bilibili(path: pathlib.Path) -> dict:
             'total_types':dict(Counter(e['type'] for e in events+additions))}
 
 
+def enhance_text_coverage(path: pathlib.Path) -> dict:
+    """Modify real local event structures to exercise panel text and overlap."""
+    meta, existing = read_jsonl(path)
+    events = [event for event in existing if event.get('_scenario') != 'text_coverage']
+    templates = {kind: next(event for event in events if event['type']==kind)
+                 for kind in ('superchat','gift','danmaku')}
+    start = float(meta['segment_start_time'])
+    additions = []
+    for index,seconds in enumerate((12,52,94),1):
+        sc = copy.deepcopy(templates['superchat'])
+        sc.update(received_at=start+seconds,uname=f'长SC{index} 😀 [比心]',price=1,price_cny=1,
+                  content=('长 SC 中英混排：Pillow measures the exact pixels used for drawing. '
+                           '[比心] 😀 [啊] 🎉 请检查换行、图片和底部留白。')*3)
+        additions.append(sc)
+        gift = copy.deepcopy(templates['gift'])
+        gift.update(received_at=start+seconds+6,uname=f'礼物用户{index} 😀 🎉',
+                    gift_name='Emoji用户名',gift_count=1,gift_price=10,price_cny=1,unit_price_cny=1)
+        additions.append(gift)
+    # Cover the upper/middle panel stack with accepted ordinary text lanes.
+    for index in range(16):
+        dm = copy.deepcopy(templates['danmaku'])
+        dm.pop('emoticon',None)
+        dm.update(received_at=start+80+index*.08,content='层级重叠：普通弹幕始终在礼物面板上方 '+str(index),color='ffffff')
+        additions.append(dm)
+    for index,event in enumerate(additions):
+        event.update(uid=f'text-coverage-{index}',_synthetic='modified',_scenario='text_coverage',
+                     _source_note='从隔离素材中的真实事件复制结构，改写正文、用户名与时间')
+    write_jsonl(path,meta,events+additions)
+    return {'added':len(additions),'long_sc_seconds':[12,52,94],
+            'emoji_gift_seconds':[18,58,100],'overlap_seconds':'80–90'}
+
+
 def copy_case(name: str, video: pathlib.Path, raw: pathlib.Path, augmented: pathlib.Path, config_name: str) -> dict:
     destination = DEST / name
     destination.mkdir(parents=True, exist_ok=True)

@@ -313,7 +313,7 @@ class EventScanner:
         self.last_timestamp = float("-inf")
 
     def visible(self, timestamp: float) -> list[tuple[dict[str, Any], int, int, int]]:
-        """Advance the scanline and return active events in source order."""
+        """Advance the scanline, preserving source order within each layer."""
         if timestamp < self.last_timestamp:
             raise ValueError("RenderPlan timestamps must be monotonic")
         self.last_timestamp = timestamp
@@ -327,7 +327,7 @@ class EventScanner:
             index for index in self.active if self.events[index].end >= timestamp
         }
         visible = []
-        for index in sorted(self.active):
+        for index in sorted(self.active, key=lambda index: (self.events[index].z_order, index)):
             event = self.events[index]
             position = event_position(event, timestamp)
             if position is not None:
@@ -705,7 +705,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
         platform = kwargs.get("platform") or detect_platform(getattr(video, "dm_file_id", None) or render_plan)
         pack = pathlib.Path(kwargs["emoji_pack"]) if kwargs.get("emoji_pack") else pathlib.Path("emoji_pack") / platform
         atlas = build_atlas(render_plan, platform=platform, emoticon_dir=pack / "emoticon",
-                            stop_check=lambda: check_stop(stop_event))
+                            stop_check=lambda: check_stop(stop_event),pack_dir=str(pack),emoji_font=kwargs.get('emoji_font'))
     check_stop(stop_event)
     config = RenderConfig(video_encoder=str(kwargs.get("vencoder", "hevc_nvenc")),
                           encoder_options=parse_encoder_args(kwargs.get("vencoder_args") or []),

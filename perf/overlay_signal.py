@@ -30,8 +30,8 @@ class OverlaySignal:
             self.sprites[e.id] = np.asarray(sprite).astype(np.float32)
 
     def measure(self, source, output, seconds):
-        # Reconstruct the expected stack so an upper gift panel can legitimately
-        # hide lower scrolling text. Inspect each layer's final contribution.
+        # Reconstruct the engine's track order, including scrolling text above
+        # all panels, and inspect each layer's final visible contribution.
         expected = source.copy()
         layers = []
         for event,x,y,fade in self.scanner.visible(seconds):

@@ -40,7 +40,26 @@ def prepare(task='月亮3'):
     return video, options, plan
 
 
-def render_coverage(only=None):
+def check_layer_pixels():
+    """Run the real CUDA compositor with opaque, fully overlapping sprites."""
+    from DMR.Render.gpu_render import load_cuda_modules, NV12Buffer, SpriteCompositor
+    from DMR.Render.layout_models import RenderEvent
+    cupy,_ = load_cuda_modules()
+    colors = [210,80,120]
+    events = [RenderEvent(name,index*16,4,4,0,1,((0,2,2),(1,2,2)),{},track)
+              for index,(name,track) in enumerate((('text','r2l'),('gift','slide_right'),('sc','slide_left')))]
+    assets = {'events':events,'y':cupy.asarray([color for color in colors for _ in range(16)],dtype=cupy.uint8)}
+    assets.update({name:cupy.full(48,value,dtype=cupy.uint8) for name,value in (('u',128),('v',128),('a',255))})
+    canvas = NV12Buffer(cupy,8,8)
+    canvas.y.fill(16)
+    canvas.uv.fill(128)
+    SpriteCompositor(cupy,8,8,assets).apply(canvas,.5)
+    pixels = cupy.asnumpy(canvas.y[2:6,2:6,0])
+    assert (pixels==210).all(), pixels
+    return {'pixels':pixels.tolist(),'expected_text_y':210,'passed':True}
+
+
+def render_coverage(only=None, delivery=DELIVERY):
     """Render the same isolated source-task settings through both public engines."""
     gate = decide(15)
     if not gate['go']:
@@ -54,9 +73,9 @@ def render_coverage(only=None):
     options['slide_left']['superchat']['use_event_background_colors'] = False
     for side in ('slide_left','slide_right'):
         options[side]['corner_radius'] = '20px'
-    DELIVERY.mkdir(exist_ok=True)
-    (DELIVERY/'覆盖配置.json').write_text(json.dumps(options,ensure_ascii=False,indent=2),encoding='utf8')
-    summary_file = DELIVERY/'覆盖渲染.json'
+    delivery.mkdir(exist_ok=True)
+    (delivery/'覆盖配置.json').write_text(json.dumps(options,ensure_ascii=False,indent=2),encoding='utf8')
+    summary_file = delivery/'覆盖渲染.json'
     result_summary = json.loads(summary_file.read_text(encoding='utf8')) if summary_file.exists() else {}
     for name,engine_name in [('02_增强素材_旧版E','emoji_dmrender'),('03_增强素材_GPU_G','gpu_render')]:
         if only and engine_name!=only:
@@ -67,7 +86,7 @@ def render_coverage(only=None):
                           resolution=FFprobe.get_resolution(str(VIDEO)),group_id='coverage',segment_id=1,file_id='source')
         compiled = LayoutCompiler(options,engine=engine_name,engine_config=options).compile(
             video=video,events_path=str(EVENTS),work_dir=str(WORK))
-        plan = DELIVERY/f'{name}_plan.json'
+        plan = delivery/f'{name}_plan.json'
         plan.write_bytes(Path(compiled.render_plan_path).read_bytes())
         renderer = get_engine(engine_name).load()(**options)
         finished = threading.Event()
@@ -82,7 +101,7 @@ def render_coverage(only=None):
         watcher.start()
         started = time.perf_counter()
         try:
-            ok,info = renderer.render_one(video,str(DELIVERY/f'{name}.mp4'),
+            ok,info = renderer.render_one(video,str(delivery/f'{name}.mp4'),
                 render_plan=str(plan),canvas_resolution=compiled.next_state.canvas_resolution,
                 progress_cb=lambda value:print(f'{name}: {value:.1f}%',flush=True))
             if not ok or interfered.is_set():
@@ -101,5 +120,6 @@ if __name__ == '__main__':
     if '--render-coverage' in sys.argv:
         logging.basicConfig(level=logging.INFO)
         selected = sys.argv[sys.argv.index('--engine')+1] if '--engine' in sys.argv else None
-        raise SystemExit(render_coverage(selected))
+        delivery = Path(sys.argv[sys.argv.index('--delivery')+1]) if '--delivery' in sys.argv else DELIVERY
+        raise SystemExit(render_coverage(selected,delivery))
     prepare()

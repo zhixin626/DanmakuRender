@@ -15,6 +15,10 @@ from typing import Any
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageFilter
+try:
+    from .layout_models import event_track
+except ImportError:  # emoji_render_mt's standalone subprocess
+    from layout_models import event_track
 
 
 log = logging.getLogger("emoji_mt")
@@ -361,27 +365,9 @@ class SpriteFactory:
             self.png_cache[path] = image.resize((width, self.png_height), Image.Resampling.LANCZOS)
         return self.png_cache[path]
 
-    def get_sprite(
-        self,
-        text: str,
-        rgb: tuple[int, int, int] | list[int],
-        pill: dict[str, Any] | None = None,
-        event_pack: dict[str, str] | None = None,
-        outline: float = OUTLINE,
-        outline_rgb: tuple[int, int, int] = (0, 0, 0),
-    ) -> tuple[Any, ...]:
-        """Return the cached sprite tuple consumed by the NV12 compositor."""
-        outline = max(0, int(round(outline)))
-        outline_rgb = tuple(int(value) for value in outline_rgb)
-        pill_key = tuple(pill["color"] + [pill["pad"], pill["border"]]) if pill else None
-        active_pack = self.pack if event_pack is None else event_pack
-        event_key = None if event_pack is None else tuple(sorted(event_pack.items()))
-        key = (text, tuple(rgb), pill_key, event_key, outline, outline_rgb)
-        if key in self.cache:
-            self._last_image = self.image_cache[key]
-            return self.cache[key]
-
-        tokens = tokenize(text, active_pack)
+    def text_layout(self, text: str, pack: dict[str, str]):
+        """One font/token layout shared by measurement and pixel drawing."""
+        tokens = tokenize(text, pack)
         has_png = any(kind == "png" for kind, _ in tokens)
         has_emoji = any(kind == "emoji" for kind, _ in tokens)
         prepared_tokens = []
@@ -405,6 +391,35 @@ class SpriteFactory:
         emoji_descent = int(round(self.emoji_descent * self.emoji_scale)) if has_emoji else 0
         content_ascent = max(self.ascent, -png_top if has_png else 0, emoji_ascent)
         content_descent = max(self.descent, png_bottom if has_png else 0, emoji_descent)
+        return prepared_tokens, content_width, content_ascent, content_descent
+
+    def measure(self, text: str, outline: float = OUTLINE, event_pack=None) -> tuple[int, int]:
+        pack = self.pack if event_pack is None else event_pack
+        _, width, ascent, descent = self.text_layout(text, pack)
+        border = max(0, round(outline))
+        return max(1, width + 2 * border), ascent + descent + 2 * border
+
+    def get_sprite(
+        self,
+        text: str,
+        rgb: tuple[int, int, int] | list[int],
+        pill: dict[str, Any] | None = None,
+        event_pack: dict[str, str] | None = None,
+        outline: float = OUTLINE,
+        outline_rgb: tuple[int, int, int] = (0, 0, 0),
+    ) -> tuple[Any, ...]:
+        """Return the cached sprite tuple consumed by the NV12 compositor."""
+        outline = max(0, int(round(outline)))
+        outline_rgb = tuple(int(value) for value in outline_rgb)
+        pill_key = tuple(pill["color"] + [pill["pad"], pill["border"]]) if pill else None
+        active_pack = self.pack if event_pack is None else event_pack
+        event_key = None if event_pack is None else tuple(sorted(event_pack.items()))
+        key = (text, tuple(rgb), pill_key, event_key, outline, outline_rgb)
+        if key in self.cache:
+            self._last_image = self.image_cache[key]
+            return self.cache[key]
+
+        prepared_tokens, content_width, content_ascent, content_descent = self.text_layout(text, active_pack)
         if pill:
             padding = pill["pad"]
             pill_height = content_ascent + content_descent + 2 * padding
@@ -425,6 +440,7 @@ class SpriteFactory:
         sprite = Image.new("RGBA", (max(int(total_width), 1), int(top_extent + bottom_extent)), (0, 0, 0, 0))
         draw = ImageDraw.Draw(sprite)
         x = content_x
+        png_top = self.png_center - self.png_height // 2
         for kind, payload, prepared, token_width in prepared_tokens:
             if kind == "png":
                 sprite.alpha_composite(prepared, (int(x), baseline + png_top))
@@ -489,6 +505,7 @@ class SpriteFactory:
         event_pack: dict[str, str] | None = None,
         outline: float = OUTLINE,
         outline_rgb: tuple[int, int, int] = (0, 0, 0),
+        fit_width: int | None = None,
     ) -> Image.Image:
         """Return the same Pillow image used to build the cached YUV sprite."""
         self.get_sprite(
@@ -498,7 +515,70 @@ class SpriteFactory:
             outline=outline,
             outline_rgb=outline_rgb,
         )
-        return self._last_image.copy()
+        image = self._last_image.copy()
+        if fit_width is not None and image.width > fit_width:
+            target = (max(1, fit_width), max(1, round(image.height * fit_width / image.width)))
+            image = image.resize(target, Image.Resampling.LANCZOS)
+        return image
+
+
+class PillowText:
+    """Measure/wrap with exactly the font, tokens and outline used to draw."""
+
+    def __init__(self, font: str, size: float, outline: float = 0, pack=None, emoji_font=None):
+        self.factory = SpriteFactory(resolve_font(font, True), resolve_emoji_font(emoji_font), pack or {}, size)
+        self.outline = outline
+
+    def measure(self, text: str) -> int:
+        return self.factory.measure(text, self.outline)[0] if text else 0
+
+    def height(self, text: str, width: int | None = None) -> int:
+        w, h = self.factory.measure(text, self.outline)
+        return max(1, round(h * min(1, width / w))) if width is not None else h
+
+    def units(self, text: str):
+        for kind, value in tokenize(text, self.factory.pack):
+            if kind == 'png':
+                # Keep recognized shortcodes intact while wrapping.
+                name = next(name for name, path in self.factory.pack.items() if path == value)
+                yield '[' + name + ']'
+            elif kind == 'emoji':
+                cluster = ''
+                for char in value:
+                    if cluster and ord(char) not in _STRIP and not cluster.endswith('\u200d'):
+                        yield cluster
+                        cluster = ''
+                    cluster += char
+                if cluster:
+                    yield cluster
+            else:
+                yield from value
+
+    def wrap(self, text: str, budget_px: int) -> list[str]:
+        if budget_px <= 0:
+            raise ValueError('panel text width must be positive')
+        lines = []
+        for paragraph in str(text).split('\n'):
+            current = ''
+            for unit in self.units(paragraph):
+                if current and self.measure(current + unit) > budget_px:
+                    lines.append(current)
+                    current = ''
+                current += unit
+            lines.append(current)
+        return lines
+
+    def truncate(self, text: str, budget_px: int, ellipsis='...') -> str:
+        if self.measure(text) <= budget_px:
+            return text
+        if self.measure(ellipsis) > budget_px:
+            return ''
+        result = ''
+        for unit in self.units(text):
+            if self.measure(result + unit + ellipsis) > budget_px:
+                break
+            result += unit
+        return result + ellipsis
 
 
 def parse_color(value: str, default: str = "FFFFFF") -> tuple[int, int, int]:
@@ -568,7 +648,7 @@ def draw_round(size, radius, shape, fill=(0, 0, 0, 0), outline=(0, 0, 0, 0), bor
     return image.resize(size, Image.Resampling.LANCZOS)
 
 
-def draw_panel(visual: dict[str, Any], width: int, height: int) -> Image.Image:
+def draw_panel(visual: dict[str, Any], width: int, height: int, pack=None, emoji_font=None) -> Image.Image:
     """Draw a panel from configured nodes; outlines form one outer contour."""
     scale = SUPERSAMPLE
     image = Image.new("RGBA", (width * scale, height * scale))
@@ -604,15 +684,22 @@ def draw_panel(visual: dict[str, Any], width: int, height: int) -> Image.Image:
     for node in nodes:
         if node["type"] != "text":
             continue
-        images = {token.strip("[]").lower(): asset["path"]
-                  for token, asset in (node.get("images") or {}).items() if asset.get("path")}
-        factory = SpriteFactory(resolve_font(node["font"], True), resolve_emoji_font(None), images, node["size"])
+        images = dict(pack or {})
+        for token,asset in (node.get('images') or {}).items():
+            name = token.strip('[]').lower()
+            if asset.get('path'):
+                images[name] = asset['path']
+            else:
+                images.pop(name,None)
+        text = PillowText(node['font'],node['size'],node['outline'],images,emoji_font or visual.get('emoji_font'))
+        factory = text.factory
         for index, line in enumerate(str(node["text"]).splitlines() or [""]):
             sprite = factory.get_sprite_image(line, parse_color(node["color"]), event_pack=images or None,
-                                               outline=node["outline"], outline_rgb=parse_color(node["outline_color"]))
+                                               outline=node["outline"], outline_rgb=parse_color(node["outline_color"]),
+                                               fit_width=node.get('width'))
             sprite.putalpha(sprite.getchannel("A").point(lambda value: round(value * node["opacity"])))
             x = int(node["x"]) - (sprite.width if node["anchor"] == "top_right" else 0)
-            image.alpha_composite(sprite, (x, int(node["y"] + index * node["size"])))
+            image.alpha_composite(sprite, (x, int(node["y"] + index * node.get('line_height',node['size']))))
     return image
 
 
@@ -648,12 +735,13 @@ def detect_platform(source_path):
     return ""
 
 
-def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=None):
+def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=None, pack_dir=None, emoji_font=None):
     """Build cached GPU planes from a RenderPlan in the task directory."""
     plan = plan_path if isinstance(plan_path, dict) else json.loads(pathlib.Path(plan_path).read_text(encoding="utf-8"))
     emoticon_dir = emoticon_dir or pathlib.Path("emoji_pack") / platform / "emoticon"
     emoticon_store = EmoticonStore(str(emoticon_dir))
-    emoji_name = resolve_emoji_font(None)
+    emoji_name = resolve_emoji_font(emoji_font)
+    platform_pack = load_pack(pack_dir or str(pathlib.Path('emoji_pack')/platform))
     factories: dict[tuple[str, str, float], SpriteFactory] = {}
     atlas: list[list[int]] = [[], [], [], []]
     metadata = []
@@ -672,7 +760,7 @@ def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=No
             if asset.get("path"):
                 image_pack[key] = asset["path"]
         if visual.get("type") == "panel":
-            image = draw_panel(visual, width, height)
+            image = draw_panel(visual, width, height,platform_pack,emoji_font)
             arrays = rgba_to_yuv(image)
         else:
             rgb = parse_color(style["color"])
@@ -684,7 +772,7 @@ def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=No
             font_name = resolve_font(family, bold)
             factory_key = (font_name, emoji_name, size)
             if factory_key not in factories:
-                factories[factory_key] = SpriteFactory(font_name, emoji_name, {}, size)
+                factories[factory_key] = SpriteFactory(font_name, emoji_name, platform_pack, size)
             sprite = factories[factory_key].get_sprite(
                 visual.get("text", ""),
                 rgb,
@@ -697,7 +785,7 @@ def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=No
                     if visual.get("pill")
                     else None
                 ),
-                event_pack=image_pack or None,
+                event_pack=image_pack if visual.get('images') else None,
                 outline=style["outline"],
                 outline_rgb=parse_color(style["outline_color"]),
             )
@@ -712,6 +800,7 @@ def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=No
         path = event.get("path") or []
         metadata.append({
             "id": event.get("id"),
+            'track':event_track(event),
             "offset": offset,
             "width": width,
             "height": height,

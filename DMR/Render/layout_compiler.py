@@ -14,7 +14,7 @@ from DMR.utils import replace_keywords
 from DMR.utils.text_width import TextMeasurer
 
 from .emoji_width import EmojiWidthMeasurer
-from .layout_models import LayoutState, RenderPlan
+from .layout_models import LayoutState, RenderPlan, TRACK_R2L, TRACK_SLIDE_LEFT, TRACK_SLIDE_RIGHT, EVENT_TRACKS
 from .resolution import resolve_render_canvas
 
 
@@ -25,20 +25,6 @@ PANEL_ENTER_DURATION = 0.5
 PANEL_EXIT_DURATION = 0.5
 PANEL_PUSH_DURATION = 0.3
 PANEL_STACK_GAP = 10.0
-
-TRACK_R2L = "r2l"
-TRACK_SLIDE_LEFT = "slide_left"
-TRACK_SLIDE_RIGHT = "slide_right"
-
-# Event routing is intentionally fixed for now. Event configuration controls
-# content/filtering and optional platform overrides; track configuration
-# controls motion, geometry, colour policy and lifetime policy.
-EVENT_TRACKS = {
-    "danmaku": TRACK_R2L,
-    "superchat": TRACK_SLIDE_LEFT,
-    "gift": TRACK_SLIDE_RIGHT,
-    "member": TRACK_SLIDE_RIGHT,
-}
 
 # Fallback panel policies used only when a track omits its own ranges.
 # Ranges are left-closed and right-open; the last range has no upper bound.
@@ -726,7 +712,7 @@ class LayoutCompiler:
             plan_event = {
                 key: copy.deepcopy(value)
                 for key, value in state_event.items()
-                if key != "track" and not key.startswith("_")
+                if not key.startswith("_")
             }
             plan_event["path"] = local_path
             plan_events.append(plan_event)
@@ -978,15 +964,28 @@ class LayoutCompiler:
         padding_top = 9
         padding_bottom = 14
         text_padding = 6
+        text_budget = box_width - 2 * text_padding
+        name_outline = _pixels(panel_setting("name_border_width"), 0)
+        content_outline = _pixels(panel_setting("content_border_width"), 1)
         measurer = TextMeasurer(font, fontsize, bold=True)
-        lines = measurer.wrap(str(content or ""), box_width - 2 * text_padding) or [""]
-        bottom_height = len(lines) * fontsize + padding_top + padding_bottom
+        name_measurer = measurer
+        if self.engine_spec.panel_raster:
+            from .sprites import PillowText
+
+            pack = emoji_measurer.pack if emoji_measurer is not None else {}
+            emoji_font = self.engine_config.get("emoji_font")
+            measurer = PillowText(font, fontsize, content_outline, pack, emoji_font)
+            name_measurer = PillowText(font, fontsize, name_outline, pack, emoji_font)
+        lines = measurer.wrap(str(content or ""), text_budget) or [""]
+        line_height = fontsize
+        if self.engine_spec.panel_raster:
+            line_height = max(measurer.height(line, text_budget) for line in lines)
+        bottom_height = len(lines) * line_height + padding_top + padding_bottom
         total_height = top_height + bottom_height
         content = "\n".join(lines)
-        text_budget = box_width - 2 * text_padding
         record = record or {}
         price_text = _panel_price_text(record)
-        price_width = measurer.measure(price_text)
+        price_width = min(text_budget, name_measurer.measure(price_text))
         name_price_gap = (
             max(12, int(round(box_width * 0.05))) if price_text else 0
         )
@@ -997,14 +996,16 @@ class LayoutCompiler:
             render_cfg,
             track_cfg,
         )
-        uname = measurer.truncate(
+        uname = name_measurer.truncate(
             str(uname or ""), name_budget, ellipsis="..."
         )
         top_opacity = float(panel_setting("top_opacity", 0.7) or 0.7)
         bottom_opacity = float(panel_setting("bottom_opacity", 0.3) or 0.3)
         name_opacity = content_opacity = 1.0
-        name_outline = _pixels(panel_setting("name_border_width"), 0)
-        content_outline = _pixels(panel_setting("content_border_width"), 1)
+        if self.engine_spec.panel_raster:
+            top_height = max(top_height, name_measurer.height(uname) + 10,
+                             name_measurer.height(price_text, text_budget) + 10)
+            total_height = top_height + bottom_height
         name_outline_color = content_outline_color = "#000000"
 
         def node_images(text_value):
@@ -1099,6 +1100,14 @@ class LayoutCompiler:
             "class": panel_class,
             "nodes": nodes,
         }
+        if self.engine_spec.panel_raster:
+            for node in nodes:
+                if node['type'] != 'text':
+                    continue
+                node['width'] = name_budget if node is nodes[2] else text_budget
+                node['line_height'] = line_height
+            if self.engine_config.get('emoji_font'):
+                visual['emoji_font'] = self.engine_config['emoji_font']
         return {
             "id": event_id,
             "track": track,

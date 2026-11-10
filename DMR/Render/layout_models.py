@@ -10,6 +10,22 @@ from typing import Any
 
 LAYOUT_STATE_SCHEMA_VERSION = 3
 RENDER_PLAN_SCHEMA_VERSION = 1
+TRACK_R2L = 'r2l'
+TRACK_SLIDE_LEFT = 'slide_left'
+TRACK_SLIDE_RIGHT = 'slide_right'
+EVENT_TRACKS = {'danmaku':TRACK_R2L,'superchat':TRACK_SLIDE_LEFT,'gift':TRACK_SLIDE_RIGHT,'member':TRACK_SLIDE_RIGHT}
+TRACK_Z_ORDER = {TRACK_SLIDE_LEFT:0,TRACK_SLIDE_RIGHT:0,TRACK_R2L:1}
+
+
+def event_track(event: dict) -> str:
+    """Resolve old plans at the boundary; new plans always retain their track."""
+    track = event.get('track')
+    if track is None:
+        visual = event['visual']
+        track = TRACK_R2L if visual['type']=='line' else EVENT_TRACKS[visual['class']]
+    if track not in TRACK_Z_ORDER:
+        raise ValueError(f'unknown render track: {track}')
+    return track
 
 
 def _atomic_json_dump(path: str, data: dict) -> None:
@@ -141,6 +157,11 @@ class RenderEvent:
     end: float
     path: tuple[tuple[float, float, float], ...]
     motion: dict[str, Any]
+    track: str = TRACK_R2L
+
+    @property
+    def z_order(self) -> int:
+        return TRACK_Z_ORDER[self.track]
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "RenderEvent":
@@ -157,6 +178,7 @@ class RenderEvent:
             end=float(value["end"]),
             path=tuple(tuple(float(part) for part in point) for point in value["path"]),
             motion=dict(value["motion"]),
+            track=value.get('track',TRACK_R2L),
         )
 
 
