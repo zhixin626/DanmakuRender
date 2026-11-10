@@ -140,7 +140,7 @@ def UrlAvailable(plat,rid=None) -> bool:
 # if __name__ == '__main__':
     # python -m DMR.LiveAPI.__init__
     # url="https://live.bilibili.com/14988219"
-    # cookie=r"D:\DanmakuRender\.login_info\bili_watch_cookies.json"
+        # cookie=r".login_info/bili_watch_cookies.json"
     # liveapi=LiveAPI(url)
     # print(liveapi.raw_url)
     # print(liveapi.rid)

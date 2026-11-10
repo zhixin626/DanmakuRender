@@ -21,3 +21,23 @@ Tasks 中没有可确认的虎牙录播，因此没有建立虎牙目录，也�
 - 三个平台素材子目录均包含 FLV、原始 JSONL、`*_augmented.jsonl` 和 `旧版E.mp4`。
 - 旧版 E 输出均约 300 秒，B 站 25fps，抖音/斗鱼 60fps。
 - `perf/prepare_material_library.py` 可从 worktree 副本重建目录和补充事件。
+
+## 第 1 步中段重选
+
+- B 站新窗口：`7月30日20点23分` 录播总长约 7.4 分钟，窗口 120–300 秒；由于原文件短于 20 分钟，严格跳过前后各 10 分钟没有可用的 3 分钟窗口，这是本项未满足的明确限制，已在 `00_素材与旧版/说明.txt` 标注。
+- 抖音新窗口：`11月7日23点19分`，3600–3900 秒；斗鱼新窗口：`11月10日12点25分`，3600–3900 秒。两者均跳过前后 10 分钟并使用 5 分钟窗口。
+- 新窗口均重新生成 FLV、原始/增强 JSONL、配置副本和旧版 E。新 B 站旧版 E/G 对比图为 `截图_48s_emoticon_E_G_3x.png`，E/G 同配置且平台表情图片可见。
+- `EmoticonStore` 已从 `emoji_render_mt.py` 移到 `DMR/Render/sprites.py`；`prepare_gpu_plan.py` 用同一实现将 URL-only emoticon 解析到 `emoji_pack/<platform>/emoticon`，GPU 图集已成功构建。
+- 已删除所有素材子目录内的 `emoticon/` 缓存；`bench_render.py` 的 `--emoticon-dir` 已改为 `emoji_pack/<platform>/emoticon`。
+
+# CURRENT_TASK 第 1 步逐项状态
+
+1. **中段重选：部分完成（B 站有规则阻塞）**。抖音从 11月7日23点19分录播的 3600–3900 秒选 5 分钟；斗鱼从 11月10日12点25分录播的 3600–3900 秒选 5 分钟，均跳过前后 10 分钟。B 站改选 7月30日20点23分录播，但该文件总长约 7.4 分钟，严格跳过前后各 10 分钟没有可用的 3–5 分钟窗口；已选可用的 120–300 秒最长中段并在说明中明确阻塞。
+2. **补强覆盖：完成**。新 B 站补礼物六档、SC 六档、会员、VIP 和 URL-only emoticon；抖音补礼物六档、VIP、平台表情图片，SC/会员标记不支持；斗鱼补礼物六档、SC 六档、会员、VIP、平台表情图片。
+3. **覆盖表：完成**。`00_素材与旧版/说明.txt` 已为新旧窗口写统一表格，所有数量使用真实+补充格式，价格档位列顺序固定。
+4. **缓存路径：完成**。`bench_render.py` 改成 `emoji_pack/<platform>/emoticon`；所有素材子目录的 `emoticon/` 已删除；旧版 E 已用统一路径重新渲染。斗鱼旧版 E 的一次并发清理出现过 WinError 32，但已有完整 300.033 秒输出，未结束任何非本任务进程。
+5. **GPU URL-only 表情：完成**。`EmoticonStore` 唯一实现已移动到 `DMR/Render/sprites.py`，旧版和 `prepare_gpu_plan.py` 共用；GPU 图集成功解析 B 站 `[上热榜]` URL-only 资源并生成输出。
+6. **E/G 对比截图：完成**。`bilibili_峰哥_7月30日20点23分_中段/截图_48s_emoticon_E_G_3x.png` 为同一配置 E/G 并排放大 3 倍，平台表情图片可见。
+7. **素材结构：完成**。每个新旧素材子目录均包含 FLV、原始 JSONL、`*_augmented.jsonl`、配置和 `旧版E.mp4`；新增 B 站子目录还包含 GPU `GPU_G.mp4` 及对比截图。
+
+验证：`py_compile` 通过；共享 `EmoticonStore` 只在 `sprites.py` 定义；素材目录中没有 `emoticon/` 缓存副本；新 B 站 GPU 图集和 E/G 截图均生成成功。

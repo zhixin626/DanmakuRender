@@ -324,7 +324,7 @@ def emoji_command(case: dict[str, Any], output: pathlib.Path) -> list[str]:
         "--venc-args", json.dumps(["-b:v", "4M"]),
         "--aenc-args", json.dumps(["-b:a", "128K"]),
         "--emoji-pack", case["emoji_pack"],
-        "--emoticon-dir", str(pathlib.Path(case["video"]).parent / "emoticon"),
+        "--emoticon-dir", str(pathlib.Path(case["emoji_pack"]) / "emoticon"),
         "--canvas-resolution", f'{case["width"]}x{case["height"]}',
         "--render-plan",
     ]

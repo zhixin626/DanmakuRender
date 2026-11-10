@@ -22,6 +22,7 @@ if SPRITES_SPEC is None or SPRITES_SPEC.loader is None:
 SPRITES_MODULE = importlib.util.module_from_spec(SPRITES_SPEC)
 SPRITES_SPEC.loader.exec_module(SPRITES_MODULE)
 SpriteFactory = SPRITES_MODULE.SpriteFactory
+EmoticonStore = SPRITES_MODULE.EmoticonStore
 resolve_emoji_font = SPRITES_MODULE.resolve_emoji_font
 resolve_font = SPRITES_MODULE.resolve_font
 tokenize = SPRITES_MODULE.tokenize
@@ -34,6 +35,19 @@ def parse_color(value: str, default: str = "FFFFFF") -> tuple[int, int, int]:
     if len(text) != 6:
         text = default
     return tuple(int(text[index:index + 2], 16) for index in (0, 2, 4))
+
+
+def materialize_emoticons(visual: dict[str, Any], store: Any) -> None:
+    """Resolve URL-only platform emoticons into the shared local cache."""
+    assets = list((visual.get("images") or {}).values())
+    for node in visual.get("nodes", []):
+        assets.extend((node.get("images") or {}).values())
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("path") or not asset.get("url"):
+            continue
+        path = store.resolve(asset)
+        if path:
+            asset["path"] = path
 
 
 def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image:
@@ -133,15 +147,20 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--platform", default="bilibili")
+    parser.add_argument("--emoticon-dir", type=pathlib.Path)
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     args.output.mkdir(parents=True, exist_ok=True)
+    emoticon_dir = args.emoticon_dir or ROOT / "emoji_pack" / args.platform / "emoticon"
+    emoticon_store = EmoticonStore(str(emoticon_dir))
     emoji_name = resolve_emoji_font(None)
     factories: dict[tuple[str, str, float], SpriteFactory] = {}
     atlas: list[list[int]] = [[], [], [], []]
     metadata = []
     for event in plan.get("events", []):
         visual = event.get("visual") or {}
+        materialize_emoticons(visual, emoticon_store)
         bounds = event.get("bounds") or {}
         width = max(1, int(bounds.get("width", 1)))
         height = max(1, int(bounds.get("height", 1)))
@@ -205,6 +224,7 @@ def main() -> None:
         v=np.asarray(atlas[2], dtype=np.uint8),
         a=np.asarray(atlas[3], dtype=np.uint8),
     )
+    emoticon_store.save()
     (args.output / "events.json").write_text(
         json.dumps({"duration": plan.get("duration"), "events": metadata}, ensure_ascii=False, indent=2),
         encoding="utf-8",

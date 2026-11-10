@@ -198,8 +198,6 @@ def main():
             shutil.copy2(c["jsonl"],sj)
             for key in ("render_plan","textonly_ass","ordinary_ass"):
                 src=pathlib.Path(c[key]); dst=sample/src.name; shutil.copy2(src,dst); c[key]=str(dst)
-            src_em=pathlib.Path(c["video"]).parent/"emoticon"; dst_em=sample/"emoticon"
-            if src_em.exists() and not dst_em.exists(): shutil.copytree(src_em,dst_em)
             c["video"]=str(sv); c["jsonl"]=str(sj)
             p=json.loads(pathlib.Path(c["render_plan"]).read_text(encoding="utf-8")); n,avg,peak=interval_stats(p,c["duration"])
             c["raster_events"]=n; c["avg_active_events"]=avg; c["peak_active_events"]=peak; cases.append(c)
