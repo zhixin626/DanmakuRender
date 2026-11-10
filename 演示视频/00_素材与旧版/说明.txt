@@ -1,0 +1,35 @@
+# 00_素材与旧版
+
+本目录是隔离 worktree 的平台素材库。所有渲染读取 `D:\DanmakuRender-perf\emoji_pack`、`perf/configs_snapshot` 和本目录内的素材；原始 Tasks 与正式 DMR 目录不参与渲染。
+
+## B 站：bilibili_full_coverage_峰哥_1860-2160
+
+- 来源：worktree `perf/samples/full_coverage` 的 1860–2160 秒片段，300 秒，1080×1920，25fps。
+- 文件：FLV、`*_source.jsonl` 原始筛选副本、`*_augmented.jsonl` 补充副本、`旧版E.mp4`、`配置/`。
+- 事件：弹幕 274、礼物 117、SC 12、会员 3；SC 时刻 30–35s（补充档位）以及真实 54.1/121.5/153.9/192.8/235.7/297.9s；礼物补充 20–25s；会员 14.4/22/24s。
+- 覆盖：Unicode Emoji、B 站 `[dog]` 表情包、SC 六档、礼物六档、舰长和 VIP 用户弹幕。
+- 旧版 E 用 `emoji_pack/bilibili` 和 `配置/` 渲染；补充 JSONL 额外加入 42s 的 `_synthetic: handwritten` 纯 emoticon `[上热榜]`（保留真实 emoticon 事件 3 条），`截图_42s_B站_emoticon.png` 已核对本地图片显示，`截图_31s_Emoji_SC.png` 用于检查 Emoji/SC 叠加。
+
+## 抖音：douyin_不可一世杀手_01点19分
+
+- 来源：worktree `perf/samples/normal_light` 的 11月8日01点19分片段，300 秒，1920×1080，60fps。
+- 文件：FLV、原始 `clip.jsonl`、`douyin_augmented.jsonl`、`旧版E.mp4`、`配置/`。
+- 事件：弹幕 126、礼物 6；真实礼物约 12.7/163.4s，补充礼物 30–33s，VIP+Emoji 在 40s。
+- 抖音没有 SC/会员事件接口，本素材说明为“平台不支持”，未硬造 SC；按补充规则只增加礼物档位和 VIP 弹幕。
+- 旧版 E 用 `emoji_pack/douyin` 和 `配置/` 渲染；`截图_40s_Emoji_VIP.png` 用于检查显示。
+
+## 斗鱼：douyu_少年不太冷_0-300
+
+- 来源：worktree `perf/samples/final_2h` 原始录播的前 300 秒，1920×1080，60fps。
+- 文件：300 秒 FLV、原始和增强 JSONL、`旧版E.mp4`、`配置/`。
+- 事件：弹幕 26、礼物 7、SC 1、会员 1；补充礼物 30–33s、SC 45s、会员 55s、VIP+Emoji 65s。
+- 旧版 E 用 `emoji_pack/douyu` 和 `配置/` 渲染；`截图_65s_Emoji_VIP.png` 可看到斗鱼 SC 的 Emoji。
+
+## 平台缺失
+
+Tasks 中没有可确认的虎牙录播，暂不建立虎牙素材目录；不把其它平台素材冒充虎牙。
+
+## 复制核对
+
+完整复制 `emoji_pack` 后文件数：bilibili 1563、douyin 436、douyu 267；总计 2266 个文件。与正式目录逐平台计数一致。`emoticon/` 子目录随各平台一并复制。
+- B 站子目录额外复制了 `emoticon/` 本地缓存，素材目录本身即可复核纯 emoticon，不依赖根目录之外的正式目录。

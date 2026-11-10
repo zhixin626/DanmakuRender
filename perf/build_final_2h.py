@@ -12,7 +12,7 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE_JSONL = ROOT / "perf" / "samples" / "final_2h" / "原始" / "少年不太冷_11月9日14点20分.jsonl"
-CONFIG_SOURCE = ROOT.parent / "DanmakuRender" / "configs"
+CONFIG_SOURCE = ROOT / "perf" / "configs_snapshot"
 OUTPUT_JSONL = ROOT / "perf" / "samples" / "final_2h" / "补充" / "少年不太冷_11月9日14点20分_augmented.jsonl"
 CONFIG_DIR = ROOT / "perf" / "samples" / "final_2h" / "配置"
 
@@ -106,7 +106,7 @@ def main() -> None:
     manifest = ROOT / "perf" / "samples.md"
     with manifest.open("a", encoding="utf-8") as target:
         target.write("\n## final_2h/少年不太冷 11月9日14点20分\n")
-        target.write(f"- 原始视频：D:\\DanmakuRender\\Tasks文件\\少年不太冷\\11月9日14点20分.flv\n- 原始弹幕：D:\\DanmakuRender\\Tasks文件\\少年不太冷\\11月9日14点20分.jsonl\n")
+        target.write(f"- 原始视频：已复制到 worktree 的 perf/samples/final_2h/原始/少年不太冷_11月9日14点20分.flv\n- 原始弹幕：已复制到 worktree 的 perf/samples/final_2h/原始/少年不太冷_11月9日14点20分.jsonl\n")
         target.write(f"- 隔离副本：{SOURCE_JSONL.parent}; 增强弹幕：{OUTPUT_JSONL}; 类型统计：{dict(counts)}\n")
         target.write("- 合成事件：每 20 分钟一批，SC/礼物各六档价格、会员共用 slide_right、VIP 药丸和 Emoji；0.5 元礼物按 min_price_cny=1 预期不显示。\n")
         target.write(f"- 三层配置副本：{CONFIG_DIR}；任务配置保留正式 VIP 用户 187495453/199828655/9881469。\n")

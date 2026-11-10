@@ -1,8 +1,8 @@
 # 阶段 0b 素材清单
 
 ## normal_dense/normal_dense_peak_7月30日20点23分
-- 原始视频：D:\DanmakuRender\Tasks文件\峰哥\7月30日20点23分.flv
-- 原始弹幕：D:\DanmakuRender\Tasks文件\峰哥\7月30日20点23分.jsonl
+- 原始视频：Tasks（原始来源，已复制到 worktree）\峰哥\7月30日20点23分.flv
+- 原始弹幕：Tasks（原始来源，已复制到 worktree）\峰哥\7月30日20点23分.jsonl
 - 截取视频：D:\DanmakuRender-perf\perf\samples\normal_dense\normal_dense_peak_7月30日20点23分\7月30日20点23分_clip.flv
 - 截取区间：前 300.0s
 - 源分辨率：1080x1920；画布：1080x1920；worker：25fps
@@ -11,8 +11,8 @@
 - F 输出：perf/outputs/phase0b/normal_dense/normal_dense_peak_7月30日20点23分/F_dmrender.mp4
 
 ## normal_light/normal_light_不可一世杀手_11月8日01点19分
-- 原始视频：D:\DanmakuRender\Tasks文件\不可一世杀手\11月8日01点19分.flv
-- 原始弹幕：D:\DanmakuRender\Tasks文件\不可一世杀手\11月8日01点19分.jsonl
+- 原始视频：Tasks（原始来源，已复制到 worktree）\不可一世杀手\11月8日01点19分.flv
+- 原始弹幕：Tasks（原始来源，已复制到 worktree）\不可一世杀手\11月8日01点19分.jsonl
 - 截取视频：D:\DanmakuRender-perf\perf\samples\normal_light\normal_light_不可一世杀手_11月8日01点19分\11月8日01点19分_clip.flv
 - 截取区间：前 300.0s
 - 源分辨率：1920x1080；画布：1920x1080；worker：60fps
@@ -21,8 +21,8 @@
 - F 输出：perf/outputs/phase0b/normal_light/normal_light_不可一世杀手_11月8日01点19分/F_dmrender.mp4
 
 ## problem_resolution/problem_resolution_7月30日22点50分
-- 原始视频：D:\DanmakuRender\Tasks文件\有问题的视频测试\分辨率切换\1\7月30日22点50分.flv
-- 原始弹幕：D:\DanmakuRender\Tasks文件\有问题的视频测试\分辨率切换\1\7月30日22点50分.jsonl
+- 原始视频：Tasks（原始来源，已复制到 worktree）\有问题的视频测试\分辨率切换\1\7月30日22点50分.flv
+- 原始弹幕：Tasks（原始来源，已复制到 worktree）\有问题的视频测试\分辨率切换\1\7月30日22点50分.jsonl
 - 截取视频：D:\DanmakuRender-perf\perf\samples\problem_resolution\problem_resolution_7月30日22点50分\7月30日22点50分_clip.flv
 - 截取区间：前 300.0s
 - 源分辨率：1600x1280；画布：1920x1080；worker：25fps
@@ -31,8 +31,8 @@
 - F 输出：perf/outputs/phase0b/problem_resolution/problem_resolution_7月30日22点50分/F_dmrender.mp4
 
 ## problem_sc_swap/problem_sc_swap_7月29日22点02分
-- 原始视频：D:\DanmakuRender\Tasks文件\有问题的视频测试\跨段sc异常换位\7月29日22点02分.mp4
-- 原始弹幕：D:\DanmakuRender\Tasks文件\有问题的视频测试\跨段sc异常换位\7月29日22点02分.jsonl
+- 原始视频：Tasks（原始来源，已复制到 worktree）\有问题的视频测试\跨段sc异常换位\7月29日22点02分.mp4
+- 原始弹幕：Tasks（原始来源，已复制到 worktree）\有问题的视频测试\跨段sc异常换位\7月29日22点02分.jsonl
 - 截取视频：D:\DanmakuRender-perf\perf\samples\problem_sc_swap\problem_sc_swap_7月29日22点02分\7月29日22点02分_clip.mp4
 - 截取区间：前 300.0s
 - 源分辨率：1080x1920；画布：1080x1920；worker：25fps
@@ -41,8 +41,8 @@
 - F 输出：perf/outputs/phase0b/problem_sc_swap/problem_sc_swap_7月29日22点02分/F_dmrender.mp4
 
 ## full_coverage/峰哥 8月18日14点19分
-- 原始视频：D:\DanmakuRender\Tasks文件\峰哥\8月18日14点19分.flv
-- 原始弹幕：D:\DanmakuRender\Tasks文件\峰哥\8月18日14点19分.jsonl
+- 原始视频：Tasks（原始来源，已复制到 worktree）\峰哥\8月18日14点19分.flv
+- 原始弹幕：Tasks（原始来源，已复制到 worktree）\峰哥\8月18日14点19分.jsonl
 - 截取：1860s–2160s；输出：D:\DanmakuRender-perf\perf\samples\full_coverage\原始\峰哥_8月18日14点19分_1860-2160.flv
 - 增强弹幕：D:\DanmakuRender-perf\perf\samples\full_coverage\补充\峰哥_8月18日14点19分_1860-2160_augmented.jsonl；真实事件数量：392；总事件数量：406；类型：{'danmaku': 274, 'member': 3, 'gift': 117, 'superchat': 12, 'emoji_or_emoticon': 56}
 - 真实 SC 价格（片段相对秒）：30 元（54.1s）, 50 元（121.5s）, 2 元（153.9s）, 30 元（192.8s）, 50 元（235.7s）, 30 元（297.9s）
@@ -52,8 +52,15 @@
 - 合成事件：2 个 modified 会员，22s 和 24s，与礼物同段进入，验证 slide_right 共用队列。
 
 ## final_2h/少年不太冷 11月9日14点20分
-- 原始视频：D:\DanmakuRender\Tasks文件\少年不太冷\11月9日14点20分.flv
-- 原始弹幕：D:\DanmakuRender\Tasks文件\少年不太冷\11月9日14点20分.jsonl
+- 原始视频：Tasks（原始来源，已复制到 worktree）\少年不太冷\11月9日14点20分.flv
+- 原始弹幕：Tasks（原始来源，已复制到 worktree）\少年不太冷\11月9日14点20分.jsonl
 - 隔离副本：D:\DanmakuRender-perf\perf\samples\final_2h\原始\（视频和原始弹幕）；增强弹幕：D:\DanmakuRender-perf\perf\samples\final_2h\补充\少年不太冷_11月9日14点20分_augmented.jsonl；类型统计：{'danmaku': 885, 'gift': 97, 'superchat': 36, 'member': 12}
 - 合成事件：每 20 分钟一批，SC/礼物各六档价格、会员共用 slide_right、VIP 药丸和 Emoji；0.5 元礼物按 min_price_cny=1 预期不显示。
 - 三层配置副本：D:\DanmakuRender-perf\perf\samples\final_2h\配置；任务配置保留正式 VIP 用户 187495453/199828655/9881469。
+
+## 演示视频/00_素材与旧版 平台素材库
+- B 站：演示视频/00_素材与旧版/bilibili_full_coverage_峰哥_1860-2160/；旧版 E、原始/补充 JSONL、FLV 和配置齐全。
+- 抖音：演示视频/00_素材与旧版/douyin_不可一世杀手_01点19分/；平台不支持 SC/会员，本目录只补礼物与 VIP。
+- 斗鱼：演示视频/00_素材与旧版/douyu_少年不太冷_0-300/；含礼物、SC、会员、VIP/Emoji。
+- 虎牙：Tasks 未发现可确认录播，未建立目录。
+- 统一配置快照：perf/configs_snapshot/；统一表情包：moji_pack/。

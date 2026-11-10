@@ -16,7 +16,7 @@ import psutil
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TMP = ROOT / "perf" / "tmp"
-VENV_PYTHON = ROOT.parent / "DanmakuRender" / "venv" / "Scripts" / "python.exe"
+VENV_PYTHON = ROOT / "perf" / "venv" / "Scripts" / "python.exe"
 if not VENV_PYTHON.exists():
     VENV_PYTHON = pathlib.Path(sys.executable)
 NULL = "NUL" if os.name == "nt" else "/dev/null"
@@ -91,7 +91,7 @@ def process_cpu(processes: list[psutil.Process], state: dict[int, psutil.Process
 
 
 def dmr_render_active() -> bool:
-    marker = str(ROOT.parent / "DanmakuRender" / "DMR" / "Render" / "emoji_render_mt.py")
+    marker = str(ROOT / "DMR" / "Render" / "emoji_render_mt.py")
     marker = marker.replace("/", "\\").lower()
     for proc in psutil.process_iter(["name", "cmdline"]):
         try:
@@ -225,7 +225,7 @@ def clip_jsonl(source: pathlib.Path, target: pathlib.Path, duration: float) -> i
 def render_args() -> dict[str, Any]:
     sys.path.insert(0, str(ROOT))
     from DMR.Config import Config
-    config = Config(str(ROOT / "configs" / "global.yml"))
+    config = Config(str(ROOT / "perf" / "configs_snapshot" / "global.yml"))
     return dict(config.global_config["render_args"]["overlay"])
 
 
@@ -255,8 +255,8 @@ def prepare_case(spec: dict[str, Any], tmp_root: pathlib.Path) -> dict[str, Any]
     raw_event_count = clip_jsonl(source_jsonl, clip_events, actual_duration)
 
     args = render_args()
-    emoji_root = pathlib.Path(spec.get("emoji_root") or ROOT.parent / "DanmakuRender" / "emoji_pack")
-    args["emoji_pack"] = str(emoji_root / "bilibili")
+    emoji_root = pathlib.Path(spec.get("emoji_root") or ROOT / "emoji_pack")
+    args["emoji_pack"] = str(emoji_root / str(spec.get("platform", "bilibili")))
     compiler = LayoutCompiler(args, engine="emoji_dmrender", engine_config=args)
     video = VideoInfo(path=str(clip_video), dm_file_id=str(clip_events),
                       duration=actual_duration,
@@ -290,7 +290,7 @@ def prepare_case(spec: dict[str, Any], tmp_root: pathlib.Path) -> dict[str, Any]
         "render_plan": str(plan_path),
         "textonly_ass": str(textonly),
         "ordinary_ass": str(ordinary),
-        "emoji_pack": str(emoji_root / "bilibili"),
+        "emoji_pack": str(emoji_root / str(spec.get("platform", "bilibili"))),
         "layout_events": result.event_count,
         "dropped_events": result.dropped_count,
     }

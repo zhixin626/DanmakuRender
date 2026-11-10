@@ -11,29 +11,29 @@
 ## 素材
 
 - normal_dense/normal_dense_peak_7月30日20点23分：源 1080x1920，画布 1080x1920，worker 25fps，raster 91，平均/峰值同屏 2.834/8。
-  原始视频：D:\DanmakuRender\Tasks文件\峰哥\7月30日20点23分.flv
-  原始弹幕：D:\DanmakuRender\Tasks文件\峰哥\7月30日20点23分.jsonl
+  原始视频：Tasks（原始来源，已复制到 worktree）\峰哥\7月30日20点23分.flv
+  原始弹幕：Tasks（原始来源，已复制到 worktree）\峰哥\7月30日20点23分.jsonl
   截取视频：D:\DanmakuRender-perf\perf\samples\normal_dense\normal_dense_peak_7月30日20点23分\7月30日20点23分_clip.flv
   E 输出：perf/outputs/phase0b/normal_dense/normal_dense_peak_7月30日20点23分/E_emoji_dmrender.mp4
   F 输出：perf/outputs/phase0b/normal_dense/normal_dense_peak_7月30日20点23分/F_dmrender.mp4
 
 - normal_light/normal_light_不可一世杀手_11月8日01点19分：源 1920x1080，画布 1920x1080，worker 60fps，raster 10，平均/峰值同屏 0.319/3。
-  原始视频：D:\DanmakuRender\Tasks文件\不可一世杀手\11月8日01点19分.flv
-  原始弹幕：D:\DanmakuRender\Tasks文件\不可一世杀手\11月8日01点19分.jsonl
+  原始视频：Tasks（原始来源，已复制到 worktree）\不可一世杀手\11月8日01点19分.flv
+  原始弹幕：Tasks（原始来源，已复制到 worktree）\不可一世杀手\11月8日01点19分.jsonl
   截取视频：D:\DanmakuRender-perf\perf\samples\normal_light\normal_light_不可一世杀手_11月8日01点19分\11月8日01点19分_clip.flv
   E 输出：perf/outputs/phase0b/normal_light/normal_light_不可一世杀手_11月8日01点19分/E_emoji_dmrender.mp4
   F 输出：perf/outputs/phase0b/normal_light/normal_light_不可一世杀手_11月8日01点19分/F_dmrender.mp4
 
 - problem_resolution/problem_resolution_7月30日22点50分：源 1600x1280，画布 1920x1080，worker 25fps，raster 124，平均/峰值同屏 3.697/13。
-  原始视频：D:\DanmakuRender\Tasks文件\有问题的视频测试\分辨率切换\1\7月30日22点50分.flv
-  原始弹幕：D:\DanmakuRender\Tasks文件\有问题的视频测试\分辨率切换\1\7月30日22点50分.jsonl
+  原始视频：Tasks（原始来源，已复制到 worktree）\有问题的视频测试\分辨率切换\1\7月30日22点50分.flv
+  原始弹幕：Tasks（原始来源，已复制到 worktree）\有问题的视频测试\分辨率切换\1\7月30日22点50分.jsonl
   截取视频：D:\DanmakuRender-perf\perf\samples\problem_resolution\problem_resolution_7月30日22点50分\7月30日22点50分_clip.flv
   E 输出：perf/outputs/phase0b/problem_resolution/problem_resolution_7月30日22点50分/E_emoji_dmrender.mp4
   F 输出：perf/outputs/phase0b/problem_resolution/problem_resolution_7月30日22点50分/F_dmrender.mp4
 
 - problem_sc_swap/problem_sc_swap_7月29日22点02分：源 1080x1920，画布 1080x1920，worker 25fps，raster 46，平均/峰值同屏 1.374/9。
-  原始视频：D:\DanmakuRender\Tasks文件\有问题的视频测试\跨段sc异常换位\7月29日22点02分.mp4
-  原始弹幕：D:\DanmakuRender\Tasks文件\有问题的视频测试\跨段sc异常换位\7月29日22点02分.jsonl
+  原始视频：Tasks（原始来源，已复制到 worktree）\有问题的视频测试\跨段sc异常换位\7月29日22点02分.mp4
+  原始弹幕：Tasks（原始来源，已复制到 worktree）\有问题的视频测试\跨段sc异常换位\7月29日22点02分.jsonl
   截取视频：D:\DanmakuRender-perf\perf\samples\problem_sc_swap\problem_sc_swap_7月29日22点02分\7月29日22点02分_clip.mp4
   E 输出：perf/outputs/phase0b/problem_sc_swap/problem_sc_swap_7月29日22点02分/E_emoji_dmrender.mp4
   F 输出：perf/outputs/phase0b/problem_sc_swap/problem_sc_swap_7月29日22点02分/F_dmrender.mp4

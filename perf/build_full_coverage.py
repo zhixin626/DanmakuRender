@@ -14,10 +14,9 @@ import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-TASKS = ROOT.parent / "DanmakuRender" / "Tasks文件"
-SOURCE_VIDEO = TASKS / "峰哥" / "8月18日14点19分.flv"
-SOURCE_JSONL = TASKS / "峰哥" / "8月18日14点19分.jsonl"
-START_SECONDS = 1860
+SOURCE_VIDEO = ROOT / "perf" / "samples" / "full_coverage" / "原始" / "峰哥_8月18日14点19分_1860-2160.flv"
+SOURCE_JSONL = ROOT / "perf" / "samples" / "full_coverage" / "原始" / "峰哥_8月18日14点19分_1860-2160_source.jsonl"
+START_SECONDS = 0
 DURATION_SECONDS = 300
 
 
@@ -106,12 +105,12 @@ def write_config_copy(destination: pathlib.Path, vip_uid: str) -> pathlib.Path:
     destination.mkdir(parents=True, exist_ok=True)
     global_path = destination / "global.yml"
     task_path = destination / "DMR-峰哥.yml"
-    global_config = yaml.safe_load((ROOT.parent / "DanmakuRender" / "configs" / "global.yml").read_text(encoding="utf-8"))
+    global_config = yaml.safe_load((ROOT / "perf" / "configs_snapshot" / "global.yml").read_text(encoding="utf-8"))
     global_config.setdefault("dmr_engine_args", {})["config_path"] = str(destination)
     global_config.setdefault("render_args", {}).setdefault("overlay", {}).setdefault("r2l", {}).setdefault("danmaku", {})["vip_users"] = {str(vip_uid): None}
     global_config.pop("_test_only", None)
     global_path.write_text(yaml.safe_dump(global_config, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    shutil.copy2(ROOT.parent / "DanmakuRender" / "configs" / "DMR-峰哥.yml", task_path)
+    shutil.copy2(ROOT / "perf" / "configs_snapshot" / "DMR-峰哥.yml", task_path)
     return global_path
 
 
