@@ -284,6 +284,13 @@ def main() -> None:
         ),
     ]
     results = [run(*command) for command in commands]
+    if "--final-only" in sys.argv:
+        (OUT / "telemetry.json").write_text(
+            json.dumps(results, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
     short_video = (
         ROOT
         / "演示视频"
