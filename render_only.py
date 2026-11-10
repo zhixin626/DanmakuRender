@@ -175,7 +175,7 @@ def main():
             duration=FFprobe.get_timeline_duration(task['video']),
             resolution=resolution,
         )
-        output = task['output']
+        output = os.path.abspath(task['output'])
         os.makedirs(os.path.dirname(output), exist_ok=True)
 
         label = f'[{seq}/{total}] {os.path.basename(task["video"])}'
