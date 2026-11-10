@@ -1,5 +1,8 @@
 # Emoji 渲染性能优化计划
 
+> **Codex 请先读 `perf/CURRENT_TASK.md`**：那里只列当前要做的事，按顺序执行。本文件是目标、规则和历史，必要时再查阅。
+
+
 > 本文件是 Claude（云端）与 Codex（本地）之间的唯一任务清单。
 > 分支：`perf/emoji-render`（从 `zhinxinchange_v5` 分出），最终以 PR 合并回 `zhinxinchange_v5`。
 

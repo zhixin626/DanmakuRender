@@ -1,0 +1,44 @@
+# 当前任务（Codex 只需先读这个文件）
+
+> 背景和历史规则见 `PLAN.md`（之后会整理为 `HISTORY.md`）。本文件只列**现在要做的事**，按顺序执行。
+> 每一步完成后：逐项对照本文件的清单汇报（完成 / 未完成 / 阻塞），用 `gh pr comment --body-file` 发到 PR #1，**然后停下等审查**。不要自行进入下一步。
+
+## 第 1 步：素材 + 表情路径
+
+1. **重新挑选素材，从录播中间截取**：
+   - 从 `D:\DanmakuRender\Tasks文件\峰哥` 挑一段新的 B 站素材（优先选和现有素材 `8月18日14点19分` 不同的录播文件）。
+   - 规则（以后所有素材都适用）：跳过每个录播文件的**前 10 分钟和最后 10 分钟**，在剩下的部分中，选弹幕类型最丰富的 3 到 5 分钟窗口。
+   - 抖音和斗鱼现有素材都是从 0 秒开始截的，按同样的规则**从中间重新挑选**。
+   - 素材复制到 worktree 后，就只使用 worktree 内的副本。
+2. **补强覆盖**：平台支持但素材里没有的类型，按补充规则（平移 → 改写 → 手写，带 `_synthetic` 标记）补齐：SC 和礼物的各个价格档、密集进入和退出、VIP 药丸、**平台表情图片**（不是 Unicode Emoji）。平台本身不支持的写"不支持"，不要硬造。
+3. **覆盖表**：在 `演示视频\00_素材与旧版\说明.txt` 中，为每个平台、每段素材列一张统一格式的表：普通弹幕 / Unicode Emoji / 平台表情图片 / VIP 药丸 / 礼物（各价格档）/ SC（各价格档）/ 会员。每格写"真实数 + 补充数"。
+4. **表情缓存路径统一**：`bench_render.py` 第 327 行目前是 `--emoticon-dir <视频所在目录>\emoticon`，这是错的。请改为 `emoji_pack\<平台>\emoticon`，和 `DMR/Render/emoji_dmrender.py` 第 152 行的正式行为一致。**删除** `演示视频\00_素材与旧版\bilibili_full_coverage_峰哥_1860-2160\emoticon\`，以及其他素材目录里类似的 emoticon 文件夹，然后重新渲染旧版 E，截图确认平台表情图片仍然正常显示。
+5. **GPU 版支持只有 URL 的平台表情**：`prepare_gpu_plan.py` 只处理带 `path` 的图片资源，只有 `url` 的平台表情（例如 B 站 `[上热榜]`）会被跳过，导致不显示。请把 `emoji_render_mt.py` 中的 `EmoticonStore` 抽到 `DMR/Render/sprites.py`，旧版和 GPU 版共用；缓存目录同样是 `emoji_pack\<平台>\emoticon`。**不要另写一份。**
+6. **自检**：搜索所有脚本，确认 emoticon 缓存只有 `emoji_pack\<平台>\emoticon` 这一个位置；用 B 站素材中的纯表情弹幕，出 E 和 G 并排、放大 3 倍的对比截图（同一套配置）。
+7. 每个素材子目录仍然要包含：flv、原始 jsonl、`*_augmented.jsonl`、`旧版E.mp4`。
+
+## 第 2 步：代码重构 + 清理 + 自动检查（第 1 步审查通过后再做）
+
+1. **正式代码移到 `DMR/Render/`**，`perf/` 只保留测试脚本：
+   - `prepare_gpu_plan.py` 中的图集构建逻辑移到 `DMR/Render/gpu_atlas.py`，由 `gpu_dmrender.py` 在渲染前**自动**从 RenderPlan 生成，缓存放在任务的临时目录中，用完清理；
+   - 所有绘制（普通弹幕、面板、药丸、表情下载缓存）都集中在 `sprites.py`；
+   - 压力测试 kernel、帧校验值等原型和诊断代码移出 `gpu_render.py`。
+2. **编码循环只保留一份**：写一个"帧调度器"（生成器），输出"源帧 + 输出时间"，统一处理直通、整数倍补帧、VFR 和结尾补帧；`gpu_render.py` 中只保留一个"叠加 → 同步 → 编码"的循环（现在有 3 份）。
+3. **RenderPlan 事件和面板节点改用固定结构**（dataclass），读取时缺字段直接报错，不再使用 `.get(key, 默认值)`。
+4. **单元测试 `tests/`**（不需要 GPU，用 pytest，几秒内跑完）：帧调度器（25→50 时每个源帧正好出现 2 次；VFR）、扫描线（进入、退出、叠加顺序）、面板和药丸绘制与参考图片逐像素比较（形状、字号、描边、抗锯齿、多行）、字号换算、码率解析、帧率计算。
+5. **`perf/verify_all.py`**：每次提交前必须运行，任意一项失败就不能汇报"完成"。内容包括：单元测试；搜索代码中引用 `D:\DanmakuRender`（非 `-perf`）的路径；搜索可疑的 `.get(..., 默认值)` 和魔法数字；emoticon 缓存路径唯一；对指定的短输出逐帧检查闪烁；检查帧数、时长、码率（不超过配置值的 110%）；截图之间的像素差（确认画面在动）。
+6. **清理 `perf/`**（删除前把清单和总大小写进汇报）：
+   - 删除：`bench_phase1a.py`、`bench_phase1a2.py`、`diag_decoder.py`、`run_phase0b.py`、`bench_phase1b.py`、`compare_phase1b2.py`；`prepare_phase1b2.py` 的功能并入 `verify_all.py` 的"配置可调"检查后删除；`build_full_coverage.py`、`build_final_2h.py` 的功能并入 `prepare_material_library.py` 后删除；`__pycache__/` 删除并加入 `.gitignore`。
+   - `bench_render.py` 和 `check_flicker.py` 的公共部分合并为 `perf/benchlib.py`。
+   - `results/`：md 报告保留，旧截图删除，只保留最近一轮的验收截图。
+   - 本地（不在 git 中）：`perf\outputs\`、`perf\tmp\` 全部清空；`演示视频\` 只保留 `00_素材与旧版` 和最近一轮的结果文件夹。
+   - `PLAN.md` 中的历史内容移到 `perf/HISTORY.md`，`PLAN.md` 只保留目标、验收标准和通用规则。
+7. 重构后，用单元测试和 `verify_all.py` 证明原有功能没有被弄坏：用 B 站素材，分别输出 25fps 和 50fps 的 G，与重构前逐帧对比，差异应在编码误差范围内。
+
+## 第 3 步：1d 剩余任务（第 2 步审查通过后再做）
+
+1. 面板抗锯齿（如果第 2 步的单元测试已覆盖，这里只需确认）。
+2. `04_G_50fps` 缺少左侧 SC 的问题：查明根本原因并修复（第 2 步的帧调度器可能已经解决，需要验证）。
+3. 1d-2：E 和 G 分别与**源视频**比较无弹幕区域的 PSNR（要求 G ≥ E − 0.5dB），以及 YUV 均值差 < 1。
+4. 1d-3：从 2 小时素材中取最密集的 20 分钟，测量 E 和 G 的 CPU（平均/峰值核数、核·秒）以及 GPU/NVENC/NVDEC 占用。
+5. 1d-5：GPU 处理分辨率中途变化（等比缩放 + 黑边），跑通 `problem_resolution`。
