@@ -43,8 +43,16 @@ def copy_config(source: pathlib.Path, destination: pathlib.Path, variant: bool) 
         danmaku["outline_color"] = "#202020"
         overlay["slide_left"]["fontsize"] = 26
         overlay["slide_left"]["top_opacity"] = 0.85
+        overlay["slide_left"]["font"] = "SimSun"
+        overlay["slide_left"]["name_color"] = "#2E5D9F"
+        overlay["slide_left"]["content_color"] = "#FFF2C7"
+        overlay["slide_left"]["corner_radius"] = "24px"
         overlay["slide_right"]["fontsize"] = 26
         overlay["slide_right"]["top_opacity"] = 0.85
+        overlay["slide_right"]["font"] = "SimSun"
+        overlay["slide_right"]["name_color"] = "#2E5D9F"
+        overlay["slide_right"]["content_color"] = "#FFF2C7"
+        overlay["slide_right"]["corner_radius"] = "24px"
         task_config["render_args"]["overlay"]["r2l"]["screen_duration"] = 12
     (destination / "global.yml").write_text(
         yaml.safe_dump(global_config, allow_unicode=True, sort_keys=False),

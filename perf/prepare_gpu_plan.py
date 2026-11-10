@@ -50,10 +50,20 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
             fill = parse_color(node.get("color", "#FFFFFF")) + (alpha,)
             outline = parse_color(node.get("outline_color", "#000000"))
             outline_alpha = int(255 * float(node.get("outline_opacity", 1.0)))
+            radius = min(int(node.get("radius", 0)), w // 2, h // 2)
+            shape = node.get("shape")
+            mask = Image.new("L", (w, h), 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+            if shape == "round_top":
+                mask_draw.rectangle((0, radius, w, h), fill=255)
+            elif shape == "round_bottom":
+                mask_draw.rectangle((0, 0, w, h - radius), fill=255)
+            layer = Image.new("RGBA", (w, h), fill)
+            image.paste(layer, (x, y), mask)
             draw.rounded_rectangle(
                 (x, y, x + w, y + h),
-                radius=int(node.get("radius", 0)),
-                fill=fill,
+                radius=radius,
                 outline=outline + (outline_alpha,),
                 width=max(0, int(node.get("outline", 0))),
             )
@@ -73,22 +83,24 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
                 images,
                 size,
             )
-            sprite = factory.get_sprite_image(
-                text,
-                parse_color(node.get("color", "#FFFFFF")),
-                event_pack=images or None,
-                outline=node.get("outline", 0),
-                outline_rgb=parse_color(node.get("outline_color", "#000000")),
-            )
             opacity = max(0.0, min(1.0, float(node.get("opacity", 1.0))))
-            if opacity < 1.0:
-                alpha = sprite.getchannel("A").point(lambda value: int(value * opacity))
-                sprite.putalpha(alpha)
             x = int(node.get("x", 0))
-            if node.get("anchor") == "top_right":
-                x -= sprite.width
             y = int(node.get("y", 0))
-            image.alpha_composite(sprite, (x, y))
+            line_height = int(node.get("size", 30))
+            lines = text.splitlines() or [""]
+            for line_index, line in enumerate(lines):
+                sprite = factory.get_sprite_image(
+                    line,
+                    parse_color(node.get("color", "#FFFFFF")),
+                    event_pack=images or None,
+                    outline=node.get("outline", 0),
+                    outline_rgb=parse_color(node.get("outline_color", "#000000")),
+                )
+                if opacity < 1.0:
+                    alpha = sprite.getchannel("A").point(lambda value: int(value * opacity))
+                    sprite.putalpha(alpha)
+                line_x = x - sprite.width if node.get("anchor") == "top_right" else x
+                image.alpha_composite(sprite, (line_x, y + line_index * line_height))
     return image
 
 
