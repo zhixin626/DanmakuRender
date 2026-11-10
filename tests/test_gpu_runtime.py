@@ -12,6 +12,7 @@ from DMR.Render.sprites import build_atlas, detect_platform
 
 
 def fake_encoding(monkeypatch):
+    monkeypatch.setattr(gpu, "frame_geometry", lambda _: (2, 2))
     encoder = SimpleNamespace(
         Encode=Mock(return_value=[]),
         EndEncode=Mock(return_value=[]),

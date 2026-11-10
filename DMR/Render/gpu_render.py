@@ -708,12 +708,7 @@ def encode_to_file(
     last_source_pts = first_pts
 
     def record_geometry(decoded, timestamp):
-        try:
-            width, height = frame_geometry(decoded)
-        except (AttributeError, IndexError, TypeError, KeyError):
-            # Unit-test fakes and non-NV12 adapters may not expose CUDA shape
-            # metadata; the production decoder always does.
-            return
+        width, height = frame_geometry(decoded)
         relative = max(0.0, float(timestamp) - float(first_pts))
         if resolution_spans and resolution_spans[-1][2:] == [width, height]:
             resolution_spans[-1][1] = relative
