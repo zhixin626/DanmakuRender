@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 
 LANDSCAPE_1080P = (1920, 1080)
 PORTRAIT_1080P = (1080, 1920)
@@ -71,3 +73,29 @@ def resolve_render_canvas(
     if _is_strong(previous_source):
         return _canvas(previous_orientation)
     return _canvas(current_orientation)
+
+
+def fit_canvas(source, canvas) -> tuple[int, int, int, int]:
+    """Return NV12-safe fitted width, height and centered offsets."""
+    sw, sh = source
+    cw, ch = canvas
+    if min(sw, sh, cw, ch) <= 0 or cw % 2 or ch % 2:
+        raise ValueError("NV12 canvas must have positive even dimensions")
+    scale = min(cw / sw, ch / sh)
+    width = max(2, min(cw, round(sw * scale) // 2 * 2))
+    height = max(2, min(ch, round(sh * scale) // 2 * 2))
+    return width, height, (cw - width) // 4 * 2, (ch - height) // 4 * 2
+
+
+def resolve_output_fps(source_fps: float, minimum_fps: float | None = None) -> float:
+    """Return the smallest integer multiple of the source rate meeting minimum."""
+    source_fps = float(source_fps)
+    if not math.isfinite(source_fps) or source_fps <= 0:
+        raise ValueError("source fps must be a positive number")
+    if minimum_fps is None:
+        return source_fps
+    minimum_fps = float(minimum_fps)
+    if not math.isfinite(minimum_fps) or minimum_fps <= 0:
+        raise ValueError("minimum fps must be a positive number")
+    multiplier = max(1, math.ceil(minimum_fps / source_fps - 1e-9))
+    return source_fps * multiplier

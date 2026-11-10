@@ -270,3 +270,15 @@ class FFprobe():
             return float(num) / den if den else 0.0
         except Exception:
             return 0.0
+
+
+def source_frame_rate(video_path: str) -> float:
+    """Use PyAV's guessed rate, then average rate, like the old renderer."""
+    import av
+
+    container = av.open(video_path)
+    try:
+        stream = container.streams.video[0]
+        return float(stream.guessed_rate or stream.average_rate)
+    finally:
+        container.close()

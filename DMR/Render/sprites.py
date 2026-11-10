@@ -7,18 +7,20 @@ import io
 import json
 import logging
 import os
+import pathlib
 import re
 import urllib.parse
 import urllib.request
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageFilter
 
 
 log = logging.getLogger("emoji_mt")
 
 SCALE = 0.75
+SUPERSAMPLE = 4
 OUTLINE = 1
 OUT = OUTLINE
 SHORTCODE_RE = re.compile(r"\[([^\[\]\r\n]{1,200})\]")
@@ -451,11 +453,10 @@ class SpriteFactory:
         if pill:
             border = pill["border"]
             color = tuple(pill["color"]) + (255,)
-            x0 = border / 2.0
-            x1 = sprite.width - 1 - border / 2.0
-            y0 = border / 2.0
-            y1 = sprite.height - 1 - border / 2.0
-            draw.rounded_rectangle((x0, y0, x1, y1), radius=(y1 - y0) / 2.0, outline=color, width=border)
+            border_image = draw_round(sprite.size, sprite.height / 2, "stadium",
+                                      outline=color, border=border)
+            sprite.alpha_composite(border_image)
+
 
         values = np.asarray(sprite).astype(np.float32)
         red, green, blue = values[:, :, 0], values[:, :, 1], values[:, :, 2]
@@ -498,3 +499,220 @@ class SpriteFactory:
             outline_rgb=outline_rgb,
         )
         return self._last_image.copy()
+
+
+def parse_color(value: str, default: str = "FFFFFF") -> tuple[int, int, int]:
+    """Parse a CSS-style RGB color."""
+    text = str(value or default).lstrip("#")
+    if len(text) != 6:
+        text = default
+    return tuple(int(text[index:index + 2], 16) for index in (0, 2, 4))
+
+
+def materialize_emoticons(visual: dict[str, Any], store: Any) -> None:
+    """Resolve URL-only platform emoticons into the shared local cache."""
+    assets = list((visual.get("images") or {}).values())
+    for node in visual.get("nodes", []):
+        assets.extend((node.get("images") or {}).values())
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("path") or not asset.get("url"):
+            continue
+        path = store.resolve(asset)
+        if path:
+            asset["path"] = path
+
+
+def round_mask(size, radius, shape, supersample=SUPERSAMPLE):
+    """Standard circular corners, shared by panels and VIP pills."""
+    if shape not in ("round_top", "round_bottom", "stadium", "round"):
+        raise ValueError(f"unsupported round shape: {shape}")
+    width, height = size
+    if shape == "stadium":
+        radius = min(width, height) / 2
+    else:
+        # A half-panel can have a radius larger than half its own height.
+        radius = min(float(radius), width / 2, height if shape != "round" else height / 2)
+    scale = supersample
+    mask = Image.new("L", (width * scale, height * scale), 0)
+    draw = ImageDraw.Draw(mask)
+    r = max(0, radius * scale)
+    w, h = mask.size
+    if r == 0:
+        draw.rectangle((0, 0, w - 1, h - 1), fill=255)
+        return mask
+    # Extend the unused half instead of Pillow's radius clamp at h/2.
+    if shape == "round_top":
+        draw.rounded_rectangle((0, 0, w - 1, h + 2*r - 1), radius=r, fill=255)
+    elif shape == "round_bottom":
+        draw.rounded_rectangle((0, -2*r, w - 1, h - 1), radius=r, fill=255)
+    else:
+        draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=r, fill=255)
+    return mask
+
+
+def draw_round(size, radius, shape, fill=(0, 0, 0, 0), outline=(0, 0, 0, 0), border=0):
+    """Draw shape and border at 4x, then downsample with LANCZOS."""
+    scale = SUPERSAMPLE
+    mask = round_mask(size, radius, shape, scale)
+    image = Image.new("RGBA", mask.size, fill)
+    image.putalpha(ImageChops.multiply(mask, Image.new("L", mask.size, fill[3])))
+    if border > 0:
+        padded = Image.new("L", (mask.width + 2*scale, mask.height + 2*scale), 0)
+        padded.paste(mask, (scale, scale))
+        inner = padded.filter(ImageFilter.MinFilter(2 * max(1, round(border * scale)) + 1))
+        inner = inner.crop((scale, scale, scale + mask.width, scale + mask.height))
+        edge = ImageChops.subtract(mask, inner)
+        layer = Image.new("RGBA", image.size, outline)
+        layer.putalpha(ImageChops.multiply(edge, Image.new("L", image.size, outline[3])))
+        image.alpha_composite(layer)
+    return image.resize(size, Image.Resampling.LANCZOS)
+
+
+def draw_panel(visual: dict[str, Any], width: int, height: int) -> Image.Image:
+    """Draw a panel from configured nodes; outlines form one outer contour."""
+    scale = SUPERSAMPLE
+    image = Image.new("RGBA", (width * scale, height * scale))
+    panel_mask = Image.new("L", image.size, 0)
+    border = 0
+    outline = (0, 0, 0, 0)
+    nodes = sorted(visual["nodes"], key=lambda node: node["layer"])
+    for node in nodes:
+        if node["type"] != "rect":
+            continue
+        x, y, w, h = (int(node[key]) for key in ("x", "y", "width", "height"))
+        mask = round_mask((w, h), node["radius"], node["shape"], scale)
+        fill = parse_color(node["color"]) + (round(255 * node["opacity"]),)
+        layer = Image.new("RGBA", mask.size, fill)
+        layer.putalpha(ImageChops.multiply(mask, Image.new("L", mask.size, fill[3])))
+        image.alpha_composite(layer, (x*scale, y*scale))
+        combined = Image.new("L", image.size, 0)
+        combined.paste(mask, (x*scale, y*scale))
+        panel_mask = ImageChops.lighter(panel_mask, combined)
+        border = max(border, node["outline"])
+        outline = parse_color(node["outline_color"]) + (round(255 * node["outline_opacity"]),)
+    if border:
+        padding = max(1, round(border * scale))
+        expanded = Image.new("L", (image.width + 2*padding, image.height + 2*padding), 0)
+        expanded.paste(panel_mask, (padding, padding))
+        inner = expanded.filter(ImageFilter.MinFilter(2*padding + 1))
+        inner = inner.crop((padding, padding, padding + image.width, padding + image.height))
+        edge = ImageChops.subtract(panel_mask, inner)
+        layer = Image.new("RGBA", image.size, outline)
+        layer.putalpha(ImageChops.multiply(edge, Image.new("L", image.size, outline[3])))
+        image.alpha_composite(layer)
+    image = image.resize((width, height), Image.Resampling.LANCZOS)
+    for node in nodes:
+        if node["type"] != "text":
+            continue
+        images = {token.strip("[]").lower(): asset["path"]
+                  for token, asset in (node.get("images") or {}).items() if asset.get("path")}
+        factory = SpriteFactory(resolve_font(node["font"], True), resolve_emoji_font(None), images, node["size"])
+        for index, line in enumerate(str(node["text"]).splitlines() or [""]):
+            sprite = factory.get_sprite_image(line, parse_color(node["color"]), event_pack=images or None,
+                                               outline=node["outline"], outline_rgb=parse_color(node["outline_color"]))
+            sprite.putalpha(sprite.getchannel("A").point(lambda value: round(value * node["opacity"])))
+            x = int(node["x"]) - (sprite.width if node["anchor"] == "top_right" else 0)
+            image.alpha_composite(sprite, (x, int(node["y"] + index * node["size"])))
+    return image
+
+
+def rgba_to_yuv(image: Image.Image) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Convert RGBA pixels to BT.601 NV12-compatible planes."""
+    values = np.asarray(image, dtype=np.float32)
+    red = values[:, :, 0]
+    green = values[:, :, 1]
+    blue = values[:, :, 2]
+    alpha = values[:, :, 3]
+    y = np.clip(16 + 0.1826 * red + 0.6142 * green + 0.0620 * blue, 0, 255)
+    u = np.clip(128 - 0.1006 * red - 0.3386 * green + 0.4392 * blue, 0, 255)
+    v = np.clip(128 + 0.4392 * red - 0.3989 * green - 0.0403 * blue, 0, 255)
+    return tuple(np.rint(plane).astype(np.uint8).reshape(-1) for plane in (y, u, v)) + (np.rint(alpha).astype(np.uint8).reshape(-1),)
+
+
+
+
+def build_atlas(plan_path, output, platform="bilibili", emoticon_dir=None):
+    """Build cached GPU planes from a RenderPlan in the task directory."""
+    plan_path, output = pathlib.Path(plan_path), pathlib.Path(output)
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    output.mkdir(parents=True, exist_ok=True)
+    emoticon_dir = emoticon_dir or pathlib.Path("emoji_pack") / platform / "emoticon"
+    emoticon_store = EmoticonStore(str(emoticon_dir))
+    emoji_name = resolve_emoji_font(None)
+    factories: dict[tuple[str, str, float], SpriteFactory] = {}
+    atlas: list[list[int]] = [[], [], [], []]
+    metadata = []
+    for event in plan.get("events", []):
+        visual = event.get("visual") or {}
+        materialize_emoticons(visual, emoticon_store)
+        bounds = event.get("bounds") or {}
+        width = max(1, int(bounds.get("width", 1)))
+        height = max(1, int(bounds.get("height", 1)))
+        style = visual.get("style") or {}
+        image_pack = {}
+        for token, asset in (visual.get("images") or {}).items():
+            key = str(token).strip("[]").lower()
+            if asset.get("path"):
+                image_pack[key] = asset["path"]
+        if visual.get("type") == "panel":
+            image = draw_panel(visual, width, height)
+            arrays = rgba_to_yuv(image)
+        else:
+            rgb = parse_color(style["color"])
+            family = str(style["font"])
+            # Existing RenderPlan line styles omit ``bold``; absence means the
+            # regular face, while all required visual fields remain strict.
+            bold = bool(style.get("bold", False))
+            size = float(style["size"])
+            font_name = resolve_font(family, bold)
+            factory_key = (font_name, emoji_name, size)
+            if factory_key not in factories:
+                factories[factory_key] = SpriteFactory(font_name, emoji_name, {}, size)
+            sprite = factories[factory_key].get_sprite(
+                visual.get("text", ""),
+                rgb,
+                pill=(
+                    {
+                        "color": list(parse_color(visual["pill"].get("color", "#FFC0CB"))),
+                        "pad": int(visual["pill"].get("padding", visual["pill"].get("pad", 6))),
+                        "border": int(visual["pill"].get("border", 1)),
+                    }
+                    if visual.get("pill")
+                    else None
+                ),
+                event_pack=image_pack or None,
+                outline=style["outline"],
+                outline_rgb=parse_color(style["outline_color"]),
+            )
+            opacity = float(style["opacity"])
+            arrays = (sprite[0], sprite[1], sprite[2], np.rint(sprite[3] * opacity * 255).astype(np.uint8))
+            width = int(sprite[4])
+            height = int(sprite[5])
+            arrays = tuple(np.rint(array).astype(np.uint8).reshape(-1) for array in arrays)
+        offset = len(atlas[0])
+        for destination, source in zip(atlas, arrays):
+            destination.extend(source.tolist())
+        path = event.get("path") or []
+        metadata.append({
+            "id": event.get("id"),
+            "offset": offset,
+            "width": width,
+            "height": height,
+            "start": float(path[0][0]) if path else 0.0,
+            "end": float(path[-1][0]) if path else 0.0,
+            "path": path,
+            "motion": visual.get("motion") or {},
+        })
+    np.savez_compressed(
+        output / "sprites.npz",
+        y=np.asarray(atlas[0], dtype=np.uint8),
+        u=np.asarray(atlas[1], dtype=np.uint8),
+        v=np.asarray(atlas[2], dtype=np.uint8),
+        a=np.asarray(atlas[3], dtype=np.uint8),
+    )
+    emoticon_store.save()
+    (output / "events.json").write_text(
+        json.dumps({"duration": plan.get("duration"), "events": metadata}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {"events": len(metadata), "atlas_bytes": len(atlas[0])}

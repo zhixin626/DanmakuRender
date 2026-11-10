@@ -226,7 +226,7 @@ class Render():
             elif mode == 'emoji_dmrender':
                 from .emoji_dmrender import EmojiDmRender as TargetRender
             elif mode == 'gpu_render':
-                from .gpu_dmrender import GpuRender as TargetRender
+                from .gpu_render import GpuRender as TargetRender
             elif mode == 'transcode':
                 from .transcode import Transcoder as TargetRender
             else:

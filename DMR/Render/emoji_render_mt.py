@@ -31,7 +31,8 @@ from PIL import Image, ImageDraw, ImageFont
 try:
     from .plan_ass import render_plan_to_ass
     from .resolution import resolve_render_canvas
-    from .media import resolve_output_fps, source_frame_rate
+    from .resolution import resolve_output_fps
+    from ..utils.ffprobe import source_frame_rate
     from .sprites import (
         DEFAULT_EMOJI_FONT,
         EmoticonStore,
@@ -48,9 +49,11 @@ try:
         resolve_font,
     )
 except ImportError:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
     from plan_ass import render_plan_to_ass
     from resolution import resolve_render_canvas
-    from media import resolve_output_fps, source_frame_rate
+    from resolution import resolve_output_fps
+    from DMR.utils.ffprobe import source_frame_rate
     from sprites import (
         DEFAULT_EMOJI_FONT,
         EmoticonStore,

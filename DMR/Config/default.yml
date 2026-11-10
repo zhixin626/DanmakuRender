@@ -333,12 +333,7 @@ render_args:
     vencoder: h264_nvenc
     # 传给视频编码器的附加参数；例如 [-b:v, 6M] 表示目标视频码率 6 Mbps
     vencoder_args: [-b:v, 15M]
-    # GPU NVENC 码率控制参数；bitrate 直接使用 vencoder_args 的目标值，不做校准倍数。
-    # maxbitrate/vbvbufsize 单位均为 bit，分别表示 VBR 峰值和 VBV 缓冲区大小。
-    gpu_rc_args:
-      rc: vbr
-      maxbitrate: 6000000
-      vbvbufsize: 8000000
+    # GPU 引擎读取 vencoder_args 中 -b:v、-maxrate、-bufsize；未配置的项使用编码器默认值。
     # 音频无需叠加弹幕，可选择 aac 重新编码或 copy 直接复制
     aencoder: aac
     # 例如 [-b:a, 160K]；aencoder 为 copy 时应写 []
@@ -396,7 +391,7 @@ render_args:
       fontsize: 30
       top_opacity: 0.7
       bottom_opacity: 0.3
-      corner_radius: 40px
+      corner_radius: 20px
       box_border_width: 1px
       box_border_opacity: 0.45
       name_border_width: 0px
@@ -434,7 +429,7 @@ render_args:
       fontsize: 30
       top_opacity: 0.7
       bottom_opacity: 0.3
-      corner_radius: 40px
+      corner_radius: 20px
       box_border_width: 1px
       box_border_opacity: 0.45
       name_border_width: 0px

@@ -962,7 +962,7 @@ class LayoutCompiler:
         fontsize = max(1, int(panel_setting("fontsize", 30) or 30))
         box_width = _panel_width(width, track_cfg.get("width", "25%"))
         top_height = 40
-        corner_radius = _pixels(panel_setting("corner_radius"), 40)
+        corner_radius = _pixels(panel_setting("corner_radius"), 20)
         box_outline = _pixels(panel_setting("box_border_width"), 1)
         box_outline_opacity = float(
             panel_setting("box_border_opacity", 0.45) or 0

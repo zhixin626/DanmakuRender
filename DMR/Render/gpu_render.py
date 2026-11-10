@@ -1,43 +1,36 @@
-"""GPU renderer building blocks used by the future gpu_render engine."""
+"""GPU render engine: frame scheduling, canvas composition and encoding."""
 
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import logging
+import math
 import pathlib
 import subprocess
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any, Iterator
 
 try:
-    from .plan_types import RenderEvent
+    from .layout_models import RenderEvent
+    from .resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
+    from ..utils.ffprobe import source_frame_rate
+    from .baserender import BaseRender
+    from .sprites import build_atlas
 except ImportError:  # standalone perf launcher
-    from plan_types import RenderEvent
+    import sys
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+    from DMR.Render.layout_models import RenderEvent
+    from DMR.Render.resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
+    from DMR.utils.ffprobe import source_frame_rate
+    from DMR.Render.baserender import BaseRender
+    from DMR.Render.sprites import build_atlas
 
 
 logger = logging.getLogger(__name__)
-
-
-def schedule_frame_times(source_pts: list[float], output_fps: float) -> list[tuple[int, float]]:
-    """Return source-index/output-time pairs for an integer-rate CFR schedule."""
-    if output_fps <= 0:
-        raise ValueError("output_fps must be positive")
-    if not source_pts:
-        return []
-    result: list[tuple[int, float]] = []
-    for index, pts in enumerate(source_pts):
-        if index + 1 < len(source_pts):
-            next_pts = source_pts[index + 1]
-        elif index:
-            next_pts = pts + (pts - source_pts[index - 1])
-        else:
-            next_pts = pts + 1.0 / output_fps
-        repeats = max(1, int(round((next_pts - pts) * output_fps)))
-        result.extend((index, (len(result) + offset) / output_fps) for offset in range(repeats))
-    return result
 
 
 PRESSURE_KERNEL = r"""
@@ -123,8 +116,7 @@ class RenderConfig:
     """Runtime values supplied by the render engine or the test launcher."""
 
     video_encoder: str
-    bitrate: int
-    preset: str
+    encoder_options: dict[str, str]
     fps: float | None
     minimum_fps: float | None
     max_frames: int | None
@@ -132,7 +124,6 @@ class RenderConfig:
     gpu_id: int
     render_plan: pathlib.Path | None
     sprite_data: pathlib.Path | None
-    gpu_rc_args: dict[str, Any]
 
 
 class CaiView:
@@ -153,52 +144,24 @@ def load_cuda_modules() -> tuple[Any, Any]:
     return cupy, PyNvVideoCodec
 
 
-def resolve_output_fps(source_fps: float, minimum_fps: float | None) -> float:
-    """Reuse the existing renderer's output-FPS policy."""
-    try:
-        from .media import resolve_output_fps as resolver
-    except ImportError:
-        from media import resolve_output_fps as resolver
-    return float(resolver(source_fps, minimum_fps))
-
-
-def probe_source_fps(video: pathlib.Path) -> float:
-    """Read the same PyAV frame rate used by the old renderer."""
-    try:
-        from .media import source_frame_rate
-    except ImportError:
-        from media import source_frame_rate
-    return source_frame_rate(str(video))
-
-
-def probe_source_duration(video: pathlib.Path) -> float:
-    """Read the source timeline duration for CFR tail padding."""
+def probe_timeline(video: pathlib.Path) -> tuple[float, float]:
+    """Read source duration and the common audio/video timeline origin."""
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=nw=1:nk=1", str(video),
+            "ffprobe", "-v", "error", "-show_entries", "format=duration,start_time",
+            "-of", "json", str(video),
         ],
         capture_output=True,
         text=True,
         check=True,
     )
-    return float(result.stdout.strip())
+    info = json.loads(result.stdout)["format"]
+    return float(info["duration"]), float(info.get("start_time", 0))
 
 
 def codec_name(video_encoder: str) -> str:
     """Convert an FFmpeg NVENC name into PyNvVideoCodec's codec name."""
     return video_encoder.removesuffix("_nvenc")
-
-
-def bitrate_from_args(video_encoder_args: list[str] | None, bitrate: int | None) -> int:
-    """Read the configured video bitrate without embedding a project default."""
-    if bitrate is not None:
-        return int(bitrate)
-    args = video_encoder_args or []
-    for index, value in enumerate(args[:-1]):
-        if value == "-b:v":
-            return parse_bitrate(args[index + 1])
-    raise ValueError("gpu_render requires a configured video bitrate")
 
 
 def parse_bitrate(value: Any) -> int:
@@ -211,7 +174,39 @@ def parse_bitrate(value: Any) -> int:
     elif text.endswith("M"):
         multiplier = 1_000_000
         text = text[:-1]
-    return int(float(text) * multiplier)
+    result = int(float(text) * multiplier)
+    if result <= 0:
+        raise ValueError("bitrate must be positive")
+    return result
+
+
+def parse_encoder_args(args: list[str]) -> dict[str, str]:
+    """Read configured FFmpeg options; absent options stay absent."""
+    names = {"-b:v": "bitrate", "-maxrate": "maxbitrate", "-bufsize": "vbvbufsize",
+             "-rc": "rc", "-preset": "preset"}
+    result = {}
+    for index, flag in enumerate(args):
+        if flag not in names:
+            continue
+        if index + 1 >= len(args) or str(args[index + 1]).startswith("-"):
+            raise ValueError(f"missing value for {flag}")
+        value = args[index + 1]
+        result[names[flag]] = str(parse_bitrate(value)) if flag in ("-b:v", "-maxrate", "-bufsize") else str(value)
+    return result
+
+
+def validate_av_duration(path: pathlib.Path) -> dict[str, float]:
+    """Fail full renders whose audio and video timelines disagree."""
+    result = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)],
+                            check=True, capture_output=True, text=True)
+    streams = json.loads(result.stdout)["streams"]
+    durations = {item["codec_type"]: float(item["duration"]) for item in streams
+                 if item["codec_type"] in ("video", "audio")}
+    if "video" not in durations or "audio" not in durations:
+        raise ValueError(f"missing audio/video stream: {path}")
+    if abs(durations["video"] - durations["audio"]) > 0.1:
+        raise ValueError(f"audio/video duration difference exceeds 0.1s: {durations}")
+    return durations
 
 
 def decode_frames(video: pathlib.Path, nvc: Any, gpu_id: int) -> Iterator[tuple[Any, float]]:
@@ -219,50 +214,29 @@ def decode_frames(video: pathlib.Path, nvc: Any, gpu_id: int) -> Iterator[tuple[
     demuxer = nvc.CreateDemuxer(filename=str(video))
     decoder = nvc.CreateDecoder(gpuid=gpu_id, codec=demuxer.GetNvCodecId(), usedevicememory=True)
     time_base = demuxer.GetTimebaseNum() / demuxer.GetTimebaseDen()
+    cupy, _ = load_cuda_modules()
+
+    def retain(decoded):
+        owned = NV12Buffer(cupy, *frame_geometry(decoded))
+        owned.load(decoded)
+        cupy.cuda.Stream.null.synchronize()
+        return owned, float(decoded.getPTS()) * time_base
+
     for packet in demuxer:
         for decoded in decoder.Decode(packet):
-            yield decoded, float(decoded.getPTS()) * time_base
+            yield retain(decoded)
+    # PyNvVideoCodec drains delayed frames on an empty PacketData (bsl=0).
+    for decoded in decoder.Decode(nvc.PacketData()):
+        yield retain(decoded)
 
 
-def cfr_frames(
+def schedule_frames(
     decoded: Iterator[tuple[Any, float]],
     first: tuple[Any, float],
     output_fps: float,
-) -> tuple[tuple[Any, float], Iterator[tuple[Any, float]]]:
-    """Map decoded frames onto an output timeline without buffering the video."""
-    first_frame, first_pts = first
-    next_item = None
-    current = first_frame
-    last_relative = 0.0
-
-    def generate() -> Iterator[tuple[Any, float]]:
-        nonlocal current, next_item, last_relative
-        next_item = next(decoded, None)
-        frame_index = 1
-        while True:
-            target = frame_index / output_fps
-            while next_item is not None:
-                next_frame, next_pts = next_item
-                relative = max(0.0, next_pts - first_pts)
-                if relative > target:
-                    break
-                current = next_frame
-                last_relative = relative
-                next_item = next(decoded, None)
-            if next_item is None and target > last_relative + (0.5 / output_fps):
-                break
-            yield current, first_pts + target
-            frame_index += 1
-
-    return (first_frame, first_pts), generate()
-
-
-def scheduled_frames(
-    decoded: Iterator[tuple[Any, float]],
-    first: tuple[Any, float],
-    output_fps: float,
-    target_duration: float | None = None,
     max_frames: int | None = None,
+    source_fps: float | None = None,
+    start_offset: float = 0.0,
 ) -> Iterator[tuple[Any, float]]:
     """Yield one decoded frame and its CFR presentation time.
 
@@ -270,30 +244,38 @@ def scheduled_frames(
     next source PTS, which handles direct output, VFR input, integer-rate
     duplication and the final frame without separate encoding branches.
     """
-    if output_fps <= 0:
+    if not math.isfinite(output_fps) or output_fps <= 0:
         raise ValueError("output_fps must be positive")
+    if max_frames is not None and max_frames <= 0:
+        raise ValueError("max_frames must be positive")
     first_frame, first_pts = first
+    first_pts -= start_offset
     current = first_frame
     current_relative = 0.0
+    last_interval = 1.0 / (source_fps or output_fps)
     pending = next(decoded, None)
     frame_index = 0
     while True:
         presentation = frame_index / output_fps
         while pending is not None:
             pending_relative = max(0.0, float(pending[1]) - first_pts)
+            if pending_relative < current_relative - 1e-9:
+                raise ValueError("source timestamps must be monotonic")
             if pending_relative > presentation + 1e-9:
                 break
+            if pending_relative > current_relative:
+                last_interval = pending_relative - current_relative
             current = pending[0]
             current_relative = pending_relative
             pending = next(decoded, None)
-        if pending is None and presentation > current_relative + (0.5 / output_fps):
-            if target_duration is None or presentation >= target_duration - 1e-9:
-                break
+        # A source frame owns [PTS, next PTS). At EOF retain its nominal
+        # interval, never pad to unreliable FLV format.duration metadata.
+        end = current_relative + (1.0 / source_fps if source_fps else last_interval)
+        if pending is None and presentation >= end - 1e-9:
+            break
         yield current, presentation
         frame_index += 1
         if max_frames is not None and frame_index >= max_frames:
-            return
-        if target_duration is not None and presentation + (1.0 / output_fps) >= target_duration - 1e-9 and pending is None:
             return
 
 
@@ -391,17 +373,17 @@ class NV12Buffer:
         for source, target in zip(decoded.cuda(), (self.y, self.uv)):
             cai = source.__cuda_array_interface__
             shape = tuple(int(value) for value in cai["shape"])
-            strides = tuple(int(value) for value in cai["strides"])
+            strides = tuple(int(value) for value in (cai["strides"] or source.strides))
             view = self.cupy.asarray(CaiView(source, shape, strides), copy=False)
             target[...] = view.reshape(target.shape)
 
-    def load_scaled(self, decoded: Any) -> None:
+    def load_into_canvas(self, decoded: Any) -> None:
         """Copy a decoded NV12 frame, scaling and letterboxing on the GPU."""
         planes = decoded.cuda()
         y_source = planes[0]
         y_cai = y_source.__cuda_array_interface__
         y_shape = tuple(int(value) for value in y_cai["shape"])
-        y_strides = tuple(int(value) for value in y_cai["strides"])
+        y_strides = tuple(int(value) for value in (y_cai["strides"] or y_source.strides))
         source_height, source_width = y_shape[:2]
         source_y = self.cupy.asarray(CaiView(y_source, y_shape, y_strides), copy=False).reshape(source_height, source_width)
         if source_width == self.width and source_height == self.height:
@@ -409,33 +391,31 @@ class NV12Buffer:
             uv_source = planes[1]
             uv_cai = uv_source.__cuda_array_interface__
             uv_shape = tuple(int(value) for value in uv_cai["shape"])
-            uv_strides = tuple(int(value) for value in uv_cai["strides"])
+            uv_strides = tuple(int(value) for value in (uv_cai["strides"] or uv_source.strides))
             self.uv[...] = self.cupy.asarray(CaiView(uv_source, uv_shape, uv_strides), copy=False).reshape(self.uv.shape)
             return
-        scale = min(self.width / source_width, self.height / source_height)
-        scaled_width = max(2, int(source_width * scale) // 2 * 2)
-        scaled_height = max(2, int(source_height * scale) // 2 * 2)
-        offset_x = (self.width - scaled_width) // 2
-        offset_y = (self.height - scaled_height) // 2
+        scaled_width, scaled_height, offset_x, offset_y = fit_canvas(
+            (source_width, source_height), (self.width, self.height))
+        scale_x, scale_y = scaled_width / source_width, scaled_height / source_height
         self.y[..., 0] = 16
         x_indices = self.cupy.minimum(
-            (self.cupy.arange(scaled_width) / scale).astype(self.cupy.int32), source_width - 1
+            (self.cupy.arange(scaled_width) / scale_x).astype(self.cupy.int32), source_width - 1
         )
         y_indices = self.cupy.minimum(
-            (self.cupy.arange(scaled_height) / scale).astype(self.cupy.int32), source_height - 1
+            (self.cupy.arange(scaled_height) / scale_y).astype(self.cupy.int32), source_height - 1
         )
         self.y[offset_y:offset_y + scaled_height, offset_x:offset_x + scaled_width, 0] = source_y[y_indices[:, None], x_indices[None, :]]
         uv_source = planes[1]
         uv_cai = uv_source.__cuda_array_interface__
         uv_shape = tuple(int(value) for value in uv_cai["shape"])
-        uv_strides = tuple(int(value) for value in uv_cai["strides"])
+        uv_strides = tuple(int(value) for value in (uv_cai["strides"] or uv_source.strides))
         source_uv = self.cupy.asarray(CaiView(uv_source, uv_shape, uv_strides), copy=False).reshape(source_height // 2, source_width // 2, 2)
         self.uv[...] = 128
         uv_x = self.cupy.minimum(
-            (self.cupy.arange(scaled_width // 2) / scale).astype(self.cupy.int32), source_width // 2 - 1
+            (self.cupy.arange(scaled_width // 2) / scale_x).astype(self.cupy.int32), source_width // 2 - 1
         )
         uv_y = self.cupy.minimum(
-            (self.cupy.arange(scaled_height // 2) / scale).astype(self.cupy.int32), source_height // 2 - 1
+            (self.cupy.arange(scaled_height // 2) / scale_y).astype(self.cupy.int32), source_height // 2 - 1
         )
         self.uv[offset_y // 2:offset_y // 2 + scaled_height // 2, offset_x // 2:offset_x // 2 + scaled_width // 2] = source_uv[uv_y[:, None], uv_x[None, :]]
 
@@ -526,9 +506,11 @@ def frame_signature(cupy: Any, frame: NV12Buffer) -> int:
     return int(cupy.sum(sample).get())
 
 
-def encoder_config(video_encoder: str) -> str:
-    """Map the configured FFmpeg encoder to the native codec identifier."""
-    return codec_name(video_encoder)
+def create_encoder(nvc, width, height, frame_rate, video_encoder, configured_options):
+    """Use the native fps name and pass only explicitly configured options."""
+    options = {"codec": codec_name(video_encoder), "fps": str(frame_rate), **configured_options}
+    logger.info("CreateEncoder args: %s", json.dumps({"width": width, "height": height, **options}, sort_keys=True))
+    return nvc.CreateEncoder(width, height, "NV12", False, **options)
 
 
 def encode_to_file(
@@ -541,65 +523,39 @@ def encode_to_file(
     frame_rate: float,
     config: RenderConfig,
     source_frame_rate: float | None = None,
-    target_duration: float | None = None,
+    start_offset: float = 0.0,
 ) -> dict[str, Any]:
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
-    rc_args = dict(config.gpu_rc_args)
-    missing = [key for key in ("rc", "maxbitrate", "vbvbufsize") if rc_args.get(key) in (None, "")]
-    if missing:
-        raise ValueError(
-            "gpu_rc_args 缺少编码参数: " + ", ".join(missing)
-            + "；请在 render_args.overlay.gpu_rc_args 或测试命令中显式配置"
-        )
-    encoder = nvc.CreateEncoder(
-        width,
-        height,
-        "NV12",
-        False,
-        codec=encoder_config(config.video_encoder),
-        rc=str(rc_args["rc"]),
-        bitrate=str(config.bitrate),
-        maxbitrate=str(parse_bitrate(rc_args["maxbitrate"])),
-        vbvbufsize=str(parse_bitrate(rc_args["vbvbufsize"])),
-        fps=str(frame_rate),
-        preset=config.preset,
-    )
-    logger.info(
-        "CreateEncoder args: %s",
-        json.dumps(
-            {
-                "codec": encoder_config(config.video_encoder),
-                "rc": str(rc_args["rc"]),
-                "bitrate": str(config.bitrate),
-                "maxbitrate": str(parse_bitrate(rc_args["maxbitrate"])),
-                "vbvbufsize": str(parse_bitrate(rc_args["vbvbufsize"])),
-                "preset": config.preset,
-                "fps": frame_rate,
-                "width": width,
-                "height": height,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-    )
+    encoder = create_encoder(nvc, width, height, frame_rate, config.video_encoder, config.encoder_options)
     buffer = NV12Buffer(cupy, width, height)
     plan_assets = load_plan_assets(cupy, config.sprite_data) if config.sprite_data else None
     compositor = SpriteCompositor(cupy, width, height, config.pressure_sprites, plan_assets)
     signatures: list[int] = []
     active_counts: list[int] = []
     first_pts = first[1]
+    source_frames = 1
+    last_source_pts = first_pts
+
+    def tracked_frames():
+        nonlocal source_frames, last_source_pts
+        for item in frames:
+            source_frames += 1
+            last_source_pts = item[1]
+            yield item
+
     frame_count = 0
     started = time.perf_counter()
     with bitstream.open("wb") as stream:
-        for decoded, frame_time in scheduled_frames(
-            frames,
+        for decoded, frame_time in schedule_frames(
+            tracked_frames(),
             first,
             frame_rate,
-            target_duration=target_duration,
             max_frames=config.max_frames,
+            source_fps=source_frame_rate,
+            start_offset=start_offset,
         ):
-            buffer.load_scaled(decoded)
+            buffer.load_into_canvas(decoded)
             if frame_count < 200 and frame_count % 10 == 0:
                 signatures.append(frame_signature(cupy, buffer))
             active_counts.append(compositor.apply(buffer, frame_time))
@@ -623,11 +579,14 @@ def encode_to_file(
         "active_events_avg": sum(active_counts) / len(active_counts) if active_counts else 0.0,
         "active_events_peak": max(active_counts) if active_counts else 0,
         "first_pts_seconds": first_pts,
+        "source_frames": source_frames,
+        "last_source_time": last_source_pts - first_pts + start_offset,
         "last_relative_pts_seconds": (frame_count - 1) / frame_rate if frame_count else 0.0,
     }
 
 
-def mux_with_audio(bitstream: pathlib.Path, source: pathlib.Path, output: pathlib.Path, frame_rate: float) -> None:
+def mux_audio(bitstream: pathlib.Path, source: pathlib.Path, output: pathlib.Path, frame_rate: float, trim_duration: float | None = None,
+              audio_encoder: str = "copy", audio_args: list[str] | None = None, video_duration: float | None = None) -> None:
     """Mux encoded video with the source audio without truncating either stream."""
     command = [
         "ffmpeg",
@@ -636,7 +595,7 @@ def mux_with_audio(bitstream: pathlib.Path, source: pathlib.Path, output: pathli
         "-y",
         "-nostdin",
         "-f",
-        "hevc",
+        bitstream.suffix.lstrip("."),
         "-r",
         str(frame_rate),
         "-i",
@@ -650,9 +609,19 @@ def mux_with_audio(bitstream: pathlib.Path, source: pathlib.Path, output: pathli
         "-c:v",
         "copy",
         "-c:a",
-        "copy",
+        audio_encoder,
+        *(audio_args or []),
         str(output),
     ]
+    if trim_duration is not None:
+        command[-1:-1] = ["-t", str(trim_duration)]
+    if audio_encoder != "copy":
+        # Same audio timeline repair used by emoji_render_mt; pad missing tail
+        # samples with silence without discarding any source audio.
+        filters = "aresample=async=1000:first_pts=0"
+        if trim_duration is None and video_duration is not None:
+            filters += f",apad=whole_dur={video_duration}"
+        command[-1:-1] = ["-af", filters]
     subprocess.run(command, check=True, capture_output=True, text=True)
 
 
@@ -663,8 +632,7 @@ def render_one(video: Any, output: str, progress_cb: Any = None, **kwargs: Any) 
     destination = pathlib.Path(output)
     config = RenderConfig(
         video_encoder=str(kwargs.get("vencoder", "hevc_nvenc")),
-        bitrate=bitrate_from_args(kwargs.get("vencoder_args"), kwargs.get("bitrate")),
-        preset=str(kwargs.get("preset", "P4")),
+        encoder_options=parse_encoder_args(kwargs.get("vencoder_args") or []),
         fps=kwargs.get("fps"),
         minimum_fps=kwargs.get("min_fps"),
         max_frames=kwargs.get("max_frames"),
@@ -672,19 +640,25 @@ def render_one(video: Any, output: str, progress_cb: Any = None, **kwargs: Any) 
         gpu_id=int(kwargs.get("gpu_id", 0)),
         render_plan=pathlib.Path(kwargs["render_plan"]) if kwargs.get("render_plan") else None,
         sprite_data=pathlib.Path(kwargs["sprite_data"]) if kwargs.get("sprite_data") else None,
-        gpu_rc_args=dict(kwargs.get("gpu_rc_args") or {}),
     )
     if bool(config.render_plan) != bool(config.sprite_data):
         raise ValueError("render_plan and sprite_data must be supplied together")
     cupy, nvc = load_cuda_modules()
     cupy.cuda.Device(config.gpu_id).use()
-    frame_rate = config.fps or resolve_output_fps(probe_source_fps(source), config.minimum_fps)
+    frame_rate = config.fps or resolve_output_fps(source_frame_rate(str(source)), config.minimum_fps)
     decoded = decode_frames(source, nvc, config.gpu_id)
     first = next(decoded)
-    source_fps = probe_source_fps(source)
-    source_duration = probe_source_duration(source)
-    width, height = frame_geometry(first[0])
-    bitstream = destination.with_suffix(".hevc")
+    source_fps = source_frame_rate(str(source))
+    source_duration, source_start = probe_timeline(source)
+    width, height = kwargs.get("canvas_resolution") or resolve_render_canvas(
+        getattr(video, "resolution", None) or frame_geometry(first[0]),
+        rescale_to_1080p=bool(kwargs.get("rescale_to_1080p", False)),
+        rescale_orientation=kwargs.get("rescale_orientation", "auto"),
+    )
+    codec = codec_name(config.video_encoder)
+    if codec not in ("hevc", "h264"):
+        raise ValueError(f"unsupported GPU video codec: {codec}")
+    bitstream = destination.with_suffix("." + codec)
     destination.parent.mkdir(parents=True, exist_ok=True)
     result = encode_to_file(
         decoded,
@@ -696,11 +670,61 @@ def render_one(video: Any, output: str, progress_cb: Any = None, **kwargs: Any) 
         frame_rate,
         config,
         source_frame_rate=source_fps,
-        target_duration=source_duration,
+        start_offset=max(0.0, first[1] - source_start),
     )
-    mux_with_audio(bitstream, source, destination, frame_rate)
+    video_duration = result["frames"] / frame_rate
+    truncated = config.max_frames is not None and video_duration < source_duration - 1 / frame_rate
+    mux_audio(bitstream, source, destination, frame_rate, video_duration if truncated else None,
+              kwargs.get("aencoder", "copy"), kwargs.get("aencoder_args"), video_duration)
+    result["intentional_trim"] = truncated
+    if not truncated:
+        validate_av_duration(destination)
     result.update({"video": str(source), "output": str(destination), "width": width, "height": height, "frame_rate": frame_rate})
     return result
+
+
+class GpuRender(BaseRender):
+    """Build a task atlas and render, reporting GPU failures to the fallback caller."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.options = dict(kwargs)
+        self.logger = logging.getLogger(__name__)
+
+    def render_one(self, video, output: str, progress_cb=None, **kwargs: Any):
+        """Render with GPU or return a descriptive failure for the caller to fall back."""
+        atlas_directory = None
+        try:
+            kwargs = {**self.options, **kwargs}
+
+            sprite_data = kwargs.get("sprite_data")
+            render_plan = kwargs.get("render_plan")
+            if render_plan and not sprite_data:
+                pathlib.Path(output).parent.mkdir(parents=True, exist_ok=True)
+                atlas_directory = pathlib.Path(tempfile.mkdtemp(prefix="dmr_atlas_", dir=str(pathlib.Path(output).parent)))
+                from DMR.Render.emoji_dmrender import _detect_platform
+                platform = kwargs.get("platform") or _detect_platform(getattr(video, "dm_file_id", None) or render_plan)
+                pack = pathlib.Path(kwargs["emoji_pack"]) if kwargs.get("emoji_pack") else pathlib.Path("emoji_pack") / platform
+                build_atlas(render_plan, atlas_directory, platform=platform, emoticon_dir=pack / "emoticon")
+                sprite_data = atlas_directory
+                kwargs["sprite_data"] = sprite_data
+            if not sprite_data:
+                raise RuntimeError("gpu_render requires render_plan or prepared sprite_data")
+            return True, render_one(
+                video,
+                output,
+                progress_cb=progress_cb,
+                **kwargs,
+            )
+        except Exception as exc:
+            self.logger.warning("GPU 渲染不可用，将回退到 emoji_dmrender: %s", exc)
+            return False, exc
+        finally:
+            if atlas_directory:
+                shutil.rmtree(atlas_directory)
+
+    def stop(self) -> None:
+        """GPU renders are subprocess-free at this adapter boundary."""
+
 
 
 def main() -> None:
@@ -710,11 +734,14 @@ def main() -> None:
     parser.add_argument("--video", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--vencoder", default="hevc_nvenc")
-    parser.add_argument("--bitrate", type=int, required=True)
+    parser.add_argument("--bitrate", type=int)
+    parser.add_argument("--venc-args", default="[]")
+    parser.add_argument("--canvas-resolution")
+    parser.add_argument("--rescale-to-1080p", action="store_true")
     parser.add_argument("--rc", default=None)
     parser.add_argument("--maxbitrate", default=None)
     parser.add_argument("--vbvbufsize", default=None)
-    parser.add_argument("--preset", default="P4")
+    parser.add_argument("--preset")
     parser.add_argument("--fps", type=float)
     parser.add_argument("--min-fps", type=float)
     parser.add_argument("--max-frames", type=int)
@@ -727,8 +754,11 @@ def main() -> None:
         args.video,
         str(args.output),
         vencoder=args.vencoder,
-        bitrate=args.bitrate,
-        preset=args.preset,
+        vencoder_args=json.loads(args.venc_args) + [value for flag, item in (
+            ("-b:v", args.bitrate), ("-maxrate", args.maxbitrate), ("-bufsize", args.vbvbufsize),
+            ("-rc", args.rc), ("-preset", args.preset)) if item is not None for value in (flag, str(item))],
+        canvas_resolution=tuple(map(int, args.canvas_resolution.split("x"))) if args.canvas_resolution else None,
+        rescale_to_1080p=args.rescale_to_1080p,
         fps=args.fps,
         min_fps=args.min_fps,
         max_frames=args.max_frames,
@@ -736,7 +766,6 @@ def main() -> None:
         gpu_id=args.gpu_id,
         render_plan=args.render_plan,
         sprite_data=args.sprite_data,
-        gpu_rc_args={"rc": args.rc, "maxbitrate": args.maxbitrate, "vbvbufsize": args.vbvbufsize},
     )
     print(json.dumps(result, ensure_ascii=False))
 

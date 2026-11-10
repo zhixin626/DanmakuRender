@@ -44,3 +44,10 @@ perf/outputs/
 /emoji_pack/
 /perf/configs_snapshot/
 /**/__pycache__/
+
+# Renderer unit tests and their small visual regression fixtures.
+!/tests/
+!/tests/*.py
+!/tests/references/
+!/tests/references/*.png
+!/tests/references/*.json
