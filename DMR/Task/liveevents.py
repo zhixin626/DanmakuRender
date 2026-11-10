@@ -143,7 +143,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             return ret_msgs
         render_args = self.config['render_args']['overlay']
         render_mode = render_args.get('engine', 'dmrender')
-        if render_mode not in ('dmrender', 'emoji_dmrender'):
+        if render_mode not in ('dmrender', 'emoji_dmrender', 'gpu_render'):
             self.logger.warning('未知弹幕渲染后端 %s，回退 dmrender', render_mode)
             render_mode = 'dmrender'
         if render_args.get('output_name'):
