@@ -347,6 +347,11 @@ render_args:
     # auto按当前源判断；adaptive在当前比例接近方形时参考上一段
     # 也可用portrait或landscape强制固定方向
     rescale_orientation: auto
+    # 直播分辨率时间线：忽略开头不稳定区间和过短切换；整场少数方向满足任一阈值时重渲染到主方向
+    resolution_ignore_head_seconds: 30
+    resolution_min_span_seconds: 60
+    resolution_minority_ratio: 0.15
+    resolution_minority_minutes: 10
 
     # 以下参数适用于 emoji_dmrender 和 gpu_render
     # 输出帧率取源帧率的最小整数倍，使其不低于此值（25→50、30→60）；~ 跟随源帧率
@@ -357,7 +362,7 @@ render_args:
     emoji_font: ~
     # 轨道是第一层，事件类型嵌套在所属轨道中。
     r2l:
-      # 固定滚动速度，单位像素/秒（以1080p画布为准）；横竖屏和长短弹幕相同
+      # 固定滚动速度，单位为画布像素/秒；关闭1080p缩放使用其他分辨率时也不自动缩放
       # 留空时用1920 / screen_duration换算，保留旧配置的横屏效果
       speed: ~
       # 兼容旧配置：移动横屏1920像素所需秒数；设置speed后此项不生效

@@ -3,11 +3,98 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 LANDSCAPE_1080P = (1920, 1080)
 PORTRAIT_1080P = (1080, 1920)
 RESCALE_ORIENTATIONS = {"auto", "adaptive", "portrait", "landscape"}
 STRONG_ASPECT_RATIO = 1.5
+
+
+@dataclass(frozen=True)
+class ResolutionSpan:
+    """A stable source resolution over one media-time interval."""
+
+    start: float
+    end: float
+    width: int
+    height: int
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, float(self.end) - float(self.start))
+
+    @property
+    def orientation(self) -> str:
+        return _orientation((self.width, self.height))
+
+
+def normalize_resolution_spans(
+    spans, *, ignore_head_seconds: float = 30.0, min_span_seconds: float = 60.0
+) -> list[ResolutionSpan]:
+    """Drop startup noise and short switches from a keyframe timeline."""
+    result = []
+    for raw in spans:
+        if isinstance(raw, ResolutionSpan):
+            span = raw
+        else:
+            start, end, width, height = raw
+            span = ResolutionSpan(float(start), float(end), int(width), int(height))
+        start = max(span.start, float(ignore_head_seconds))
+        filtered = ResolutionSpan(start, span.end, span.width, span.height)
+        if filtered.duration >= float(min_span_seconds):
+            result.append(filtered)
+    return result
+
+
+def choose_dominant_orientation(spans) -> str:
+    """Return the orientation with the greatest stable duration."""
+    totals = {"portrait": 0.0, "landscape": 0.0}
+    for span in spans:
+        totals[span.orientation] += span.duration
+    if not any(totals.values()):
+        raise ValueError("resolution timeline has no stable spans")
+    return max(totals, key=totals.get)
+
+
+def decide_session_parts(
+    spans,
+    *,
+    minority_ratio: float = 0.15,
+    minority_minutes: float = 10.0,
+    forced_orientation: str = "auto",
+) -> dict:
+    """Choose one normalized video or consecutive orientation parts."""
+    policy = normalize_rescale_orientation(forced_orientation)
+    stable = normalize_resolution_spans(spans, ignore_head_seconds=0, min_span_seconds=0)
+    if not stable:
+        raise ValueError("resolution timeline has no spans")
+    dominant = policy if policy in {"portrait", "landscape"} else choose_dominant_orientation(stable)
+    totals = {"portrait": 0.0, "landscape": 0.0}
+    for span in stable:
+        totals[span.orientation] += span.duration
+    total = sum(totals.values())
+    minority = total - totals[dominant]
+    if minority <= 0:
+        action = "single"
+    elif minority / total < float(minority_ratio) or minority < float(minority_minutes) * 60:
+        action = "re_render_minority"
+    else:
+        action = "parts"
+    runs = []
+    for span in stable:
+        if runs and runs[-1]["orientation"] == span.orientation:
+            runs[-1]["end"] = span.end
+        else:
+            runs.append({"orientation": span.orientation, "start": span.start, "end": span.end})
+    return {
+        "dominant": dominant,
+        "action": action,
+        "total_seconds": total,
+        "minority_seconds": minority,
+        "runs": runs,
+        "canvas": _canvas(dominant),
+    }
 
 
 def normalize_rescale_orientation(value) -> str:
