@@ -357,7 +357,10 @@ render_args:
     emoji_font: ~
     # 轨道是第一层，事件类型嵌套在所属轨道中。
     r2l:
-      # 弹幕移动一个屏幕宽度所需秒数
+      # 固定滚动速度，单位像素/秒（以1080p画布为准）；横竖屏和长短弹幕相同
+      # 留空时用1920 / screen_duration换算，保留旧配置的横屏效果
+      speed: ~
+      # 兼容旧配置：移动横屏1920像素所需秒数；设置speed后此项不生效
       screen_duration: 8
       # 从 margin_top 以下可供 R2L 使用的垂直比例，范围 0~1
       vertical_ratio: 0.3
