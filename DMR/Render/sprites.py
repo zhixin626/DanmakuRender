@@ -178,6 +178,7 @@ class SpriteFactory:
         self.pack = pack
         self.png_cache: dict[str, Image.Image] = {}
         self.cache: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+        self.image_cache: dict[tuple[Any, ...], Image.Image] = {}
 
     @staticmethod
     def _load_emoji_font(path: str, correction: int, text_font: str):
@@ -222,6 +223,7 @@ class SpriteFactory:
         event_key = None if event_pack is None else tuple(sorted(event_pack.items()))
         key = (text, tuple(rgb), pill_key, event_key, outline, outline_rgb)
         if key in self.cache:
+            self._last_image = self.image_cache[key]
             return self.cache[key]
 
         tokens = tokenize(text, active_pack)
@@ -322,4 +324,24 @@ class SpriteFactory:
             anchor_y_offset,
         )
         self.cache[key] = result
+        self.image_cache[key] = sprite.copy()
+        self._last_image = sprite
         return result
+
+    def get_sprite_image(
+        self,
+        text: str,
+        rgb: tuple[int, int, int] | list[int],
+        event_pack: dict[str, str] | None = None,
+        outline: float = OUTLINE,
+        outline_rgb: tuple[int, int, int] = (0, 0, 0),
+    ) -> Image.Image:
+        """Return the same Pillow image used to build the cached YUV sprite."""
+        self.get_sprite(
+            text,
+            rgb,
+            event_pack=event_pack,
+            outline=outline,
+            outline_rgb=outline_rgb,
+        )
+        return self._last_image.copy()

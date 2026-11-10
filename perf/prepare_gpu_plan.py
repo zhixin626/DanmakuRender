@@ -60,48 +60,35 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
         if node.get("type") == "text":
             family = str(node.get("font", "Microsoft YaHei"))
             font_path = resolve_font(family, True)
-            font = ImageFont.truetype(font_path, int(node.get("size", 30)))
-            fill = parse_color(node.get("color", "#FFFFFF")) + (255,)
-            x = int(node.get("x", 0))
-            y = int(node.get("y", 0))
+            size = float(node.get("size", 30))
             text = str(node.get("text", ""))
-            images = {}
-            for token, asset in (node.get("images") or {}).items():
-                if asset.get("path"):
-                    images[token.strip("[]").lower()] = asset["path"]
-            tokens = tokenize(text, images)
-            cursor = 0
-            token_widths = []
-            for kind, payload in tokens:
-                if kind == "png":
-                    with Image.open(payload).convert("RGBA") as source:
-                        ratio = int(node.get("size", 30)) / max(1, source.height)
-                        token_widths.append(max(1, int(round(source.width * ratio))))
-                elif kind == "emoji":
-                    emoji_font = ImageFont.truetype(resolve_emoji_font(None), int(node.get("size", 30)))
-                    token_widths.append(max(1, int(emoji_font.getlength(payload))))
-                else:
-                    token_widths.append(max(1, int(font.getlength(payload))))
-            total_width = sum(token_widths)
-            draw_x = x - total_width if node.get("anchor") == "top_right" else x
-            for (kind, payload), token_width in zip(tokens, token_widths):
-                if kind == "png":
-                    with Image.open(payload).convert("RGBA") as source:
-                        sprite = source.resize((token_width, int(node.get("size", 30))), Image.Resampling.LANCZOS)
-                    image.alpha_composite(sprite, (draw_x, y))
-                elif kind == "emoji":
-                    emoji_font = ImageFont.truetype(resolve_emoji_font(None), int(node.get("size", 30)))
-                    draw.text((draw_x, y), payload, font=emoji_font, fill=fill, embedded_color=True)
-                else:
-                    draw.text(
-                        (draw_x, y),
-                        payload,
-                        font=font,
-                        fill=fill,
-                        stroke_width=max(0, int(node.get("outline", 0))),
-                        stroke_fill=parse_color(node.get("outline_color", "#000000")) + (255,),
-                    )
-                draw_x += token_width
+            images = {
+                token.strip("[]").lower(): asset["path"]
+                for token, asset in (node.get("images") or {}).items()
+                if asset.get("path")
+            }
+            factory = SpriteFactory(
+                font_path,
+                resolve_emoji_font(None),
+                images,
+                size,
+            )
+            sprite = factory.get_sprite_image(
+                text,
+                parse_color(node.get("color", "#FFFFFF")),
+                event_pack=images or None,
+                outline=node.get("outline", 0),
+                outline_rgb=parse_color(node.get("outline_color", "#000000")),
+            )
+            opacity = max(0.0, min(1.0, float(node.get("opacity", 1.0))))
+            if opacity < 1.0:
+                alpha = sprite.getchannel("A").point(lambda value: int(value * opacity))
+                sprite.putalpha(alpha)
+            x = int(node.get("x", 0))
+            if node.get("anchor") == "top_right":
+                x -= sprite.width
+            y = int(node.get("y", 0))
+            image.alpha_composite(sprite, (x, y))
     return image
 
 

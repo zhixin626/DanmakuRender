@@ -470,6 +470,7 @@ def encode_to_file(
                     relative_pts = max(0.0, pts - first_pts)
                     frame_time = frame_count / frame_rate
                     active_counts.append(compositor.apply(buffer, frame_time))
+                    cupy.cuda.Stream.null.synchronize()
                     for packet in encoder.Encode(buffer):
                         stream.write(packet["data"])
                     frame_count += 1
@@ -479,11 +480,15 @@ def encode_to_file(
                     break
                 raw_current = next_item
             if target_duration and frame_rate > (source_frame_rate or 0):
-                while frame_count / frame_rate < target_duration - 1e-6:
+                while (
+                    frame_count / frame_rate < target_duration - 1e-6
+                    and (config.max_frames is None or frame_count < config.max_frames)
+                ):
                     buffer.buffer[...] = source_buffer.buffer
                     relative_pts = max(0.0, target_duration - (1.0 / frame_rate))
                     frame_time = frame_count / frame_rate
                     active_counts.append(compositor.apply(buffer, frame_time))
+                    cupy.cuda.Stream.null.synchronize()
                     for packet in encoder.Encode(buffer):
                         stream.write(packet["data"])
                     frame_count += 1
@@ -495,6 +500,7 @@ def encode_to_file(
                 relative_pts = max(0.0, pts - first_pts)
                 frame_time = frame_count / frame_rate
                 active_counts.append(compositor.apply(buffer, frame_time))
+                cupy.cuda.Stream.null.synchronize()
                 for packet in encoder.Encode(buffer):
                     stream.write(packet["data"])
                 frame_count += 1

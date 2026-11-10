@@ -18,4 +18,4 @@ GitHub API error 403: {"message":"Resource not accessible by integration","docum
 
 ## 后续汇报方式
 
-阶段 2 和后续阶段的完整六项汇报会写入 `perf/results/<阶段>.md` 并随提交推送，保证 Claude 可以从提交中审查。要恢复 PR 直接评论，需要在 Codex GitHub 连接器中授予 issue/PR comment 写权限，或在本机安装并登录 `gh` 后由用户明确授权发布测试评论。
+阶段 2 和后续阶段的完整六项汇报会写入 `perf/results/<阶段>.md` 并随提交推送，保证 Claude 可以从提交中审查。用户随后安装并登录 GitHub CLI；在新 shell 中用绝对路径 `C:\\Program Files\\GitHub CLI\\gh.exe` 成功完成 `gh auth status`、`gh pr view`、短评论和 `--body-file` 长评论测试，评论 ID 为 6757996738 和 6757997197。后续汇报采用“先写 md，再用 gh pr comment --body-file 发送”。
