@@ -344,7 +344,7 @@ render_args:
     # 所有渲染后端统一使用1080p横屏/竖屏画布；等比缩放并补黑边
     # 宽 >= 高使用1920x1080，高 > 宽使用1080x1920；default关闭，由global/任务按需开启
     rescale_to_1080p: false
-    # auto按当前源判断；adaptive在当前比例接近方形时参考上一段
+    # auto按当前源判断；旧配置的 adaptive 会兼容映射为 auto
     # 也可用portrait或landscape强制固定方向
     rescale_orientation: auto
     # 直播分辨率时间线：忽略开头不稳定区间和过短切换；整场少数方向满足任一阈值时重渲染到主方向

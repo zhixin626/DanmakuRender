@@ -703,14 +703,28 @@ def encode_to_file(
     compositor = SpriteCompositor(cupy, width, height, plan_assets)
     active_counts: list[int] = []
     first_pts = first[1]
+    resolution_spans: list[list[float | int]] = []
     source_frames = 1
     last_source_pts = first_pts
+
+    def record_geometry(decoded, timestamp):
+        width, height = frame_geometry(decoded)
+        relative = max(0.0, float(timestamp) - float(first_pts))
+        if resolution_spans and resolution_spans[-1][2:] == [width, height]:
+            resolution_spans[-1][1] = relative
+        else:
+            if resolution_spans:
+                resolution_spans[-1][1] = relative
+            resolution_spans.append([relative, relative, width, height])
+
+    record_geometry(first[0], first_pts)
 
     def tracked_frames():
         nonlocal source_frames, last_source_pts
         for item in frames:
             source_frames += 1
             last_source_pts = item[1]
+            record_geometry(item[0], item[1])
             yield item
 
     frame_count = 0
@@ -781,6 +795,7 @@ def encode_to_file(
         "last_relative_pts_seconds": (
             (frame_count - 1) / frame_rate if frame_count else 0.0
         ),
+        "resolution_spans": [tuple(span) for span in resolution_spans],
     }
 
 
@@ -1055,13 +1070,16 @@ class GpuRender(BaseRender):
             self.logger.info(
                 "GPU render statistics: %s", json.dumps(result, ensure_ascii=False)
             )
-            return True, self.output_info(
+            output_info = self.output_info(
                 video,
                 output,
                 (result["width"], result["height"]),
                 started,
                 duration=result["frames"] / result["frame_rate"],
             )
+            output_info.resolution_spans = result.get("resolution_spans", [])
+            output_info["resolution_spans"] = output_info.resolution_spans
+            return True, output_info
         except RenderStopped as error:
             error.__traceback__ = None
             return False, error

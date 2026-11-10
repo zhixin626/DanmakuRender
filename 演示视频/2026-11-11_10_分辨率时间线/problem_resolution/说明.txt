@@ -1,4 +1,0 @@
-来源：perf/samples/problem_resolution/7月30日22点50分_clip.flv（1600x1280，约300秒）。
-输出：01_problem_resolution_GPU_G.mp4，GPU按1920x1080画布等比缩放并补黑边；顶部和底部黑边是本步骤重点。
-关键帧扫描前五帧均1600x1280，素材本身没有段内动态分辨率切换；动态时间线策略由tests/test_resolution_policy.py覆盖。
-G策略：开头忽略30秒，短span小于60秒过滤；少数方向小于15%或10分钟时重渲染到主方向，否则按连续方向分P。

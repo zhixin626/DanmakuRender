@@ -39,7 +39,7 @@ perf/tmp/
 perf/venv/
 perf/samples/
 perf/outputs/
-演示视频/
+/演示视频/
 # Local performance fixtures copied from the user machine; never commit large binary packs/configs.
 /emoji_pack/
 /perf/configs_snapshot/

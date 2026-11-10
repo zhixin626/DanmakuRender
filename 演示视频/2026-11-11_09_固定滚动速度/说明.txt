@@ -1,4 +1,0 @@
-来源：B站峰哥7月30日20点23分中段；两份均使用同一份 augmented 弹幕。
-01竖屏、02横屏：r2l.speed=240px/s，50fps，1500帧；画布方向是唯一差异。
-03上下对比：上竖屏、下横屏；顶部区域保持原像素，竖屏右侧补黑。观察文字移动速度，长短弹幕均为240px/s。
-逐帧报告：perf/tmp/night/speed/portrait_flicker.json、landscape_flicker.json。

@@ -13,6 +13,7 @@ from ..utils import *
 from ..utils.utils import format_duration
 from ..utils.gifts_utils import generate_gift_statistics
 from ..utils.session_record import read_last_complete_session
+from DMR.Render.resolution import decide_session_parts
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +381,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         target_slot = {'src_video': 'src_video', 'dm_video': 'dm_video'}
 
         ret_msgs = []
+        self._log_resolution_policy(group_id)
         for vt in merge_type:
             # 检查该 vt 所有分段是否都 ready/uploaded（None=未参与，跳过；其余状态=还不能合）
             entries = []
@@ -425,6 +427,39 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             self._dispatched[merge_msg.request_id] = merge_msg
             ret_msgs.append(merge_msg)
         return ret_msgs
+
+    def _log_resolution_policy(self, group_id):
+        """Record the session canvas decision before Merger groups segments."""
+        spans = []
+        offset = 0.0
+        for state in self.state_dict.get(group_id, []):
+            video = (state.get("dm_video") or {}).get("file")
+            if video is None:
+                continue
+            for start, end, width, height in getattr(video, "resolution_spans", []) or []:
+                spans.append((offset + float(start), offset + float(end), width, height))
+            offset += float(getattr(video, "duration", 0) or 0)
+        if not spans:
+            return
+        overlay = self.config.get("render_args", {}).get("overlay", {})
+        try:
+            decision = decide_session_parts(
+                spans,
+                minority_ratio=float(overlay.get("resolution_minority_ratio", 0.15)),
+                minority_minutes=float(overlay.get("resolution_minority_minutes", 10)),
+                forced_orientation=overlay.get("rescale_orientation", "auto"),
+            )
+        except ValueError as error:
+            self.logger.warning("分辨率时间线无法判定：%s", error)
+            return
+        self.logger.info(
+            "分辨率时间线策略: group=%s dominant=%s action=%s minority=%.1fs runs=%s",
+            group_id,
+            decision["dominant"],
+            decision["action"],
+            decision["minority_seconds"],
+            decision["runs"],
+        )
 
     def onMergeEnd(self, message: PipeMessage):
         """Merger 回报合并完成：把被合并段按 remove_source 标状态、把合并产物按序作为新段追加，

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 LANDSCAPE_1080P = (1920, 1080)
 PORTRAIT_1080P = (1080, 1920)
-RESCALE_ORIENTATIONS = {"auto", "adaptive", "portrait", "landscape"}
+RESCALE_ORIENTATIONS = {"auto", "portrait", "landscape"}
 STRONG_ASPECT_RATIO = 1.5
 
 
@@ -99,6 +99,8 @@ def decide_session_parts(
 
 def normalize_rescale_orientation(value) -> str:
     orientation = str(value or "auto").strip().lower()
+    if orientation == "adaptive":
+        orientation = "auto"
     if orientation not in RESCALE_ORIENTATIONS:
         choices = ", ".join(sorted(RESCALE_ORIENTATIONS))
         raise ValueError(f"rescale_orientation must be one of: {choices}")
