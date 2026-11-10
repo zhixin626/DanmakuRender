@@ -631,11 +631,26 @@ def rgba_to_yuv(image: Image.Image) -> tuple[np.ndarray, np.ndarray, np.ndarray,
 
 
 
-def build_atlas(plan_path, output, platform="bilibili", emoticon_dir=None):
+def detect_platform(source_path):
+    """从 ASS 头(Title 里的直播URL)判断平台,用于选 emoji_pack 子目录"""
+    try:
+        head = open(source_path, encoding="utf-8").read(2000)
+        if '"platform":"bilibili"' in head or '"platform": "bilibili"' in head: return "bilibili"
+        if '"platform":"douyin"' in head or '"platform": "douyin"' in head: return "douyin"
+        if '"platform":"douyu"' in head or '"platform": "douyu"' in head: return "douyu"
+        if '"platform":"huya"' in head or '"platform": "huya"' in head: return "huya"
+        if "bilibili.com" in head: return "bilibili"
+        if "douyin.com" in head: return "douyin"
+        if "douyu.com" in head: return "douyu"
+        if "huya.com" in head: return "huya"
+    except Exception:
+        pass
+    return ""
+
+
+def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=None):
     """Build cached GPU planes from a RenderPlan in the task directory."""
-    plan_path, output = pathlib.Path(plan_path), pathlib.Path(output)
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    output.mkdir(parents=True, exist_ok=True)
+    plan = plan_path if isinstance(plan_path, dict) else json.loads(pathlib.Path(plan_path).read_text(encoding="utf-8"))
     emoticon_dir = emoticon_dir or pathlib.Path("emoji_pack") / platform / "emoticon"
     emoticon_store = EmoticonStore(str(emoticon_dir))
     emoji_name = resolve_emoji_font(None)
@@ -643,6 +658,8 @@ def build_atlas(plan_path, output, platform="bilibili", emoticon_dir=None):
     atlas: list[list[int]] = [[], [], [], []]
     metadata = []
     for event in plan.get("events", []):
+        if stop_check:
+            stop_check()
         visual = event.get("visual") or {}
         materialize_emoticons(visual, emoticon_store)
         bounds = event.get("bounds") or {}
@@ -703,16 +720,7 @@ def build_atlas(plan_path, output, platform="bilibili", emoticon_dir=None):
             "path": path,
             "motion": visual.get("motion") or {},
         })
-    np.savez_compressed(
-        output / "sprites.npz",
-        y=np.asarray(atlas[0], dtype=np.uint8),
-        u=np.asarray(atlas[1], dtype=np.uint8),
-        v=np.asarray(atlas[2], dtype=np.uint8),
-        a=np.asarray(atlas[3], dtype=np.uint8),
-    )
     emoticon_store.save()
-    (output / "events.json").write_text(
-        json.dumps({"duration": plan.get("duration"), "events": metadata}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return {"events": len(metadata), "atlas_bytes": len(atlas[0])}
+    return {"duration": plan["duration"], "events": metadata,
+            **{key: np.asarray(values, dtype=np.uint8) for key, values in zip(("y", "u", "v", "a"), atlas)},
+            "atlas_bytes": sum(len(values) for values in atlas)}

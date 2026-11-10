@@ -8,7 +8,7 @@ import time
 import psutil
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-PYTHON = ROOT / "perf" / "venv" / "Scripts" / "python.exe"
+PYTHON = ROOT / "venv" / "Scripts" / "python.exe"
 CASE = ROOT / "perf" / "tmp" / "telemetry_20m" / "telemetry_20m"
 VIDEO = CASE / "少年不太冷_11月9日14点20分_clip.flv"
 PLAN = CASE / "render_plan.json"
@@ -80,6 +80,6 @@ def run(label: str, command: list[str]) -> dict[str, object]:
 
 results = [
     run("E_20m", [str(PYTHON), str(ROOT / "DMR" / "Render" / "emoji_render_mt.py"), str(VIDEO), str(PLAN), str(OUT / "E_20m.mp4"), "--vencoder", "hevc_nvenc", "--aencoder", "aac", "--vb", "4M", "--ab", "128K", "--venc-args", '["-b:v","4M"]', "--aenc-args", '["-b:a","128K"]', "--emoji-pack", str(ROOT / "emoji_pack" / "douyu"), "--emoticon-dir", str(ROOT / "emoji_pack" / "douyu" / "emoticon"), "--canvas-resolution", "1920x1080", "--render-plan"]),
-    run("G_20m", [str(PYTHON), str(ROOT / "perf" / "run_gpu_render.py"), "--video", str(VIDEO), "--output", str(OUT / "G_20m.mp4"), "--vencoder", "hevc_nvenc", "--bitrate", "4000000", "--rc", "vbr", "--maxbitrate", "6000000", "--vbvbufsize", "8000000", "--preset", "P4", "--fps", "60", "--max-frames", "72000", "--sprites", "91", "--render-plan", str(PLAN), "--sprite-data", str(ATLAS)]),
+    run("G_20m", [str(PYTHON), str(ROOT / "perf" / "run_gpu_render.py"), "--video", str(VIDEO), "--output", str(OUT / "G_20m.mp4"), "--vencoder", "hevc_nvenc", "--bitrate", "4000000", "--rc", "vbr", "--maxbitrate", "6000000", "--vbvbufsize", "8000000", "--preset", "P4", "--fps", "60", "--max-frames", "72000", "--render-plan", str(PLAN)]),
 ]
 (OUT / "telemetry.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")

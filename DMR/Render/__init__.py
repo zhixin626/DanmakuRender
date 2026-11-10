@@ -338,7 +338,7 @@ class Render():
                 except Exception as e:
                     status, info = False, e
                     self.logger.exception(e)
-                if status or self.stoped:
+                if status or self.stoped or (mode == 'gpu_render' and target_render.stop_event.is_set()):
                     break
                 if attempt < retry:
                     self.logger.warning(f'{verb}失败，重试 {attempt + 1}/{retry}: {video.path}')
@@ -347,7 +347,7 @@ class Render():
 
             if status:
                 self._gather(task, 'info', desc=info)
-            elif mode == 'gpu_render':
+            elif mode == 'gpu_render' and not self.stoped and not getattr(target_render, 'stop_event').is_set():
                 self.logger.warning('GPU 渲染失败，回退到 emoji_dmrender: %s', info)
                 from .emoji_dmrender import EmojiDmRender
                 fallback = EmojiDmRender(**target_args)

@@ -13,7 +13,7 @@
 
 ## 3. 遇到的问题和解决办法
 
-第一次运行旧 E 时发现抽取过程中误删了 check_tool、audio_codec、fmt 和 QDEPTH 等非精灵辅助函数；已全部恢复并通过重跑。GPU 模块不再在 DMR/导入时写死 perf/tmp/venv312，测试环境由 perf/run_gpu_render.py 配置。
+第一次运行旧 E 时发现抽取过程中误删了 check_tool、audio_codec、fmt 和 QDEPTH 等非精灵辅助函数；已全部恢复并通过重跑。GPU 模块不再在 DMR/导入时写死 venv，测试环境由 perf/run_gpu_render.py 配置。
 
 ## 4. 意见和想法
 

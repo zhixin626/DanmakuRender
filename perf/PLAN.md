@@ -78,7 +78,7 @@
 - **不要重写已有的函数**：动手前先在 `DMR/` 中搜索有没有现成实现，例如 `emoji_render_mt.py` 的 `get_sprite`、`resolve_output_fps`、`EmoticonStore`、`resolve_font`/`resolve_emoji_font`，`resolution.py` 的 `resolve_render_canvas`，`plan_ass.py` 的 RenderPlan 解析等。需要复用时，把它们抽到公共模块里共同调用，而不是复制一份。
 - **不要写死参数**：帧率、编码器、码率、分辨率都要从源视频或渲染配置中取得，和现有渲染器保持一致。
 - **删掉死代码**：已经确认不再使用的路径（例如已知有 bug 的 `SimpleDecoder` 路径）要删除，不要留着"备用"。
-- **生产代码不依赖 perf 环境**：`DMR/` 下的模块不能写死 `perf/tmp/venv` 之类的路径；测试专用的环境配置放在 `perf/` 的脚本里。
+- **生产代码不依赖 perf 环境**：`DMR/` 下的模块不能写死 `venv` 之类的路径；测试专用的环境配置放在 `perf/` 的脚本里。
 - 每次提交后，Claude 会审查代码结构并在 PR 里提出意见，**下一个步骤开始前先处理这些意见**。
 
 ## 隔离：绝对不能影响用户正在运行的 DMR

@@ -16,7 +16,7 @@ import psutil
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TMP = ROOT / "perf" / "tmp"
-VENV_PYTHON = ROOT / "perf" / "venv" / "Scripts" / "python.exe"
+VENV_PYTHON = ROOT / "venv" / "Scripts" / "python.exe"
 if not VENV_PYTHON.exists():
     VENV_PYTHON = pathlib.Path(sys.executable)
 NULL = "NUL" if os.name == "nt" else "/dev/null"

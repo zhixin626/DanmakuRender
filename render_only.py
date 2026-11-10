@@ -1,7 +1,7 @@
 """渲染专用脚本（离线批量）：对文件夹里的视频和同名 JSONL/ASS 渲染或转码。
 
 引擎选择与主管线一致（见 liveevents._check_for_render）：
-  - render_args.overlay.engine 选择 dmrender / emoji_dmrender；
+  - render_args.overlay.engine 选择 dmrender / emoji_dmrender / gpu_render；
   - JSONL 由 LayoutCompiler 依次生成每段 RenderPlan，并维护跨段 track；
   - 同名 ASS 仍作为旧文件兼容输入；
   - --emoji / --no-emoji 可强制覆盖配置。
@@ -95,6 +95,10 @@ def main():
     parser.add_argument('--config', default='configs/global.yml')
     parser.add_argument('--input_dir', type=str)
     parser.add_argument('--output_dir', type=str)
+    parser.add_argument('--task', help='单文件模式读取的任务名，禁用任务也可离线渲染')
+    parser.add_argument('--video')
+    parser.add_argument('--danmaku')
+    parser.add_argument('--output')
     parser.add_argument('--transcode', action='store_true', help='转码模式（不烧弹幕）')
     emoji_group = parser.add_mutually_exclusive_group()
     emoji_group.add_argument('--emoji', action='store_true', help='强制使用彩色 emoji 渲染引擎')
@@ -111,51 +115,53 @@ def main():
     config = Config(args.config)
     mode = 'transcode' if args.transcode else 'danmaku_render'
 
-    input_dir = args.input_dir or config.global_config.get('downloader_args', {}).get('output_dir', '直播回放')
-    inp = input(f'请输入视频文件夹路径 (回车使用默认路径 {input_dir}): \n')
-    if inp:
-        input_dir = inp
-
-    # 按输入文件夹自动匹配任务配置(任务的 emoji 开关/渲染参数随之生效)
-    render_args, source = resolve_render_args(config, input_dir, mode)
-    assert render_args, '请在 global.yml 中配置 render_args 的渲染参数'
-
-    # 引擎选择与主管线使用同一配置结构。
-    if mode == 'transcode':
-        use_emoji = False
-    elif args.emoji:
-        use_emoji = True
-    elif args.no_emoji:
-        use_emoji = False
+    single = any((args.task, args.video, args.danmaku, args.output))
+    if single:
+        if not all((args.task, args.video, args.danmaku, args.output)):
+            parser.error('单文件模式需要 --task --video --danmaku --output')
+        if not exists(args.video) or not exists(args.danmaku):
+            parser.error('视频或弹幕文件不存在')
+        if exists(args.output):
+            parser.error('输出已存在，请另选文件名')
+        render_args = config.get_render_args(args.task, 'transcode' if args.transcode else 'overlay')
+        source = f'任务「{args.task}」(default → global → task)'
+        selected = [{'video': args.video, 'danmaku': args.danmaku, 'output': args.output}]
     else:
-        use_emoji = render_args.get('engine', 'dmrender') == 'emoji_dmrender'
+        input_dir = args.input_dir or config.global_config.get('downloader_args', {}).get('output_dir', '直播回放')
+        inp = input(f'请输入视频文件夹路径 (回车使用默认路径 {input_dir}): \n')
+        input_dir = inp or input_dir
+        render_args, source = resolve_render_args(config, input_dir, mode)
+        videos = sorted(f for f in glob(join(input_dir, '*')) if isvideo(f))
+        tasks, ignores = build_tasks(videos, mode, render_args, args.output_dir)
+        for filename, message in ignores:
+            print(f'忽略 {filename}: {message}')
+        for index, item in enumerate(tasks):
+            print(f'[{index}] {item["video"]} -> {item["output"]}')
+        inp = input('输入视频编号（空格分隔），或回车渲染全部：\n')
+        indices = [int(value) for value in inp.split()] if inp else range(len(tasks))
+        selected = [tasks[index] for index in indices]
 
-    engine_name = 'transcode' if mode == 'transcode' else ('emoji_dmrender' if use_emoji else 'dmrender')
+    if mode == 'transcode':
+        engine_name = 'transcode'
+    elif args.emoji:
+        engine_name = 'emoji_dmrender'
+    elif args.no_emoji:
+        engine_name = 'dmrender'
+    else:
+        engine_name = render_args.get('engine', 'dmrender')
+    if engine_name not in ('transcode', 'dmrender', 'emoji_dmrender', 'gpu_render'):
+        parser.error(f'不支持的引擎: {engine_name}')
     print(f'渲染参数来源: {source} → 渲染引擎: {engine_name}')
-    print(f'即将对文件夹 {input_dir} 下的视频进行渲染')
-
-    videos = sorted(f for f in glob(join(input_dir, '*')) if isvideo(f))
-    tasks, ignores = build_tasks(videos, mode, render_args, args.output_dir)
-
-    print('以下视频将被忽略：')
-    for i, (vname, msg) in enumerate(ignores):
-        print(f'[{i}] {vname}: {msg}')
-    print('\n以下视频将被渲染：')
-    for i, item in enumerate(tasks):
-        print(f"[{i}] {item['video']} -> {item['output']}")
-    print('\n如果视频被错误分类，请清理文件夹后重试')
-    print('如果想选择特定的视频，请输入视频编号，例如：0 2 5')
-    inp = input('或者直接回车开始全部渲染：\n')
-    task_idx = [int(x) for x in inp.split()] if inp else range(len(tasks))
 
     if mode == 'transcode':
         from DMR.Render.transcode import Transcoder as TargetRender
-    elif use_emoji:
+    elif engine_name == 'gpu_render':
+        from DMR.Render.gpu_render import GpuRender as TargetRender
+    elif engine_name == 'emoji_dmrender':
         from DMR.Render.emoji_dmrender import EmojiDmRender as TargetRender
     else:
         from DMR.Render.dmrender import DmRender as TargetRender
 
-    selected = [tasks[i] for i in task_idx]
     total = len(selected)
     n_ok = n_fail = 0
     layout_state = None
@@ -221,6 +227,9 @@ def main():
                 progress_cb=on_progress,
                 **render_kwargs,
             )
+        except KeyboardInterrupt:
+            target_render.stop()
+            status, info = False, "用户停止"
         except Exception as e:
             status, info = False, e
         finally:
@@ -236,12 +245,8 @@ def main():
             print(f'{label} 失败: {info}')
 
     print(f'\n全部结束：成功 {n_ok} 个，失败 {n_fail} 个。')
+    return 1 if n_fail else 0
 
 
 if __name__ == '__main__':
-    try:
-        main()
-        input('渲染完成.')
-    except Exception as e:
-        logging.exception(e)
-        input(f'渲染错误, {e}')
+    sys.exit(main())

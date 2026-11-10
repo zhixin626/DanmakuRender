@@ -17,21 +17,7 @@ from DMR.utils import *
 _MT_SCRIPT = abspath(join(dirname(__file__), "emoji_render_mt.py"))
 
 
-def _detect_platform(source_path):
-    """从 ASS 头(Title 里的直播URL)判断平台,用于选 emoji_pack 子目录"""
-    try:
-        head = open(source_path, encoding="utf-8").read(2000)
-        if '"platform":"bilibili"' in head or '"platform": "bilibili"' in head: return "bilibili"
-        if '"platform":"douyin"' in head or '"platform": "douyin"' in head: return "douyin"
-        if '"platform":"douyu"' in head or '"platform": "douyu"' in head: return "douyu"
-        if '"platform":"huya"' in head or '"platform": "huya"' in head: return "huya"
-        if "bilibili.com" in head: return "bilibili"
-        if "douyin.com" in head: return "douyin"
-        if "douyu.com" in head: return "douyu"
-        if "huya.com" in head: return "huya"
-    except Exception:
-        pass
-    return ""
+from .sprites import detect_platform
 
 
 class EmojiDmRender(BaseRender):
@@ -130,7 +116,7 @@ class EmojiDmRender(BaseRender):
         ab = self._arg_value(self.aencoder_args, "-b:a", "160K")
 
         # 表情包路径:配置填了就直接用;没填则默认 ./emoji_pack/<平台>(与下载/输出的 ./ 相对路径风格统一)
-        platform = _detect_platform(getattr(video, "dm_file_id", None) or input_path)
+        platform = detect_platform(getattr(video, "dm_file_id", None) or input_path)
         if self.emoji_pack:
             pack = self.emoji_pack
         else:

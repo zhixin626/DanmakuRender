@@ -49,7 +49,7 @@
 
 所有渲染前均经过 dmr_gate.py 放行；最后一轮 gate 在23:13显示正在录制、无渲染、距分段约110分钟。仅在隔离 worktree 修改代码/默认配置，未修改正式运行配置，未结束 DMR 的任何进程。调用正式 GpuRender 接口自动生成并清理任务图集，三条渲染均返回成功，未执行 E 回退。
 
-命令：`perf/venv/Scripts/python.exe -m pytest tests -q`；`perf/venv/Scripts/python.exe perf/verify_all.py`；py_compile/compileall；git diff --check。
+命令：`venv/Scripts/python.exe -m pytest tests -q`；`venv/Scripts/python.exe perf/verify_all.py`；py_compile/compileall；git diff --check。
 
 ## 6. 待用户验收
 

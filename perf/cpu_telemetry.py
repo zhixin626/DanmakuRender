@@ -14,7 +14,7 @@ import psutil
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-PYTHON = ROOT / "perf" / "venv" / "Scripts" / "python.exe"
+PYTHON = ROOT / "venv" / "Scripts" / "python.exe"
 OUT = ROOT / "perf" / "tmp" / "cpu_telemetry"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -142,7 +142,7 @@ def main() -> None:
     final_frames = 428635
     commands = [
         ("E_final_2h", [str(PYTHON), str(ROOT / "DMR" / "Render" / "emoji_render_mt.py"), str(final_video), str(plan), str(e_out), "--vencoder", "hevc_nvenc", "--aencoder", "aac", "--vb", "4M", "--ab", "128K", "--venc-args", '["-b:v","4M"]', "--aenc-args", '["-b:a","128K"]', "--emoji-pack", str(ROOT / "emoji_pack" / "douyu"), "--emoticon-dir", str(ROOT / "emoji_pack" / "douyu" / "emoticon"), "--canvas-resolution", "1920x1080", "--render-plan"], final_frames, e_out),
-        ("G_final_2h", [str(PYTHON), str(ROOT / "perf" / "run_gpu_render.py"), "--video", str(final_video), "--output", str(g_out), "--vencoder", "hevc_nvenc", "--bitrate", "4000000", "--rc", "vbr", "--maxbitrate", "6000000", "--vbvbufsize", "8000000", "--preset", "P4", "--fps", "60", "--max-frames", str(final_frames), "--sprites", "91", "--render-plan", str(plan), "--sprite-data", str(atlas)], final_frames, g_out),
+        ("G_final_2h", [str(PYTHON), str(ROOT / "perf" / "run_gpu_render.py"), "--video", str(final_video), "--output", str(g_out), "--vencoder", "hevc_nvenc", "--bitrate", "4000000", "--rc", "vbr", "--maxbitrate", "6000000", "--vbvbufsize", "8000000", "--preset", "P4", "--fps", "60", "--max-frames", str(final_frames), "--render-plan", str(plan)], final_frames, g_out),
     ]
     results = [run(*command) for command in commands]
     short_video = ROOT / "演示视频" / "00_素材与旧版" / "bilibili_峰哥_7月30日20点23分_中段" / "7月30日20点23分_中段.flv"
@@ -151,7 +151,7 @@ def main() -> None:
     for index in range(3):
         for label, command, frames, output in (
             (f"E_short_{index + 1}", [str(PYTHON), str(ROOT / "DMR" / "Render" / "emoji_render_mt.py"), str(short_video), str(short_plan), str(OUT / f"E_short_{index + 1}.mp4"), "--vencoder", "hevc_nvenc", "--aencoder", "aac", "--vb", "4M", "--ab", "128K", "--venc-args", '["-b:v","4M"]', "--aenc-args", '["-b:a","128K"]', "--emoji-pack", str(ROOT / "emoji_pack" / "bilibili"), "--emoticon-dir", str(ROOT / "emoji_pack" / "bilibili" / "emoticon"), "--canvas-resolution", "1080x1920", "--render-plan"], 4500, OUT / f"E_short_{index + 1}.mp4"),
-            (f"G_short_{index + 1}", [str(PYTHON), str(ROOT / "perf" / "run_gpu_render.py"), "--video", str(short_video), "--output", str(OUT / f"G_short_{index + 1}.mp4"), "--vencoder", "hevc_nvenc", "--bitrate", "4000000", "--rc", "vbr", "--maxbitrate", "6000000", "--vbvbufsize", "8000000", "--preset", "P4", "--fps", "25", "--max-frames", "4500", "--sprites", "91", "--render-plan", str(short_plan), "--sprite-data", str(short_atlas)], 4500, OUT / f"G_short_{index + 1}.mp4"),
+            (f"G_short_{index + 1}", [str(PYTHON), str(ROOT / "perf" / "run_gpu_render.py"), "--video", str(short_video), "--output", str(OUT / f"G_short_{index + 1}.mp4"), "--vencoder", "hevc_nvenc", "--bitrate", "4000000", "--rc", "vbr", "--maxbitrate", "6000000", "--vbvbufsize", "8000000", "--preset", "P4", "--fps", "25", "--max-frames", "4500", "--render-plan", str(short_plan)], 4500, OUT / f"G_short_{index + 1}.mp4"),
         ):
             results.append(run(label, command, frames, output))
     (OUT / "telemetry.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")

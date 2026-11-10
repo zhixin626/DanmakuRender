@@ -6,11 +6,14 @@ import argparse
 import json
 import logging
 import math
+import os
+import sysconfig
 import pathlib
 import subprocess
-import shutil
 import tempfile
 import time
+import threading
+from DMR.utils.ffprobe import FFprobe
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -31,25 +34,8 @@ except ImportError:  # standalone perf launcher
 
 
 logger = logging.getLogger(__name__)
+_dll_handles = []
 
-
-PRESSURE_KERNEL = r"""
-extern "C" __global__
-void blend_pressure(unsigned char* y, int width, int height, int sprites) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int yy = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || yy >= height) return;
-    int value = y[yy * width + x];
-    for (int sprite = 0; sprite < sprites; ++sprite) {
-        int x0 = (sprite * 37) % max(1, width - 300);
-        int y0 = (sprite * 17) % max(1, height - 60);
-        if (x >= x0 && x < x0 + 300 && yy >= y0 && yy < y0 + 60) {
-            value = min(255, value + 1);
-        }
-    }
-    y[yy * width + x] = (unsigned char)value;
-}
-"""
 
 PLAN_KERNEL = r"""
 extern "C" __global__
@@ -120,10 +106,8 @@ class RenderConfig:
     fps: float | None
     minimum_fps: float | None
     max_frames: int | None
-    pressure_sprites: int
     gpu_id: int
-    render_plan: pathlib.Path | None
-    sprite_data: pathlib.Path | None
+    atlas: dict[str, Any]
 
 
 class CaiView:
@@ -137,26 +121,19 @@ class CaiView:
 
 
 def load_cuda_modules() -> tuple[Any, Any]:
-    """Load CUDA modules lazily so importing DMR does not require perf paths."""
+    """Load optional CUDA wheels from the active interpreter, never perf/."""
+    if os.name == "nt" and not _dll_handles:
+        packages = pathlib.Path(sysconfig.get_paths()["purelib"])
+        cuda = packages / "nvidia" / "cuda_nvrtc"
+        if cuda.exists():
+            os.environ.setdefault("CUDA_PATH", str(cuda))
+        for directory in (packages / "PyNvVideoCodec", cuda / "bin", packages / "nvidia" / "cuda_runtime" / "bin"):
+            if directory.exists():
+                _dll_handles.append(os.add_dll_directory(str(directory)))
     import cupy
     import PyNvVideoCodec
 
     return cupy, PyNvVideoCodec
-
-
-def probe_timeline(video: pathlib.Path) -> tuple[float, float]:
-    """Read source duration and the common audio/video timeline origin."""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration,start_time",
-            "-of", "json", str(video),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    info = json.loads(result.stdout)["format"]
-    return float(info["duration"]), float(info.get("start_time", 0))
 
 
 def codec_name(video_encoder: str) -> str:
@@ -285,18 +262,19 @@ def frame_geometry(decoded: Any) -> tuple[int, int]:
     return int(cai["shape"][1]), int(cai["shape"][0])
 
 
-def load_plan_assets(cupy: Any, directory: pathlib.Path) -> dict[str, Any]:
-    """Load the CPU-built sprite atlas and event paths once per render."""
-    arrays = cupy.load(str(directory / "sprites.npz"))
-    raw_events = json.loads((directory / "events.json").read_text(encoding="utf-8"))["events"]
-    events = [RenderEvent.from_mapping(item) for item in raw_events]
-    return {
-        "events": events,
-        "y": cupy.asarray(arrays["y"]),
-        "u": cupy.asarray(arrays["u"]),
-        "v": cupy.asarray(arrays["v"]),
-        "a": cupy.asarray(arrays["a"]),
-    }
+def upload_atlas(cupy, atlas):
+    """Upload the in-memory atlas once; no intermediate serialization."""
+    return {"events": [RenderEvent.from_mapping(item) for item in atlas["events"]],
+            **{key: cupy.asarray(atlas[key]) for key in ("y", "u", "v", "a")}}
+
+
+class RenderStopped(RuntimeError):
+    """Explicit cancellation, which must not trigger the CPU fallback."""
+
+
+def check_stop(stop_event):
+    if stop_event is not None and stop_event.is_set():
+        raise RenderStopped("GPU render stopped by user")
 
 
 def event_position(event: RenderEvent, timestamp: float) -> tuple[int, int] | None:
@@ -425,45 +403,24 @@ class NV12Buffer:
 
 
 class SpriteCompositor:
-    """Own the GPU kernel and apply pressure or RenderPlan sprites."""
+    """Own the GPU kernel and composite RenderPlan sprites."""
 
     def __init__(
         self,
         cupy: Any,
         width: int,
         height: int,
-        pressure_sprites: int,
-        plan_assets: dict[str, Any] | None = None,
+        plan_assets: dict[str, Any],
     ):
         self.cupy = cupy
         self.width = width
         self.height = height
-        self.pressure_sprites = pressure_sprites
         self.plan_assets = plan_assets
-        self.event_scanner = EventScanner(plan_assets["events"]) if plan_assets else None
-        source = PLAN_KERNEL if plan_assets else PRESSURE_KERNEL
-        name = "blend_plan" if plan_assets else "blend_pressure"
-        self.kernel = cupy.RawKernel(source, name)
+        self.event_scanner = EventScanner(plan_assets["events"])
+        self.kernel = cupy.RawKernel(PLAN_KERNEL, "blend_plan")
 
-    def apply(self, frame: NV12Buffer, timestamp: float) -> int:
-        """Apply visible sprites and return the active event count."""
-        if self.plan_assets:
-            return self._apply_plan(frame, timestamp)
-        self._apply_pressure(frame)
-        return self.pressure_sprites
-
-    def _apply_pressure(self, frame: NV12Buffer) -> None:
-        """Apply the old prototype workload used by earlier measurements."""
-        self.kernel(
-            ((self.width + 31) // 32, (self.height + 7) // 8),
-            (32, 8),
-            (
-                frame.buffer[: self.height].reshape(-1),
-                self.cupy.int32(self.width),
-                self.cupy.int32(self.height),
-                self.cupy.int32(self.pressure_sprites),
-            ),
-        )
+    def apply(self, frame, timestamp):
+        return self._apply_plan(frame, timestamp)
 
     def _apply_plan(self, frame: NV12Buffer, timestamp: float) -> int:
         """Upload active event metadata and blend the shared YUV atlas."""
@@ -500,12 +457,6 @@ class SpriteCompositor:
         return len(active)
 
 
-def frame_signature(cupy: Any, frame: NV12Buffer) -> int:
-    """Return a cheap luma checksum used only for diagnostic output."""
-    sample = frame.y[frame.height // 4 : frame.height // 4 + 64, :64]
-    return int(cupy.sum(sample).get())
-
-
 def create_encoder(nvc, width, height, frame_rate, video_encoder, configured_options):
     """Use the native fps name and pass only explicitly configured options."""
     options = {"codec": codec_name(video_encoder), "fps": str(frame_rate), **configured_options}
@@ -524,14 +475,17 @@ def encode_to_file(
     config: RenderConfig,
     source_frame_rate: float | None = None,
     start_offset: float = 0.0,
+    progress_cb=None,
+    expected_frames: int | None = None,
+    stop_event=None,
 ) -> dict[str, Any]:
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
     encoder = create_encoder(nvc, width, height, frame_rate, config.video_encoder, config.encoder_options)
     buffer = NV12Buffer(cupy, width, height)
-    plan_assets = load_plan_assets(cupy, config.sprite_data) if config.sprite_data else None
-    compositor = SpriteCompositor(cupy, width, height, config.pressure_sprites, plan_assets)
-    signatures: list[int] = []
+    plan_assets = upload_atlas(cupy, config.atlas)
+    event_count = len(plan_assets['events'])
+    compositor = SpriteCompositor(cupy, width, height, plan_assets)
     active_counts: list[int] = []
     first_pts = first[1]
     source_frames = 1
@@ -546,36 +500,38 @@ def encode_to_file(
 
     frame_count = 0
     started = time.perf_counter()
-    with bitstream.open("wb") as stream:
-        for decoded, frame_time in schedule_frames(
-            tracked_frames(),
-            first,
-            frame_rate,
-            max_frames=config.max_frames,
-            source_fps=source_frame_rate,
-            start_offset=start_offset,
-        ):
-            buffer.load_into_canvas(decoded)
-            if frame_count < 200 and frame_count % 10 == 0:
-                signatures.append(frame_signature(cupy, buffer))
-            active_counts.append(compositor.apply(buffer, frame_time))
-            cupy.cuda.Stream.null.synchronize()
-            cupy.cuda.runtime.deviceSynchronize()
-            for packet in encoder.Encode(buffer):
+    last_progress = started
+    try:
+        with bitstream.open("wb") as stream:
+            for decoded, frame_time in schedule_frames(
+                tracked_frames(),
+                first,
+                frame_rate,
+                max_frames=config.max_frames,
+                source_fps=source_frame_rate,
+                start_offset=start_offset,
+            ):
+                check_stop(stop_event)
+                buffer.load_into_canvas(decoded)
+                active_counts.append(compositor.apply(buffer, frame_time))
+                cupy.cuda.Stream.null.synchronize()
+                for packet in encoder.Encode(buffer):
+                    stream.write(packet["data"])
+                frame_count += 1
+                now = time.perf_counter()
+                if progress_cb and now - last_progress >= 0.5:
+                    progress_cb(min(99.0, frame_count * 100.0 / max(1, expected_frames or frame_count)))
+                    last_progress = now
+            for packet in encoder.EndEncode():
                 stream.write(packet["data"])
-            cupy.cuda.Stream.null.synchronize()
-            cupy.cuda.runtime.deviceSynchronize()
-            frame_count += 1
-        for packet in encoder.EndEncode():
-            stream.write(packet["data"])
+    finally:
+        del compositor, plan_assets, buffer, encoder
     elapsed = time.perf_counter() - started
     return {
         "frames": frame_count,
         "wall_s": elapsed,
         "fps": frame_count / elapsed if elapsed else 0.0,
-        "decoded_signatures": signatures,
-        "decoded_frames_change": len(set(signatures)) > 1,
-        "plan_events": len(plan_assets["events"]) if plan_assets else 0,
+        "plan_events": event_count,
         "active_events_avg": sum(active_counts) / len(active_counts) if active_counts else 0.0,
         "active_events_peak": max(active_counts) if active_counts else 0,
         "first_pts_seconds": first_pts,
@@ -586,7 +542,7 @@ def encode_to_file(
 
 
 def mux_audio(bitstream: pathlib.Path, source: pathlib.Path, output: pathlib.Path, frame_rate: float, trim_duration: float | None = None,
-              audio_encoder: str = "copy", audio_args: list[str] | None = None, video_duration: float | None = None) -> None:
+              audio_encoder: str = "copy", audio_args: list[str] | None = None, video_duration: float | None = None, stop_event=None) -> None:
     """Mux encoded video with the source audio without truncating either stream."""
     command = [
         "ffmpeg",
@@ -622,109 +578,118 @@ def mux_audio(bitstream: pathlib.Path, source: pathlib.Path, output: pathlib.Pat
         if trim_duration is None and video_duration is not None:
             filters += f",apad=whole_dur={video_duration}"
         command[-1:-1] = ["-af", filters]
-    subprocess.run(command, check=True, capture_output=True, text=True)
+    if stop_event is None:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    else:
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=errors)
+            try:
+                while process.poll() is None:
+                    check_stop(stop_event)
+                    time.sleep(0.1)
+                if process.returncode:
+                    errors.seek(0)
+                    raise RuntimeError(errors.read().decode("utf-8", errors="replace"))
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait()
 
 
-def render_one(video: Any, output: str, progress_cb: Any = None, **kwargs: Any) -> dict[str, Any]:
-    """Render one video using the same argument shape as EmojiDmRender.render_one."""
-    del progress_cb
+
+def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwargs):
+    """Render atomically; cancellation leaves no incomplete output."""
+    check_stop(stop_event)
     source = pathlib.Path(getattr(video, "path", video))
     destination = pathlib.Path(output)
-    config = RenderConfig(
-        video_encoder=str(kwargs.get("vencoder", "hevc_nvenc")),
-        encoder_options=parse_encoder_args(kwargs.get("vencoder_args") or []),
-        fps=kwargs.get("fps"),
-        minimum_fps=kwargs.get("min_fps"),
-        max_frames=kwargs.get("max_frames"),
-        pressure_sprites=int(kwargs.get("sprites", 91)),
-        gpu_id=int(kwargs.get("gpu_id", 0)),
-        render_plan=pathlib.Path(kwargs["render_plan"]) if kwargs.get("render_plan") else None,
-        sprite_data=pathlib.Path(kwargs["sprite_data"]) if kwargs.get("sprite_data") else None,
-    )
-    if bool(config.render_plan) != bool(config.sprite_data):
-        raise ValueError("render_plan and sprite_data must be supplied together")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if progress_cb:
+        progress_cb(0.0)
+    from DMR.Render.sprites import detect_platform
+    render_plan = kwargs.get("render_plan")
+    atlas = kwargs.get("atlas")
+    if atlas is None:
+        if not render_plan:
+            raise ValueError("gpu_render requires a RenderPlan")
+        platform = kwargs.get("platform") or detect_platform(getattr(video, "dm_file_id", None) or render_plan)
+        pack = pathlib.Path(kwargs["emoji_pack"]) if kwargs.get("emoji_pack") else pathlib.Path("emoji_pack") / platform
+        atlas = build_atlas(render_plan, platform=platform, emoticon_dir=pack / "emoticon",
+                            stop_check=lambda: check_stop(stop_event))
+    check_stop(stop_event)
+    config = RenderConfig(video_encoder=str(kwargs.get("vencoder", "hevc_nvenc")),
+                          encoder_options=parse_encoder_args(kwargs.get("vencoder_args") or []),
+                          fps=kwargs.get("fps"), minimum_fps=kwargs.get("min_fps"),
+                          max_frames=kwargs.get("max_frames"), gpu_id=int(kwargs.get("gpu_id", 0)), atlas=atlas)
     cupy, nvc = load_cuda_modules()
     cupy.cuda.Device(config.gpu_id).use()
-    frame_rate = config.fps or resolve_output_fps(source_frame_rate(str(source)), config.minimum_fps)
-    decoded = decode_frames(source, nvc, config.gpu_id)
-    first = next(decoded)
     source_fps = source_frame_rate(str(source))
-    source_duration, source_start = probe_timeline(source)
-    width, height = kwargs.get("canvas_resolution") or resolve_render_canvas(
-        getattr(video, "resolution", None) or frame_geometry(first[0]),
-        rescale_to_1080p=bool(kwargs.get("rescale_to_1080p", False)),
-        rescale_orientation=kwargs.get("rescale_orientation", "auto"),
-    )
-    codec = codec_name(config.video_encoder)
-    if codec not in ("hevc", "h264"):
-        raise ValueError(f"unsupported GPU video codec: {codec}")
-    bitstream = destination.with_suffix("." + codec)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    result = encode_to_file(
-        decoded,
-        first,
-        cupy,
-        nvc,
-        bitstream,
-        (width, height),
-        frame_rate,
-        config,
-        source_frame_rate=source_fps,
-        start_offset=max(0.0, first[1] - source_start),
-    )
-    video_duration = result["frames"] / frame_rate
-    truncated = config.max_frames is not None and video_duration < source_duration - 1 / frame_rate
-    mux_audio(bitstream, source, destination, frame_rate, video_duration if truncated else None,
-              kwargs.get("aencoder", "copy"), kwargs.get("aencoder_args"), video_duration)
-    result["intentional_trim"] = truncated
-    if not truncated:
-        validate_av_duration(destination)
-    result.update({"video": str(source), "output": str(destination), "width": width, "height": height, "frame_rate": frame_rate})
-    return result
+    frame_rate = config.fps or resolve_output_fps(source_fps, config.minimum_fps)
+    timing = FFprobe.run_ffprobe(str(source))["format"]
+    source_duration, source_start = float(timing["duration"]), float(timing.get("start_time", 0))
+    expected = int(round(source_duration * frame_rate))
+    if config.max_frames is not None:
+        expected = min(expected, config.max_frames)
+    decoded = decode_frames(source, nvc, config.gpu_id)
+    first = None
+    try:
+        first = next(decoded)
+        width, height = kwargs.get("canvas_resolution") or resolve_render_canvas(
+            getattr(video, "resolution", None) or frame_geometry(first[0]),
+            rescale_to_1080p=bool(kwargs.get("rescale_to_1080p", False)),
+            rescale_orientation=kwargs.get("rescale_orientation", "auto"))
+        codec = codec_name(config.video_encoder)
+        if codec not in ("hevc", "h264"):
+            raise ValueError(f"unsupported GPU video codec: {codec}")
+        with tempfile.TemporaryDirectory(prefix="dmr_render_", dir=destination.parent) as work:
+            bitstream = pathlib.Path(work) / ("video." + codec)
+            partial = pathlib.Path(work) / destination.name
+            result = encode_to_file(decoded, first, cupy, nvc, bitstream, (width, height), frame_rate, config,
+                                    source_frame_rate=source_fps, start_offset=max(0.0, first[1] - source_start),
+                                    progress_cb=progress_cb, expected_frames=expected, stop_event=stop_event)
+            check_stop(stop_event)
+            video_duration = result["frames"] / frame_rate
+            truncated = config.max_frames is not None and video_duration < source_duration - 1 / frame_rate
+            mux_audio(bitstream, source, partial, frame_rate, video_duration if truncated else None,
+                      kwargs.get("aencoder", "copy"), kwargs.get("aencoder_args"), video_duration, stop_event)
+            if not truncated:
+                validate_av_duration(partial)
+            check_stop(stop_event)
+            partial.replace(destination)
+        result.update(video=str(source), output=str(destination), width=width, height=height,
+                      frame_rate=frame_rate, intentional_trim=truncated, atlas_bytes=atlas["atlas_bytes"])
+        if progress_cb:
+            progress_cb(100.0)
+        return result
+    finally:
+        decoded.close()
+        first = None
+        config = None
+        atlas = None
+        # Only free unused pool blocks; allocations of other GPU tasks survive.
+        cupy.get_default_memory_pool().free_all_blocks()
 
 
 class GpuRender(BaseRender):
-    """Build a task atlas and render, reporting GPU failures to the fallback caller."""
-
-    def __init__(self, **kwargs: Any) -> None:
+    """DMR GPU engine with cooperative progress and cancellation."""
+    def __init__(self, **kwargs):
         self.options = dict(kwargs)
+        self.stop_event = threading.Event()
         self.logger = logging.getLogger(__name__)
 
-    def render_one(self, video, output: str, progress_cb=None, **kwargs: Any):
-        """Render with GPU or return a descriptive failure for the caller to fall back."""
-        atlas_directory = None
+    def render_one(self, video, output, progress_cb=None, **kwargs):
         try:
-            kwargs = {**self.options, **kwargs}
+            return True, render_one(video, output, progress_cb=progress_cb,
+                                    stop_event=self.stop_event, **{**self.options, **kwargs})
+        except RenderStopped as error:
+            error.__traceback__ = None
+            return False, error
+        except Exception as error:
+            self.logger.warning("GPU render failed: %s", error)
+            error.__traceback__ = None
+            return False, error
 
-            sprite_data = kwargs.get("sprite_data")
-            render_plan = kwargs.get("render_plan")
-            if render_plan and not sprite_data:
-                pathlib.Path(output).parent.mkdir(parents=True, exist_ok=True)
-                atlas_directory = pathlib.Path(tempfile.mkdtemp(prefix="dmr_atlas_", dir=str(pathlib.Path(output).parent)))
-                from DMR.Render.emoji_dmrender import _detect_platform
-                platform = kwargs.get("platform") or _detect_platform(getattr(video, "dm_file_id", None) or render_plan)
-                pack = pathlib.Path(kwargs["emoji_pack"]) if kwargs.get("emoji_pack") else pathlib.Path("emoji_pack") / platform
-                build_atlas(render_plan, atlas_directory, platform=platform, emoticon_dir=pack / "emoticon")
-                sprite_data = atlas_directory
-                kwargs["sprite_data"] = sprite_data
-            if not sprite_data:
-                raise RuntimeError("gpu_render requires render_plan or prepared sprite_data")
-            return True, render_one(
-                video,
-                output,
-                progress_cb=progress_cb,
-                **kwargs,
-            )
-        except Exception as exc:
-            self.logger.warning("GPU 渲染不可用，将回退到 emoji_dmrender: %s", exc)
-            return False, exc
-        finally:
-            if atlas_directory:
-                shutil.rmtree(atlas_directory)
-
-    def stop(self) -> None:
-        """GPU renders are subprocess-free at this adapter boundary."""
-
+    def stop(self):
+        self.stop_event.set()
 
 
 def main() -> None:
@@ -745,10 +710,8 @@ def main() -> None:
     parser.add_argument("--fps", type=float)
     parser.add_argument("--min-fps", type=float)
     parser.add_argument("--max-frames", type=int)
-    parser.add_argument("--sprites", type=int, default=91)
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--render-plan", type=pathlib.Path)
-    parser.add_argument("--sprite-data", type=pathlib.Path)
     args = parser.parse_args()
     result = render_one(
         args.video,
@@ -762,10 +725,8 @@ def main() -> None:
         fps=args.fps,
         min_fps=args.min_fps,
         max_frames=args.max_frames,
-        sprites=args.sprites,
         gpu_id=args.gpu_id,
         render_plan=args.render_plan,
-        sprite_data=args.sprite_data,
     )
     print(json.dumps(result, ensure_ascii=False))
 

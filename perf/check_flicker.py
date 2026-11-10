@@ -27,13 +27,12 @@ def frame_stream(path: Path, fps: float, frames: int):
         for _ in range(frames):
             data = process.stdout.read(size)
             if len(data) != size:
-                if last is None:
-                    break
-                yield last.copy()
-                continue
+                break
             last = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3).astype(np.float32)
             yield last
     finally:
+        if process.poll() is None:
+            process.terminate()
         process.stdout.close()
         process.wait()
 
