@@ -292,6 +292,16 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - **时间安排**：E 预计要跑 20 到 40 分钟，用 `dmr_gate.py --need-minutes 90` 确认在分段结束前能跑完；必要时 E 和 G 分在不同的空闲时段跑。
 - **输出**：`perf/results/final_2h.md`（对比表 + 每 10 分钟一张 G 的截图）。演示视频：`0X_最终验收_2小时_左旧版右GPU版_精选.mp4`，从 2 小时中剪出约 3 分钟的精选片段（拼接 SC 密集、礼物密集、VIP、横竖屏等时刻），`说明.txt` 里写明每一段来自原片的第几分钟。
 
+## 阶段 1d：验收遗留问题（Claude 审查昨晚结果后追加，按顺序做，每项 ≤ 2 小时）
+
+1. **码率失控（最优先）**：2 小时测试中，G 的文件 10.12GB（约 11.3Mbps），E 是 5.71GB（约 6.4Mbps），而配置都是 `-b:v 4M`。GPU 版的 `CreateEncoder` 没有生效的码率控制。请对照 PyNvVideoCodec 文档，显式设置码率控制模式（例如 `rc=vbr`、`bitrate`、`maxbitrate`、`bufsize` 等实际参数名），让 G 的实际码率和 E 相近（±10%）。用 5 分钟的 full_coverage 素材验证，ffprobe 报告两者的码率。
+2. **修正画质对比方法（Claude 修正自己定的标准）**：E 和 G 是两次独立的有损编码，直接比较两者的 PSNR，天然就只有 35 到 40dB，"≥ 45dB" 是 Claude 定错了。改为：**分别计算 E 对源视频、G 对源视频的 PSNR**（只在无弹幕区域，同一时间戳，源视频解码后按同样方式缩放），要求 G ≥ E − 0.5dB；另外比较无弹幕区域 Y、U、V 三个分量的平均值，差值应 < 1，用来发现色彩矩阵（BT.601/709）或色彩范围（limited/full）不一致的问题。必须在码率统一（第 1 项）之后再测。
+3. **补采 CPU 和 GPU 数据（总目标是降噪，这是最关键的数据）**：从 2 小时素材中截取一段 20 分钟、弹幕最密集的片段，按阶段 0b 的方式分别测 E 和 G：平均和峰值核数、核·秒、GPU/NVENC/NVDEC 占用。
+4. **生产路径自动构建图集**：现在 DMR 中选择 `gpu_render` 时，因为没有 `sprite_data`，**每次都会回退到 E**，也就是 GPU 版还没有真正在生产中运行。请把图集构建（`prepare_gpu_plan.py` 中的逻辑）移到 `DMR/Render/`（例如 `gpu_atlas.py`），由 `gpu_dmrender.py` 在渲染前自动从 RenderPlan 生成，缓存放在任务的临时目录中、渲染完成后清理。完成后用 full_coverage 素材，以**模拟 DMR 调用的方式**（直接调用 `Render` 插件的接口，不启动 `main.py`）验证确实走 GPU 而没有回退。
+5. **GPU 版处理分辨率中途变化**：在 GPU 上实现等比缩放加黑边到画布（CuPy kernel，或者 PyNvVideoCodec/NPP 自带的缩放），解码器遇到尺寸变化时要能继续。跑通 `problem_resolution` 后，问题素材不再需要回退到 E。
+
+完成后更新 `验收总结.md`，并输出演示视频（码率统一后的画质对比、problem_resolution 的 GPU 输出）。
+
 ## 阶段 2：C++ / libav + CUDA（只有阶段 1 达不到验收标准时才做）
 
 触发条件（满足任意一条）：Python 版 CPU 无法达标；读文件或解码在问题素材上无法稳定处理；性能波动大。届时由 Claude 根据阶段 1 暴露的问题另写详细计划。思路是用 libavformat/libavcodec（NVDEC/NVENC）加 CUDA 混合 kernel 写成单个进程，Python 只负责传入 RenderPlan 和精灵。
@@ -348,6 +358,7 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 - [x] 阶段 1b-1：真实 RenderPlan GPU 渲染与 CPU/GPU 验证 → perf/results/phase1b.md
 - [ ] 阶段 1b：Python GPU 功能补全，画质与问题素材验证 → `perf/results/phase1b.md`
 - [ ] 阶段 1c：两小时真实录播最终验收
+- [ ] 阶段 1d：码率、画质对比方法、CPU 数据、生产图集、GPU 分辨率切换
 - [ ] 阶段 2：C++/libav + CUDA（按需）
 - [ ] 阶段 3：横竖屏切换的画布策略（最后做）
 - [ ] 阶段 4：连续送礼合并显示（最后做）
