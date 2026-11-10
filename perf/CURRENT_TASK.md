@@ -3,7 +3,38 @@
 > 分工：**Claude 负责架构和设计，Codex 负责实现细节，用户提需求**。验收标准不再是"和旧版一模一样"，而是"符合配置、效果正确、用户看过满意"。旧版 E 只用来对照内容（弹幕有没有丢、时间对不对）。
 > 每完成一步：逐项对照清单汇报（完成 / 未完成 / 阻塞），用 `gh pr comment --body-file` 发到 PR #1，然后停下等审查。
 
-## 本轮：结构整合 + 四个修复（一起做，因为都改同两个文件）
+## 本轮（用户确认，2026-11-10 晚）
+
+上一轮（结构整合 + 四个修复，cfd93c5）已审查通过。本轮清单：
+
+1. **接入 DMR 的两个功能**：
+   - **渲染进度**：`render_one` 不再丢弃 `progress_cb`，按"已编码帧数 / 预计总帧数"定期回调百分比（和 `emoji_dmrender` 一样，WebUI 的渲染进度条要会动）；
+   - **中途停止**：`GpuRender.stop()` 设置停止标志，编码循环每帧检查，收到后尽快退出，释放编码器、解码器和显存，并删除未完成的输出文件。写单元测试模拟停止。
+2. **清理**：
+   - 删除 `gpu_render.py` 中的压力测试 kernel（`PRESSURE_KERNEL`、`_apply_pressure`、`pressure_sprites`）和诊断用的 `frame_signature`（如果测试需要，放到 `perf/`）；
+   - `probe_timeline` 改用（必要时扩展）`DMR/utils/ffprobe.py` 中已有的函数，不要再自己调用 ffprobe；
+   - "识别直播平台"的函数（目前从 `emoji_dmrender._detect_platform` 借用）移到公共位置（例如 `sprites.py` 或 `utils`），新旧两版共用；
+   - 编码前只保留**一次**同步（`Stream.null.synchronize()` 或 `deviceSynchronize()` 二选一），删除编码后的同步；用逐帧闪烁检查确认没有回归，并记录速度变化。
+3. **弹幕图集直接在内存中传递**：`build_atlas()` 返回数组，`GpuRender` 直接使用，不再写入临时目录再读回。顺带评估"相同内容的精灵去重"能省多少显存（只汇报数据，暂不实现）。
+4. **`render_only.py` 支持 GPU**（复用现有脚本，不另写新脚本）：
+   - `render_args.overlay.engine: gpu_render` 时使用 GPU 引擎；
+   - 新增单文件模式：`python render_only.py --task <任务名> --video <flv> --danmaku <jsonl> --output <mp4>`，读取 `configs/` 中该任务三层合并后的配置；
+   - 只依赖 `DMR/` 和 `configs/`，**不依赖 `perf/`** 中的任何文件；用 B 站素材实际跑一遍，截图确认。
+5. **venv 移动**：`perf\venv\` 移到 `D:\DanmakuRender-perf\venv\`（加入 `.gitignore`），同步更新所有脚本、`run_gpu_render.py` 和文档中的路径；`requirements.txt` 也移到仓库根目录或合并进现有的依赖文件。
+6. **检查迁移到 `tests/`**：`verify_all.py` 中可以长期使用的检查（不依赖 perf 素材的部分）迁移为 `tests/` 中的测试；`perf/` 暂时保留，最后合并进 DMR 时不带进去。
+7. **清理 `perf/`**：删除 `prepare_gpu_plan.py`（功能已在 `sprites.py`）；`results\` 中只保留各阶段的 md 报告和**最近一轮**的截图，其余旧截图删除；清空 `perf\tmp\`。删除前把清单和大小写进汇报。
+8. **为主播「月亮3」写任务配置**（用户要求）：
+   - 参照 `configs/` 和 `perf/configs_snapshot/` 中现有的任务配置格式（例如 `DMR-峰哥.yml`），写 `configs/DMR-月亮3.yml`；
+   - 平台和直播间地址：先在 `Tasks文件\`、配置快照、录播文件名或 JSONL 头部中查找「月亮3」的信息；**找不到就不要猜**，把 URL 留空并在汇报中向用户询问；
+   - 渲染引擎设为 `gpu_render`，其余参数沿用全局配置，只写需要覆盖的项，并加上简短注释；
+   - **只写在 worktree 中**，不要复制到正在运行的 `D:\DanmakuRender\configs\`；文件中设置 `enable: false`，由用户确认后自己启用。
+
+完成后逐项汇报，演示视频（render_only 单文件模式的输出）放进新文件夹，然后停下。
+
+---
+
+## 上一轮（已完成）：结构整合 + 四个修复
+（一起做，因为都改同两个文件）
 
 ### A. 结构整合：DMR 里最终只新增 2 个文件
 
