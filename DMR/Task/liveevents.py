@@ -13,7 +13,7 @@ from ..utils import *
 from ..utils.utils import format_duration
 from ..utils.gifts_utils import generate_gift_statistics
 from ..utils.session_record import read_last_complete_session
-from DMR.Render.resolution import decide_session_parts
+from ..Render.resolution import decide_session_parts
 
 logger = logging.getLogger(__name__)
 
@@ -445,6 +445,12 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         try:
             decision = decide_session_parts(
                 spans,
+                ignore_head_seconds=float(
+                    overlay.get("resolution_ignore_head_seconds", 30)
+                ),
+                min_span_seconds=float(
+                    overlay.get("resolution_min_span_seconds", 60)
+                ),
                 minority_ratio=float(overlay.get("resolution_minority_ratio", 0.15)),
                 minority_minutes=float(overlay.get("resolution_minority_minutes", 10)),
                 forced_orientation=overlay.get("rescale_orientation", "auto"),

@@ -60,13 +60,19 @@ def choose_dominant_orientation(spans) -> str:
 def decide_session_parts(
     spans,
     *,
+    ignore_head_seconds: float = 30.0,
+    min_span_seconds: float = 60.0,
     minority_ratio: float = 0.15,
     minority_minutes: float = 10.0,
     forced_orientation: str = "auto",
 ) -> dict:
     """Choose one normalized video or consecutive orientation parts."""
     policy = normalize_rescale_orientation(forced_orientation)
-    stable = normalize_resolution_spans(spans, ignore_head_seconds=0, min_span_seconds=0)
+    stable = normalize_resolution_spans(
+        spans,
+        ignore_head_seconds=ignore_head_seconds,
+        min_span_seconds=min_span_seconds,
+    )
     if not stable:
         raise ValueError("resolution timeline has no spans")
     dominant = policy if policy in {"portrait", "landscape"} else choose_dominant_orientation(stable)

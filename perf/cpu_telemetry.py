@@ -14,7 +14,7 @@ import psutil
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PYTHON = ROOT / "venv" / "Scripts" / "python.exe"
-OUT = ROOT / "perf" / "tmp" / "cpu_telemetry"
+OUT = ROOT / "perf" / "tmp" / "cpu_telemetry_v2"
 OUT.mkdir(parents=True, exist_ok=True)
 
 
@@ -63,11 +63,22 @@ def gpu_dmon() -> dict[str, float]:
             cols = line.split()
             if len(cols) >= 10 and cols[0].isdigit():
                 # dmon -s pucvmet: gpu pwr temp sm mem enc dec mclk pclk
-                return {
+                result = {
                     "gpu": float(cols[4]),
                     "encoder": float(cols[6]),
                     "decoder": float(cols[7]),
                 }
+                try:
+                    result["memory_mb"] = float(
+                        subprocess.check_output(
+                            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                            text=True,
+                            stderr=subprocess.DEVNULL,
+                        ).strip().splitlines()[0]
+                    )
+                except (OSError, ValueError, IndexError, subprocess.CalledProcessError):
+                    result["memory_mb"] = 0.0
+                return result
     except Exception:
         pass
     try:
@@ -88,9 +99,10 @@ def gpu_dmon() -> dict[str, float]:
             "gpu": float(values[0]),
             "encoder": float(values[1]),
             "decoder": float(values[2]),
+            "memory_mb": 0.0,
         }
     except Exception:
-        return {"gpu": 0.0, "encoder": 0.0, "decoder": 0.0}
+        return {"gpu": 0.0, "encoder": 0.0, "decoder": 0.0, "memory_mb": 0.0}
 
 
 def run(
@@ -158,6 +170,15 @@ def run(
             key: max(item[key] for item in gpu_samples)
             for key in ("gpu", "encoder", "decoder")
         },
+        "gpu_memory_mb": {
+            "samples": [item["memory_mb"] for item in gpu_samples],
+            "min": min((item["memory_mb"] for item in gpu_samples), default=0.0),
+            "max": max((item["memory_mb"] for item in gpu_samples), default=0.0),
+            "growth": (
+                max((item["memory_mb"] for item in gpu_samples), default=0.0)
+                - min((item["memory_mb"] for item in gpu_samples), default=0.0)
+            ),
+        },
         "samples": len(samples),
         "worker_output_tail": output_log,
     }
@@ -193,10 +214,10 @@ def main() -> None:
         / "原始"
         / "少年不太冷_11月9日14点20分.flv"
     )
-    plan = ROOT / "perf" / "tmp" / "final_2h_plan" / "render_plan.json"
+    plan = ROOT / "perf" / "tmp" / "final_2h_plan_v2" / "render_plan.json"
     atlas = ROOT / "perf" / "tmp" / "final_2h_atlas"
-    e_out = OUT / "E_final_2h.mp4"
-    g_out = OUT / "G_final_2h.mp4"
+    e_out = OUT / "E_final_2h_v2.mp4"
+    g_out = OUT / "G_final_2h_v2.mp4"
     final_frames = 428635
     commands = [
         (

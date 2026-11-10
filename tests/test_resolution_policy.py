@@ -38,3 +38,17 @@ def test_forced_orientation_preserves_exception_policy():
     )
     assert result["dominant"] == "portrait"
     assert result["canvas"] == (1080, 1920)
+
+
+def test_short_switch_in_session_timeline_is_filtered():
+    result = decide_session_parts(
+        [
+            ResolutionSpan(0, 100, 1920, 1080),
+            ResolutionSpan(100, 120, 1080, 1920),
+            ResolutionSpan(120, 220, 1920, 1080),
+        ],
+        ignore_head_seconds=0,
+        min_span_seconds=30,
+    )
+    assert result["action"] == "single"
+    assert result["minority_seconds"] == 0

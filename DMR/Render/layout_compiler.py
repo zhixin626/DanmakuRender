@@ -260,8 +260,8 @@ def _quantity_suffix(value, unit="") -> str:
     return f" ×{count}{unit or ''}"
 
 
-def merge_gift_records(records, *, mode="live", window_seconds=10.0):
-    """Merge adjacent gifts by user/name, preferring platform combo identity."""
+def merge_gift_records(records, *, mode="total", window_seconds=10.0):
+    """Merge gifts by user/name, preferring platform combo identity."""
     ordered = sorted(
         records,
         key=lambda item: (
@@ -271,10 +271,16 @@ def merge_gift_records(records, *, mode="live", window_seconds=10.0):
     )
     result = []
     groups = {}
+    seen_tids = set()
     for record in ordered:
         if record.get("type") != "gift":
             result.append(record)
             continue
+        tid = record.get("tid")
+        if tid not in (None, ""):
+            if tid in seen_tids:
+                continue
+            seen_tids.add(tid)
         uid = record.get("uid") or record.get("uname") or ""
         name = record.get("gift_name") or ""
         combo_id = record.get("combo_id")
@@ -292,10 +298,7 @@ def merge_gift_records(records, *, mode="live", window_seconds=10.0):
             result.append(merged)
             continue
         count = _positive_count(record.get("gift_count"))
-        if combo_id:
-            merged["gift_count"] = max(merged["gift_count"], count)
-        else:
-            merged["gift_count"] += count
+        merged["gift_count"] += count
         merged["gift_states"].append(dict(record))
         merged["_last_time"] = when
         merged["price_cny"] = float(merged.get("price_cny") or 0) + float(
@@ -591,7 +594,7 @@ class LayoutCompiler:
         gift_cfg = event_configs.get("gift") or {}
         ordered_records = merge_gift_records(
             ordered_records,
-            mode=str(gift_cfg.get("combo_mode", "live") or "live"),
+            mode=str(gift_cfg.get("combo_mode", "total") or "total"),
             window_seconds=float(gift_cfg.get("combo_window_seconds", 10) or 10),
         )
 
