@@ -9,7 +9,7 @@
 
 ## 总表
 
-| 测试 | 墙钟 s | 平均/峰值核数 | 核·秒 | ffmpeg 平均核数 | other/Python 平均核数 | GPU 平均/峰值 % | NVENC 平均 % | NVDEC 平均 % | 视频大小 | 视频码率 | 帧数 / 时长 |
+| 测试 | 墙钟 s | 总平均/峰值核数 | **总核·秒** | ffmpeg active-sample（解释用） | other/Python active-sample（解释用） | GPU 平均/峰值 % | NVENC 平均 % | NVDEC 平均 % | 视频大小 | 视频码率 | 帧数 / 时长 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | E 2 小时 | 971.0 | 3.450 / 5.477 | 3349.7 | 2.383 | 1.071 | 21.14 / 未采集峰值 | 43.57 | 45.48 | 3,907,700,234 B | 4,232,853 bit/s | 428636 / 7143.933s |
 | G 2 小时 | 860.5 | 0.941 / 1.534 | 809.9 | 1.217 | 0.925 | 6.48 / 未采集峰值 | 48.16 | 50.38 | 7,630,257,453 B | 8,231,891 bit/s | 428635 / 7143.900s |
@@ -36,13 +36,13 @@
 
 ## B 口径修正
 
-G 的 ffmpeg 不是渲染主循环，而是 `gpu_render.py:mux_with_audio` 在 GPU 编码完成后把 HEVC elementary stream 与源音频做 `-c:v copy -c:a copy` 封装。原始遥测中的“ffmpeg 平均 1.217 核”只在该进程存在的采样点上计算，因此不能和整个 G 运行的 0.941 核直接比较。
+G 的 ffmpeg 不是渲染主循环，而是 `gpu_render.py:mux_with_audio` 在 GPU 编码完成后把 HEVC elementary stream 与源音频做 `-c:v copy -c:a copy` 封装。原始遥测中的“ffmpeg 平均 1.217 核”只在该进程存在的采样点上计算，因此不能和整个 G 运行的 0.941 核直接比较；表格跨进程比较统一看总核·秒，active-sample 平均值只作口径说明。
 
 单独对同体量 G 输出做 copy 封装复测：ffmpeg 运行 8.00s，平均 1.257 核，峰值 1.312 核，约 10.06 核·秒。后续总表以核·秒为跨进程比较口径；初次长片运行没有保存 ffmpeg 活跃时长，记为“未采集”，不把 active-sample 平均值冒充全程平均。
 
 ## A 长片码率排查与修复
 
-- `CreateEncoder` 日志现在打印 codec、配置码率、实际传入的 bitrate/maxbitrate/vbvbufsize、rc、preset、framerate 和分辨率。60fps 长片日志显示配置 4,000,000/6,000,000/8,000,000，但直接传入时输出约 8.23Mbps。
+- `CreateEncoder` 日志现在打印 codec、bitrate/maxbitrate/vbvbufsize、rc、preset、fps 和分辨率。旧 60fps 长片日志显示配置 4,000,000/6,000,000/8,000,000，但直接传入时输出约 8.23Mbps。
 - `G_final_2h.mp4` 按分钟统计的视频码率曲线从第 0 分钟到第 119 分钟大多在 8.0–8.9Mbps，属于全程偏高，不是局部突增；曲线明细保存在 `perf/tmp/cpu_telemetry/G_final_2h_bitrate_curve.txt`。
-- 根因是当前 NVENC 驱动的 rate-control 目标随输出帧率放大：25fps 短片约 3.48Mbps，60fps 长片约 8.23Mbps，比例接近 60/25。修复为显式的 `reference_fps` 配置归一化：目标值仍来自配置，只有当输出帧率高于参考帧率时按 `reference_fps/output_fps` 转换传给该驱动；默认参考帧率 25 写入 `default.yml`，没有素材/驱动校准倍数。
-- 用同一 2 小时素材前 10 分钟复测：`G_final_10min_retest2.mp4`，60fps、36000 帧、599.983s，实际视频码率 3,596,879 bit/s，低于 4M 配置的 110% 上限 4.4M，A 阶段复测通过。
+- 根因是代码传入了不存在的 `framerate` 关键字，PyNvVideoCodec 静默采用默认 30fps；这解释了 60fps 约 8.23Mbps、25fps 约 3.4Mbps 的比例。修复为显式传入正确的 `fps=str(frame_rate)`，删除 `reference_fps` 和所有归一化。
+- 修复后的同一素材复测（bitrate=4,000,000、maxbitrate=6,000,000、vbvbufsize=8,000,000）：25fps 输出 4,134,688 bit/s（103.4%），60fps 输出 4,024,653 bit/s（100.6%），两者均在 ±10% 内；ffprobe 分别报告 25/60fps、4500 帧。

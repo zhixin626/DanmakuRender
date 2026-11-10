@@ -339,8 +339,6 @@ render_args:
       rc: vbr
       maxbitrate: 6000000
       vbvbufsize: 8000000
-      # 当前 NVENC 驱动按帧率放大目标码率；高于该参考帧率时按比例归一化。
-      reference_fps: 25
     # 音频无需叠加弹幕，可选择 aac 重新编码或 copy 直接复制
     aencoder: aac
     # 例如 [-b:a, 160K]；aencoder 为 copy 时应写 []

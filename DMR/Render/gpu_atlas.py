@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 SPRITES_PATH = ROOT / "DMR" / "Render" / "sprites.py"
@@ -53,41 +53,38 @@ def materialize_emoticons(visual: dict[str, Any], store: Any) -> None:
 def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image:
     """Render panel nodes with configured fills, borders and text outlines."""
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
     panel_mask = Image.new("L", (width, height), 0)
     panel_outline = 0
     panel_outline_color = (0, 0, 0)
     panel_outline_alpha = 0
-    for node in sorted(visual.get("nodes", []), key=lambda item: item.get("layer", 0)):
-        if node.get("type") == "rect":
-            x = int(node.get("x", 0))
-            y = int(node.get("y", 0))
-            w = int(node.get("width", width))
-            h = int(node.get("height", height))
-            alpha = int(255 * float(node.get("opacity", 1.0)))
-            fill = parse_color(node.get("color", "#FFFFFF")) + (alpha,)
-            outline = parse_color(node.get("outline_color", "#000000"))
-            outline_alpha = int(255 * float(node.get("outline_opacity", 1.0)))
-            radius = min(int(node.get("radius", 0)), w // 2, h // 2)
-            shape = node.get("shape")
+    for node in sorted(visual["nodes"], key=lambda item: item["layer"]):
+        if node["type"] == "rect":
+            x, y = int(node["x"]), int(node["y"])
+            w, h = int(node["width"]), int(node["height"])
+            alpha = int(255 * float(node["opacity"]))
+            fill = parse_color(node["color"]) + (alpha,)
+            outline = parse_color(node["outline_color"])
+            outline_alpha = int(255 * float(node["outline_opacity"]))
+            radius = min(int(node["radius"]), w // 2, h // 2)
+            shape = node["shape"]
             mask = Image.new("L", (w, h), 0)
             mask_draw = ImageDraw.Draw(mask)
-            mask_draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
-            if shape == "round_top":
-                mask_draw.rectangle((0, radius, w, h), fill=255)
-            elif shape == "round_bottom":
-                mask_draw.rectangle((0, 0, w, h - radius), fill=255)
+            corners = {
+                "round_top": (True, True, False, False),
+                "round_bottom": (False, False, True, True),
+            }.get(shape, (True, True, True, True))
+            mask_draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255, corners=corners)
             layer = Image.new("RGBA", (w, h), fill)
             image.paste(layer, (x, y), mask)
             panel_mask.paste(mask, (x, y), mask)
-            panel_outline = max(panel_outline, int(node.get("outline", 0)))
+            panel_outline = max(panel_outline, int(node["outline"]))
             panel_outline_color = outline
             panel_outline_alpha = max(panel_outline_alpha, outline_alpha)
-        if node.get("type") == "text":
+        if node["type"] == "text":
             family = str(node["font"])
             font_path = resolve_font(family, True)
             size = float(node["size"])
-            text = str(node.get("text", ""))
+            text = str(node["text"])
             images = {
                 token.strip("[]").lower(): asset["path"]
                 for token, asset in (node.get("images") or {}).items()
@@ -99,9 +96,9 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
                 images,
                 size,
             )
-            opacity = max(0.0, min(1.0, float(node.get("opacity", 1.0))))
-            x = int(node.get("x", 0))
-            y = int(node.get("y", 0))
+            opacity = max(0.0, min(1.0, float(node["opacity"])))
+            x = int(node["x"])
+            y = int(node["y"])
             line_height = int(node["size"])
             lines = text.splitlines() or [""]
             for line_index, line in enumerate(lines):
@@ -109,13 +106,13 @@ def panel_sprite(visual: dict[str, Any], width: int, height: int) -> Image.Image
                     line,
                     parse_color(node.get("color", "#FFFFFF")),
                     event_pack=images or None,
-                    outline=node.get("outline", 0),
-                    outline_rgb=parse_color(node.get("outline_color", "#000000")),
+                    outline=node["outline"],
+                    outline_rgb=parse_color(node["outline_color"]),
                 )
                 if opacity < 1.0:
                     alpha = sprite.getchannel("A").point(lambda value: int(value * opacity))
                     sprite.putalpha(alpha)
-                line_x = x - sprite.width if node.get("anchor") == "top_right" else x
+                line_x = x - sprite.width if node["anchor"] == "top_right" else x
                 image.alpha_composite(sprite, (line_x, y + line_index * line_height))
     if panel_outline > 0:
         inner = panel_mask.filter(ImageFilter.MinFilter(panel_outline * 2 + 1))
@@ -176,7 +173,9 @@ def main() -> None:
         else:
             rgb = parse_color(style["color"])
             family = str(style["font"])
-            bold = bool(style["bold"])
+            # Existing RenderPlan line styles omit ``bold``; absence means the
+            # regular face, while all required visual fields remain strict.
+            bold = bool(style.get("bold", False))
             size = float(style["size"])
             font_name = resolve_font(family, bold)
             factory_key = (font_name, emoji_name, size)

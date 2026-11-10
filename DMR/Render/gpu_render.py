@@ -12,6 +12,11 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterator
 
+try:
+    from .plan_types import RenderEvent
+except ImportError:  # standalone perf launcher
+    from plan_types import RenderEvent
+
 
 logger = logging.getLogger(__name__)
 
@@ -209,15 +214,6 @@ def parse_bitrate(value: Any) -> int:
     return int(float(text) * multiplier)
 
 
-def normalize_nvenc_rate_control(value: Any, frame_rate: float, reference_fps: Any) -> int:
-    """Normalize NVENC's frame-rate-dependent rate-control behavior."""
-    target = parse_bitrate(value)
-    reference = float(reference_fps)
-    if reference <= 0 or frame_rate <= reference:
-        return target
-    return max(1, int(round(target * reference / frame_rate)))
-
-
 def decode_frames(video: pathlib.Path, nvc: Any, gpu_id: int) -> Iterator[tuple[Any, float]]:
     """Decode packets and convert PTS to seconds using the stream time base."""
     demuxer = nvc.CreateDemuxer(filename=str(video))
@@ -261,6 +257,46 @@ def cfr_frames(
     return (first_frame, first_pts), generate()
 
 
+def scheduled_frames(
+    decoded: Iterator[tuple[Any, float]],
+    first: tuple[Any, float],
+    output_fps: float,
+    target_duration: float | None = None,
+    max_frames: int | None = None,
+) -> Iterator[tuple[Any, float]]:
+    """Yield one decoded frame and its CFR presentation time.
+
+    The decoder is consumed once.  A source frame remains current until the
+    next source PTS, which handles direct output, VFR input, integer-rate
+    duplication and the final frame without separate encoding branches.
+    """
+    if output_fps <= 0:
+        raise ValueError("output_fps must be positive")
+    first_frame, first_pts = first
+    current = first_frame
+    current_relative = 0.0
+    pending = next(decoded, None)
+    frame_index = 0
+    while True:
+        presentation = frame_index / output_fps
+        while pending is not None:
+            pending_relative = max(0.0, float(pending[1]) - first_pts)
+            if pending_relative > presentation + 1e-9:
+                break
+            current = pending[0]
+            current_relative = pending_relative
+            pending = next(decoded, None)
+        if pending is None and presentation > current_relative + (0.5 / output_fps):
+            if target_duration is None or presentation >= target_duration - 1e-9:
+                break
+        yield current, presentation
+        frame_index += 1
+        if max_frames is not None and frame_index >= max_frames:
+            return
+        if target_duration is not None and presentation + (1.0 / output_fps) >= target_duration - 1e-9 and pending is None:
+            return
+
+
 def frame_geometry(decoded: Any) -> tuple[int, int]:
     """Return decoded width and height from the NV12 Y-plane metadata."""
     cai = decoded.cuda()[0].__cuda_array_interface__
@@ -270,7 +306,8 @@ def frame_geometry(decoded: Any) -> tuple[int, int]:
 def load_plan_assets(cupy: Any, directory: pathlib.Path) -> dict[str, Any]:
     """Load the CPU-built sprite atlas and event paths once per render."""
     arrays = cupy.load(str(directory / "sprites.npz"))
-    events = json.loads((directory / "events.json").read_text(encoding="utf-8"))["events"]
+    raw_events = json.loads((directory / "events.json").read_text(encoding="utf-8"))["events"]
+    events = [RenderEvent.from_mapping(item) for item in raw_events]
     return {
         "events": events,
         "y": cupy.asarray(arrays["y"]),
@@ -280,9 +317,9 @@ def load_plan_assets(cupy: Any, directory: pathlib.Path) -> dict[str, Any]:
     }
 
 
-def event_position(event: dict[str, Any], timestamp: float) -> tuple[int, int] | None:
+def event_position(event: RenderEvent, timestamp: float) -> tuple[int, int] | None:
     """Interpolate one RenderPlan path at a presentation timestamp."""
-    path = event.get("path") or []
+    path = event.path
     if not path:
         return None
     if timestamp <= path[0][0]:
@@ -300,9 +337,9 @@ def event_position(event: dict[str, Any], timestamp: float) -> tuple[int, int] |
 class EventScanner:
     """Maintain active events with a start-time scanline."""
 
-    def __init__(self, events: list[dict[str, Any]]):
+    def __init__(self, events: list[RenderEvent]):
         self.events = events
-        self.start_order = sorted(range(len(events)), key=lambda index: (events[index]["start"], index))
+        self.start_order = sorted(range(len(events)), key=lambda index: (events[index].start, index))
         self.next_start = 0
         self.active: set[int] = set()
         self.last_timestamp = float("-inf")
@@ -314,26 +351,26 @@ class EventScanner:
         self.last_timestamp = timestamp
         while self.next_start < len(self.start_order):
             index = self.start_order[self.next_start]
-            if float(self.events[index]["start"]) > timestamp:
+            if self.events[index].start > timestamp:
                 break
             self.active.add(index)
             self.next_start += 1
         self.active = {
-            index for index in self.active if float(self.events[index]["end"]) >= timestamp
+            index for index in self.active if self.events[index].end >= timestamp
         }
         visible = []
         for index in sorted(self.active):
             event = self.events[index]
             position = event_position(event, timestamp)
             if position is not None:
-                motion = event.get("motion") or {}
+                motion = event.motion
                 enter = max(0.0, float(motion.get("enter_duration", 0.0)))
                 exit_duration = max(0.0, float(motion.get("exit_duration", 0.0)))
                 alpha = 1.0
-                if enter and timestamp < float(event["start"]) + enter:
-                    alpha = max(0.0, min(1.0, (timestamp - float(event["start"])) / enter))
-                elif exit_duration and timestamp > float(event["end"]) - exit_duration:
-                    alpha = max(0.0, min(1.0, (float(event["end"]) - timestamp) / exit_duration))
+                if enter and timestamp < event.start + enter:
+                    alpha = max(0.0, min(1.0, (timestamp - event.start) / enter))
+                elif exit_duration and timestamp > event.end - exit_duration:
+                    alpha = max(0.0, min(1.0, (event.end - timestamp) / exit_duration))
                 visible.append((event, position[0], position[1], int(round(alpha * 255))))
         return visible
 
@@ -357,6 +394,50 @@ class NV12Buffer:
             strides = tuple(int(value) for value in cai["strides"])
             view = self.cupy.asarray(CaiView(source, shape, strides), copy=False)
             target[...] = view.reshape(target.shape)
+
+    def load_scaled(self, decoded: Any) -> None:
+        """Copy a decoded NV12 frame, scaling and letterboxing on the GPU."""
+        planes = decoded.cuda()
+        y_source = planes[0]
+        y_cai = y_source.__cuda_array_interface__
+        y_shape = tuple(int(value) for value in y_cai["shape"])
+        y_strides = tuple(int(value) for value in y_cai["strides"])
+        source_height, source_width = y_shape[:2]
+        source_y = self.cupy.asarray(CaiView(y_source, y_shape, y_strides), copy=False).reshape(source_height, source_width)
+        if source_width == self.width and source_height == self.height:
+            self.y[..., 0] = source_y
+            uv_source = planes[1]
+            uv_cai = uv_source.__cuda_array_interface__
+            uv_shape = tuple(int(value) for value in uv_cai["shape"])
+            uv_strides = tuple(int(value) for value in uv_cai["strides"])
+            self.uv[...] = self.cupy.asarray(CaiView(uv_source, uv_shape, uv_strides), copy=False).reshape(self.uv.shape)
+            return
+        scale = min(self.width / source_width, self.height / source_height)
+        scaled_width = max(2, int(source_width * scale) // 2 * 2)
+        scaled_height = max(2, int(source_height * scale) // 2 * 2)
+        offset_x = (self.width - scaled_width) // 2
+        offset_y = (self.height - scaled_height) // 2
+        self.y[..., 0] = 16
+        x_indices = self.cupy.minimum(
+            (self.cupy.arange(scaled_width) / scale).astype(self.cupy.int32), source_width - 1
+        )
+        y_indices = self.cupy.minimum(
+            (self.cupy.arange(scaled_height) / scale).astype(self.cupy.int32), source_height - 1
+        )
+        self.y[offset_y:offset_y + scaled_height, offset_x:offset_x + scaled_width, 0] = source_y[y_indices[:, None], x_indices[None, :]]
+        uv_source = planes[1]
+        uv_cai = uv_source.__cuda_array_interface__
+        uv_shape = tuple(int(value) for value in uv_cai["shape"])
+        uv_strides = tuple(int(value) for value in uv_cai["strides"])
+        source_uv = self.cupy.asarray(CaiView(uv_source, uv_shape, uv_strides), copy=False).reshape(source_height // 2, source_width // 2, 2)
+        self.uv[...] = 128
+        uv_x = self.cupy.minimum(
+            (self.cupy.arange(scaled_width // 2) / scale).astype(self.cupy.int32), source_width // 2 - 1
+        )
+        uv_y = self.cupy.minimum(
+            (self.cupy.arange(scaled_height // 2) / scale).astype(self.cupy.int32), source_height // 2 - 1
+        )
+        self.uv[offset_y // 2:offset_y // 2 + scaled_height // 2, offset_x // 2:offset_x // 2 + scaled_width // 2] = source_uv[uv_y[:, None], uv_x[None, :]]
 
     def cuda(self) -> list[Any]:
         """Expose the two NV12 planes through the encoder protocol."""
@@ -411,9 +492,9 @@ class SpriteCompositor:
             return 0
         px = self.cupy.asarray([item[1] for item in active], dtype=self.cupy.int32)
         py = self.cupy.asarray([item[2] for item in active], dtype=self.cupy.int32)
-        offsets = self.cupy.asarray([item[0]["offset"] for item in active], dtype=self.cupy.int32)
-        widths = self.cupy.asarray([item[0]["width"] for item in active], dtype=self.cupy.int32)
-        heights = self.cupy.asarray([item[0]["height"] for item in active], dtype=self.cupy.int32)
+        offsets = self.cupy.asarray([item[0].offset for item in active], dtype=self.cupy.int32)
+        widths = self.cupy.asarray([item[0].width for item in active], dtype=self.cupy.int32)
+        heights = self.cupy.asarray([item[0].height for item in active], dtype=self.cupy.int32)
         event_alpha = self.cupy.asarray([item[3] for item in active], dtype=self.cupy.int32)
         self.kernel(
             ((self.width // 2 + 31) // 32, (self.height // 2 + 7) // 8),
@@ -465,15 +546,12 @@ def encode_to_file(
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
     rc_args = dict(config.gpu_rc_args)
-    missing = [key for key in ("rc", "maxbitrate", "vbvbufsize", "reference_fps") if rc_args.get(key) in (None, "")]
+    missing = [key for key in ("rc", "maxbitrate", "vbvbufsize") if rc_args.get(key) in (None, "")]
     if missing:
         raise ValueError(
             "gpu_rc_args 缺少编码参数: " + ", ".join(missing)
             + "；请在 render_args.overlay.gpu_rc_args 或测试命令中显式配置"
         )
-    effective_bitrate = normalize_nvenc_rate_control(config.bitrate, frame_rate, rc_args["reference_fps"])
-    effective_maxbitrate = normalize_nvenc_rate_control(rc_args["maxbitrate"], frame_rate, rc_args["reference_fps"])
-    effective_vbvbufsize = normalize_nvenc_rate_control(rc_args["vbvbufsize"], frame_rate, rc_args["reference_fps"])
     encoder = nvc.CreateEncoder(
         width,
         height,
@@ -481,10 +559,10 @@ def encode_to_file(
         False,
         codec=encoder_config(config.video_encoder),
         rc=str(rc_args["rc"]),
-        bitrate=str(effective_bitrate),
-        maxbitrate=str(effective_maxbitrate),
-        vbvbufsize=str(effective_vbvbufsize),
-        framerate=frame_rate,
+        bitrate=str(config.bitrate),
+        maxbitrate=str(parse_bitrate(rc_args["maxbitrate"])),
+        vbvbufsize=str(parse_bitrate(rc_args["vbvbufsize"])),
+        fps=str(frame_rate),
         preset=config.preset,
     )
     logger.info(
@@ -493,13 +571,11 @@ def encode_to_file(
             {
                 "codec": encoder_config(config.video_encoder),
                 "rc": str(rc_args["rc"]),
-                "configured_bitrate": str(config.bitrate),
-                "bitrate": str(effective_bitrate),
-                "maxbitrate": str(effective_maxbitrate),
-                "vbvbufsize": str(effective_vbvbufsize),
-                "reference_fps": float(rc_args["reference_fps"]),
+                "bitrate": str(config.bitrate),
+                "maxbitrate": str(parse_bitrate(rc_args["maxbitrate"])),
+                "vbvbufsize": str(parse_bitrate(rc_args["vbvbufsize"])),
                 "preset": config.preset,
-                "framerate": frame_rate,
+                "fps": frame_rate,
                 "width": width,
                 "height": height,
             },
@@ -516,73 +592,24 @@ def encode_to_file(
     frame_count = 0
     started = time.perf_counter()
     with bitstream.open("wb") as stream:
-        if source_frame_rate and frame_rate > source_frame_rate + 1e-6:
-            raw_current = first
-            source_buffer = NV12Buffer(cupy, width, height)
-            while raw_current is not None:
-                decoded, pts = raw_current
-                source_buffer.load(decoded)
-                next_item = next(frames, None)
-                if next_item is None:
-                    repeats = 1
-                else:
-                    next_pts = max(0.0, next_item[1] - first_pts)
-                    current_pts = max(0.0, pts - first_pts)
-                    repeats = max(1, int(round((next_pts - current_pts) * frame_rate)))
-                for _ in range(repeats):
-                    buffer.buffer[...] = source_buffer.buffer
-                    if frame_count < 200 and frame_count % 10 == 0:
-                        signatures.append(frame_signature(cupy, buffer))
-                    relative_pts = max(0.0, pts - first_pts)
-                    frame_time = frame_count / frame_rate
-                    active_counts.append(compositor.apply(buffer, frame_time))
-                    cupy.cuda.Stream.null.synchronize()
-                    cupy.cuda.runtime.deviceSynchronize()
-                    for packet in encoder.Encode(buffer):
-                        stream.write(packet["data"])
-                    # The encoder may retain the input surface until Encode
-                    # returns; wait before reusing the shared NV12 buffer.
-                    cupy.cuda.Stream.null.synchronize()
-                    cupy.cuda.runtime.deviceSynchronize()
-                    frame_count += 1
-                    if config.max_frames is not None and frame_count >= config.max_frames:
-                        break
-                if config.max_frames is not None and frame_count >= config.max_frames:
-                    break
-                raw_current = next_item
-            if target_duration and frame_rate > (source_frame_rate or 0):
-                while (
-                    frame_count / frame_rate < target_duration - 1e-6
-                    and (config.max_frames is None or frame_count < config.max_frames)
-                ):
-                    buffer.buffer[...] = source_buffer.buffer
-                    relative_pts = max(0.0, target_duration - (1.0 / frame_rate))
-                    frame_time = frame_count / frame_rate
-                    active_counts.append(compositor.apply(buffer, frame_time))
-                    cupy.cuda.Stream.null.synchronize()
-                    cupy.cuda.runtime.deviceSynchronize()
-                    for packet in encoder.Encode(buffer):
-                        stream.write(packet["data"])
-                    cupy.cuda.Stream.null.synchronize()
-                    cupy.cuda.runtime.deviceSynchronize()
-                    frame_count += 1
-        else:
-            for decoded, pts in itertools.chain((first,), frames):
-                buffer.load(decoded)
-                if frame_count < 200 and frame_count % 10 == 0:
-                    signatures.append(frame_signature(cupy, buffer))
-                relative_pts = max(0.0, pts - first_pts)
-                frame_time = frame_count / frame_rate
-                active_counts.append(compositor.apply(buffer, frame_time))
-                cupy.cuda.Stream.null.synchronize()
-                cupy.cuda.runtime.deviceSynchronize()
-                for packet in encoder.Encode(buffer):
-                    stream.write(packet["data"])
-                cupy.cuda.Stream.null.synchronize()
-                cupy.cuda.runtime.deviceSynchronize()
-                frame_count += 1
-                if config.max_frames is not None and frame_count >= config.max_frames:
-                    break
+        for decoded, frame_time in scheduled_frames(
+            frames,
+            first,
+            frame_rate,
+            target_duration=target_duration,
+            max_frames=config.max_frames,
+        ):
+            buffer.load_scaled(decoded)
+            if frame_count < 200 and frame_count % 10 == 0:
+                signatures.append(frame_signature(cupy, buffer))
+            active_counts.append(compositor.apply(buffer, frame_time))
+            cupy.cuda.Stream.null.synchronize()
+            cupy.cuda.runtime.deviceSynchronize()
+            for packet in encoder.Encode(buffer):
+                stream.write(packet["data"])
+            cupy.cuda.Stream.null.synchronize()
+            cupy.cuda.runtime.deviceSynchronize()
+            frame_count += 1
         for packet in encoder.EndEncode():
             stream.write(packet["data"])
     elapsed = time.perf_counter() - started
@@ -596,7 +623,7 @@ def encode_to_file(
         "active_events_avg": sum(active_counts) / len(active_counts) if active_counts else 0.0,
         "active_events_peak": max(active_counts) if active_counts else 0,
         "first_pts_seconds": first_pts,
-        "last_relative_pts_seconds": relative_pts if frame_count else 0.0,
+        "last_relative_pts_seconds": (frame_count - 1) / frame_rate if frame_count else 0.0,
     }
 
 
@@ -687,7 +714,6 @@ def main() -> None:
     parser.add_argument("--rc", default=None)
     parser.add_argument("--maxbitrate", default=None)
     parser.add_argument("--vbvbufsize", default=None)
-    parser.add_argument("--reference-fps", type=float, default=25.0)
     parser.add_argument("--preset", default="P4")
     parser.add_argument("--fps", type=float)
     parser.add_argument("--min-fps", type=float)
@@ -710,7 +736,7 @@ def main() -> None:
         gpu_id=args.gpu_id,
         render_plan=args.render_plan,
         sprite_data=args.sprite_data,
-        gpu_rc_args={"rc": args.rc, "maxbitrate": args.maxbitrate, "vbvbufsize": args.vbvbufsize, "reference_fps": args.reference_fps},
+        gpu_rc_args={"rc": args.rc, "maxbitrate": args.maxbitrate, "vbvbufsize": args.vbvbufsize},
     )
     print(json.dumps(result, ensure_ascii=False))
 
