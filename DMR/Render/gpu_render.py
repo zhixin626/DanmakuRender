@@ -437,7 +437,13 @@ def encode_to_file(
         "NV12",
         False,
         codec=encoder_config(config.video_encoder),
-        bitrate=config.bitrate,
+        rc="vbr",
+        # PyNvVideoCodec's VBR target is measured below the requested value on
+        # this NVENC driver; a 1.2 calibration keeps the resulting stream near
+        # the legacy FFmpeg target while preserving the configured bitrate API.
+        bitrate=str(int(config.bitrate * 1.2)),
+        maxbitrate=str(int(config.bitrate * 1.5)),
+        vbvbufsize=str(int(config.bitrate * 2.4)),
         framerate=frame_rate,
         preset=config.preset,
     )
