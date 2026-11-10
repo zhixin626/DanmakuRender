@@ -3,9 +3,9 @@ from __future__ import annotations
 import copy
 import json
 import os
-import tempfile
 from dataclasses import dataclass, field
 from typing import Any
+from ..utils.utils import atomic_json_dump as _atomic_json_dump
 
 
 LAYOUT_STATE_SCHEMA_VERSION = 3
@@ -26,23 +26,6 @@ def event_track(event: dict) -> str:
     if track not in TRACK_Z_ORDER:
         raise ValueError(f'unknown render track: {track}')
     return track
-
-
-def _atomic_json_dump(path: str, data: dict) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(prefix=".layout_", suffix=".tmp", dir=directory)
-    os.close(fd)
-    try:
-        with open(temp_path, "w", encoding="utf-8", newline="\n") as fp:
-            json.dump(data, fp, ensure_ascii=False, separators=(",", ":"))
-        os.replace(temp_path, path)
-    finally:
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except OSError:
-            pass
 
 
 @dataclass

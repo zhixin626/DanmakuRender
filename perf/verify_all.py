@@ -74,12 +74,14 @@ def main() -> int:
     parser=argparse.ArgumentParser()
     parser.add_argument('--manifest',type=pathlib.Path,default=ROOT/'perf/delivery_checks.json')
     parser.add_argument('--report',type=pathlib.Path,default=ROOT/'perf/tmp/verification.json')
+    parser.add_argument('--tests-only',action='store_true',
+                        help='Run CPU/structure regressions only; media checks must run separately after dmr_gate permits them')
     args=parser.parse_args()
     failures: list[str] = []
     test = subprocess.run([sys.executable, "-m", "pytest", "tests", "-q"], cwd=ROOT)
     if test.returncode:
         failures.append("pytest")
-    if args.manifest:
+    if args.manifest and not args.tests_only:
         sys.path.insert(0,str(ROOT))
         checks=[]
         for spec in json.loads(args.manifest.read_text(encoding='utf-8')):
@@ -93,7 +95,7 @@ def main() -> int:
     if failures:
         print("verify_all failed:", *failures, sep="\n- ")
         return 1
-    print("verify_all passed")
+    print("verify_all passed (CPU only; media not run)" if args.tests_only else "verify_all passed")
     return 0
 
 

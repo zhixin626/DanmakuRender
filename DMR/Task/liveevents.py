@@ -2,6 +2,9 @@ import logging
 import os
 import re
 import time
+import copy
+import json
+import hashlib
 from pathlib import Path
 from datetime import datetime
 
@@ -13,6 +16,7 @@ from ..utils import *
 from ..utils.utils import format_duration
 from ..utils.gifts_utils import generate_gift_statistics
 from ..utils.session_record import read_last_complete_session
+from ..utils.utils import atomic_json_dump
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.src_path       = Path(out_dir)
         self.dmvideo_path   = Path(out_dir + '（弹幕版）')
         self.transcode_path = Path(out_dir + '（转码后）')
+        task_key = hashlib.sha256(name.encode('utf-8')).hexdigest()
+        self._resume_path = self.src_path / '.dmr' / f'render_{task_key}.json'
+        self._resume_saved = set()
 
     @property
     def event_dict(self):
@@ -80,7 +87,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         bark_notify_url(url, sound=bark_args.get("sound", "birdsong"))
 
     def onReady(self, *args, **kwargs):
-        return PipeMessage(
+        recovered = self._restore_render_tasks()
+        download = PipeMessage(
             source=self.name,
             target='downloader',
             event='newtask',
@@ -90,6 +98,115 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 'config': self.config['download_args'],
             }
         )
+        return [download, *recovered] if recovered else download
+
+    def _read_render_state(self):
+        """Read only this task's trusted local checkpoint; never execute data."""
+        try:
+            data = json.loads(self._resume_path.read_text(encoding='utf-8'))
+            if data['schema'] != 1 or data['task'] != self.name:
+                raise ValueError('render checkpoint schema/task mismatch')
+            return data['groups']
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self.logger.warning('无法读取渲染恢复记录 %s: %s', self._resume_path, error)
+            raise
+
+    def _save_render_state(self):
+        """Keep group context until cancelled/in-flight renders can be resumed."""
+        try:
+            groups = self._read_render_state()
+            for gid, segments in self.state_dict.items():
+                if not any(slot['status'] in ('rendering', 'stopped')
+                           for segment in segments for slot in segment.values()):
+                    groups.pop(gid, None)
+                    continue
+                jobs = []
+                for request_id, message in self._dispatched.items():
+                    locations = [loc for loc in self._locate_all_by_request(request_id) if loc[0] == gid]
+                    if locations:
+                        jobs.append({'message': message, 'hold_id': request_id,
+                                     'segs': [loc[1] for loc in locations], 'vtype': locations[0][2]})
+                for hold in self.held_tasks.values():
+                    if hold['group_id'] == gid and hold.get('retry_msg'):
+                        jobs.append({'message': hold['retry_msg'], 'hold_id': hold['hold_id'],
+                                     'segs': hold['segs'], 'vtype': hold['vtype'],
+                                     'cancelled': hold.get('cancelled', False)})
+                groups[gid] = {'segments': segments, 'jobs': jobs,
+                               'session': self.session_data.get(gid, {}),
+                               'ended': self.ended_dict.get(gid)}
+            if groups or self._resume_path.exists():
+                atomic_json_dump(self._resume_path, {'schema': 1, 'task': self.name, 'groups': groups})
+            self._resume_saved = set(groups)
+            return True
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self._resume_saved.difference_update(self.state_dict)
+            self.logger.error('渲染状态未持久化，暂不允许回收/空闲重启: %s', error)
+            return False
+
+    @staticmethod
+    def _restore_video(value):
+        if value is None:
+            return None
+        value = dict(value)
+        for key in ('ctime', 'segment_start_time'):
+            if isinstance(value.get(key), str):
+                value[key] = datetime.fromisoformat(value[key])
+        if isinstance(value.get('streamer'), dict):
+            value['streamer'] = StreamerInfo(**value['streamer'])
+        return VideoInfo(**value)
+
+    def _restore_render_group(self, gid, record=None):
+        if gid in self.state_dict:
+            return
+        if record is None:
+            record = self._read_render_state().get(gid)
+        if record is None:
+            return
+        segments = copy.deepcopy(record['segments'])
+        for segment in segments:
+            for slot in segment.values():
+                slot['file'] = self._restore_video(slot['file'])
+                slot['wait'] = []
+        self.state_dict[gid] = segments
+        self.session_data[gid] = dict(record['session'], is_live_end=True)
+        self.ended_dict[gid] = record['ended'] or time.time()
+        for job in record['jobs']:
+            original = dict(job['message'])
+            data = dict(original['data'])
+            if data.get('video'):
+                data['video'] = self._restore_video(data['video'])
+            if data.get('files'):
+                data['files'] = [self._restore_video(video) for video in data['files']]
+            original['data'] = data
+            message = PipeMessage(**original)
+            stage = {'render': 'render', 'merger': 'merge', 'uploader': 'upload'}[message.target]
+            cancelled = job.get('cancelled', stage == 'render')
+            for index in job['segs']:
+                segments[index][job['vtype']]['status'] = 'stopped' if cancelled else 'holding'
+            self.held_tasks[job['hold_id']] = {
+                'hold_id': job['hold_id'], 'stage': stage, 'group_id': gid,
+                'segs': job['segs'], 'vtype': job['vtype'], 'retry_msg': message,
+                'info': {'error': '上次停止或退出后待恢复'}, 'time': datetime.now(),
+                'cancelled': cancelled,
+            }
+
+    def _restore_render_tasks(self):
+        """Restart cancelled renders; interrupted remote side effects stay manual."""
+        try:
+            groups = self._read_render_state()
+            restored = [gid for gid in groups if gid not in self.state_dict]
+            for gid in restored:
+                self._restore_render_group(gid, groups[gid])
+            messages = []
+            for hold_id, hold in list(self.held_tasks.items()):
+                if hold['group_id'] in restored and hold['stage'] == 'render' and hold.get('cancelled'):
+                    messages.extend(self.onRetry(PipeMessage('engine', self.name, 'retry', data={'hold_id': hold_id})))
+            return messages
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self.logger.error('恢复渲染任务失败，请保留恢复记录并人工检查: %s', error)
+            return []
     
     def onLiveSegment(self, message:PipeMessage):
         self.logger.info(f'{self.name}: {message.msg}')
@@ -186,6 +303,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         各 _check_* 都幂等（只对够格的段派发并立刻改状态防重复），故每次统一重跑也安全。
         clean_trigger 指明本轮清理阶段（onRenderEnd/onUploadEnd/onLiveEnd/onMergeEnd）；None=本轮不触发清理。
         注意：合并失败回滚走 onMergeError、不经此处，避免回滚后又被立刻重新派发合并。"""
+        self._save_render_state()
         ret_msgs = []
         ret_msgs += self._check_for_merge(group_id)
         ret_msgs += self._check_for_upload(group_id)
@@ -198,6 +316,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         if group_id in self.ended_dict and clean_trigger != 'onLiveEnd':
             ret_msgs += self._check_for_clean(group_id, trigger='onLiveEnd')
         ret_msgs += self._free_state_memory()
+        self._save_render_state()
         return ret_msgs
 
     def _check_for_upload(self, group_id:str):
@@ -470,7 +589,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                         out.append((gid, idx, vt))
         return out
 
-    def _add_hold(self, stage, group_id, segs, vtype, info, retry_msg=None):
+    def _add_hold(self, stage, group_id, segs, vtype, info, retry_msg=None, cancelled=False):
         """登记一个挂起任务，返回 hold_id。info 是给人看的内容（各阶段不同）。
         retry_msg 是原始派发消息，供 WebUI「重试」时原样重发。"""
         hid = uuid()
@@ -478,8 +597,10 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             'hold_id': hid, 'stage': stage, 'group_id': group_id,
             'segs': list(segs), 'vtype': vtype, 'info': info, 'time': datetime.now(),
             'retry_msg': retry_msg,
+            'cancelled': cancelled,
         }
-        self.logger.warning(f'{self.name}: {stage} 失败，已挂起等待人工处理 (hold_id={hid})')
+        self.logger.warning('%s: %s %s (hold_id=%s)', self.name, stage,
+                            '已停止，可重试或下次启动恢复' if cancelled else '失败，等待人工处理', hid)
         return hid
 
     def _build_videoinfo_from(self, src, path, dtype):
@@ -496,12 +617,16 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def onRenderStop(self,message:PipeMessage):
         """Clear cancellation from in-flight work without retrying or uploading."""
         self.logger.info('%s: %s',self.name,message.msg)
-        self._dispatched.pop(message.request_id,None)
+        original = self._dispatched.pop(message.request_id, None)
+        affected = set()
         for group_id,index,vtype in self._locate_all_by_request(message.request_id):
             slot = self.state_dict[group_id][index][vtype]
             slot['wait'] = [value for value in slot['wait'] if value != message.request_id]
             slot['status'] = 'stopped'
-        return []
+            self._add_hold('render', group_id, [index], vtype, {'error': message.msg},
+                           retry_msg=original, cancelled=True)
+            affected.add(group_id)
+        return [followup for gid in affected for followup in self.reconcile(gid)]
 
     def onRenderError(self, message:PipeMessage):
         """渲染失败转人工：挂起此段，详情交 WebUI。"""
@@ -591,6 +716,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             return []
         orig = hold.get('retry_msg')
         stage, gid, vtype = hold['stage'], hold['group_id'], hold['vtype']
+        self._restore_render_group(gid)
         if orig is None or gid not in self.state_dict:
             self.logger.warning(f'{self.name}: {hold_id}（{stage}）无法重试（缺原始任务或组已清理），请手动处理')
             return []
@@ -606,6 +732,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 slot['wait'] = [new_req]
         self._dispatched[new_req] = new_msg
         self.held_tasks.pop(hold_id, None)
+        self._save_render_state()
         self.logger.info(f'{self.name}: 重试挂起任务 {hold_id}（{stage}）')
         return [new_msg]
 
@@ -619,6 +746,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             self.logger.warning(f'{self.name}: 未找到挂起任务 {hold_id}')
             return []
         group_id, stage, vtype = hold['group_id'], hold['stage'], hold['vtype']
+        self._restore_render_group(group_id)
         if group_id not in self.state_dict:
             self.held_tasks.pop(hold_id, None)
             return []
@@ -778,6 +906,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         video_states = self.state_dict.get(group_id)
         if not video_states:
             return ret_msgs
+        if any(slot['status'] in ('rendering', 'stopped') for segment in video_states for slot in segment.values()):
+            return ret_msgs  # Recovery still needs both source and completed sibling files.
 
         # 落地成型、磁盘上有真实文件、可被清理的状态（不分产物/源）；在途/无文件/已清理的不在此列
         cleanable = ('ready', 'uploaded', 'merged', 'merge_src')   # 渲染产物/已上传/合并产物/被合并源 都是真实文件，可清理
@@ -832,6 +962,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # None=未参与；merge_src=被合并的源段(已消费)；cleaned=已清理（即便 auto_clean 关，merger
         # remove_source 删源也会标它）：恒为终态。cleaning 默认不算终态，只有 ignore_cleaning(重启判断)时才放行。
         terminal = ('merge_src', 'cleaned') + (('cleaning',) if ignore_cleaning else ())
+        if group_id in self._resume_saved:
+            terminal += ('stopped',)
         for video_state in video_states:
             for info in video_state.values():
                 st = info.get('status')
@@ -851,10 +983,13 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
     def _free_group(self, group_id):
         """回收某组的内存记账（state/ended/session_data/挂起项）。"""
+        stopped = any(slot['status'] == 'stopped' for segment in self.state_dict.get(group_id, [])
+                      for slot in segment.values())
         self.ended_dict.pop(group_id, None)
         self.state_dict.pop(group_id, None)
         self.session_data.pop(group_id, None)
-        self.held_tasks = {h: v for h, v in self.held_tasks.items() if v['group_id'] != group_id}
+        if not stopped:
+            self.held_tasks = {h: v for h, v in self.held_tasks.items() if v['group_id'] != group_id}
 
     def _free_state_memory(self):
         ret_msgs = []
@@ -874,6 +1009,11 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # 注意：挂起任务不豁免——人若一直不处理，到点会被一起清掉（时长见配置 common_event_args.state_timeout_hours）。
         timeout_h = self.config['common_event_args'].get('state_timeout_hours', 72)
         for group_id in list(self.ended_dict.keys()):
+            unsaved_stop = group_id not in self._resume_saved and any(
+                slot['status'] == 'stopped' for segment in self.state_dict.get(group_id, [])
+                for slot in segment.values())
+            if unsaved_stop:
+                continue  # A timeout must not bypass failed durable recovery.
             if time.time() - self.ended_dict[group_id] > timeout_h * 3600:
                 self.logger.info(f'视频组{group_id}处理超时（>{timeout_h}h），视频信息将被释放.')
                 ret_msgs.append(PipeMessage(
@@ -886,6 +1026,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         return ret_msgs
 
     def onExit(self, *args, **kwargs) -> None:
+        self._save_render_state()
         self.logger.info(f'{self.name}: 任务结束.')
         group_ids = set(self.state_dict) | set(self.ended_dict) | set(self.session_data)
         ret_msgs = [

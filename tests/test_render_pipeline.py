@@ -96,7 +96,8 @@ def test_segment_render_and_state_progression(monkeypatch,tmp_path,engine,outcom
         assert completion.event=='stopped' and '已停止' in completion.msg
         assert handler.event_dict['render/stopped'](completion)==[]
         assert slot['status']=='stopped' and slot['wait']==[]
-        assert observed_ready==['rendering'] and not handler.held_tasks
+        assert observed_ready==['rendering','stopped']
+        assert len(handler.held_tasks)==1 and next(iter(handler.held_tasks.values()))['cancelled']
         assert not list((tmp_path/'rendered').glob('*.mp4'))
         assert len(gpu_calls)==(3 if outcome=='fallback_stopped' else 1)
         assert len(fallback_calls)==(1 if outcome=='fallback_stopped' else 0)

@@ -127,9 +127,19 @@ def resolve_font(family: str, bold: bool) -> str:
         import matplotlib.font_manager as font_manager
 
         properties = font_manager.FontProperties(family=family, weight="bold" if bold else "normal")
-        return font_manager.findfont(properties, fallback_to_default=True)
-    except Exception:
-        return r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc"
+        return font_manager.findfont(properties, fallback_to_default=False)
+    except (ImportError, ValueError, OSError) as error:
+        log.warning("找不到字体 '%s'（%s），回退到支持中文的系统字体。", family, error)
+    if os.name == 'nt':
+        candidates = [r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc"]
+    else:
+        candidates = ['/System/Library/Fonts/PingFang.ttc',
+                      '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc' if bold
+                      else '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc']
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    raise FileNotFoundError(f"字体 {family!r} 不存在，也找不到支持中文的系统字体；请配置已安装字体")
 
 
 def resolve_emoji_font(value: str | None) -> str:
@@ -153,8 +163,8 @@ def resolve_emoji_font(value: str | None) -> str:
         )
         if candidate and os.path.isfile(candidate):
             return os.path.abspath(candidate)
-    except Exception:
-        pass
+    except Exception as error:
+        log.debug("按字体名查找 Emoji 字体失败: %s", error)
     log.warning("找不到 emoji 字体 '%s', 回退到系统 Segoe UI Emoji。", value)
     return DEFAULT_EMOJI_FONT
 
@@ -308,8 +318,10 @@ class EmoticonStore:
                 old = json.load(f)
             if isinstance(old, dict):
                 merged.update(old)
-        except Exception:
-            pass
+        except FileNotFoundError:
+            log.debug("emoticon 注册表尚未创建: %s", self.registry_path)
+        except Exception as error:
+            log.warning("合并 emoticon 注册表失败: %s", error)
         merged.update(self.registry)
         temp = self.registry_path + f".{os.getpid()}.tmp"
         try:
@@ -320,8 +332,8 @@ class EmoticonStore:
             try:
                 if os.path.exists(temp):
                     os.remove(temp)
-            except OSError:
-                pass
+            except OSError as error:
+                log.debug("清理 emoticon 临时文件失败: %s", error)
 
 class SpriteFactory:
     """Build and cache the exact RGBA/YUV sprites used by the old renderer."""
@@ -730,8 +742,8 @@ def detect_platform(source_path):
         if "douyin.com" in head: return "douyin"
         if "douyu.com" in head: return "douyu"
         if "huya.com" in head: return "huya"
-    except Exception:
-        pass
+    except Exception as error:
+        log.debug("读取平台信息失败 (%s): %s", source_path, error)
     return ""
 
 

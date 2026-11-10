@@ -5,6 +5,7 @@ import re
 import os
 import glob
 import json
+import tempfile
 from easydict import EasyDict as edict
 from os.path import exists, abspath, splitext, join, basename
 from uuid import uuid1
@@ -36,6 +37,7 @@ __all__ = [
     'filename_to_taskname',
     'DateTimeEncoder',
     'DateTimeDecoder',
+    'atomic_json_dump',
 ]
 
 
@@ -44,6 +46,23 @@ class DateTimeEncoder(json.JSONEncoder):
         if isinstance(o, datetime):
             return o.isoformat()
         return super().default(o)
+
+
+def atomic_json_dump(path, data):
+    """Replace a JSON checkpoint only after a complete same-directory write."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix='.dmr_', suffix='.tmp', dir=directory)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(data, stream, ensure_ascii=False, cls=DateTimeEncoder,
+                      separators=(',', ':'))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 class DateTimeDecoder(json.JSONDecoder):
