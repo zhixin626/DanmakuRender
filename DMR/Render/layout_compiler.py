@@ -260,6 +260,56 @@ def _quantity_suffix(value, unit="") -> str:
     return f" ×{count}{unit or ''}"
 
 
+def merge_gift_records(records, *, mode="live", window_seconds=10.0):
+    """Merge adjacent gifts by user/name, preferring platform combo identity."""
+    ordered = sorted(
+        records,
+        key=lambda item: (
+            float(item.get("received_at", 0) or 0),
+            item.get("_line", 0),
+        ),
+    )
+    result = []
+    groups = {}
+    for record in ordered:
+        if record.get("type") != "gift":
+            result.append(record)
+            continue
+        uid = record.get("uid") or record.get("uname") or ""
+        name = record.get("gift_name") or ""
+        combo_id = record.get("combo_id")
+        key = (uid, name, combo_id) if combo_id else (uid, name)
+        when = float(record.get("received_at", 0) or 0)
+        previous = groups.get(key)
+        if previous is None or (
+            not combo_id and when - previous["_last_time"] > float(window_seconds)
+        ):
+            merged = dict(record)
+            merged["gift_count"] = _positive_count(record.get("gift_count"))
+            merged["gift_states"] = [dict(record)]
+            merged["_last_time"] = when
+            groups[key] = merged
+            result.append(merged)
+            continue
+        count = _positive_count(record.get("gift_count"))
+        if combo_id:
+            merged["gift_count"] = max(merged["gift_count"], count)
+        else:
+            merged["gift_count"] += count
+        merged["gift_states"].append(dict(record))
+        merged["_last_time"] = when
+        merged["price_cny"] = float(merged.get("price_cny") or 0) + float(
+            record.get("price_cny") or 0
+        )
+    for record in result:
+        record.pop("_last_time", None)
+        if record.get("type") == "gift" and mode == "total":
+            record.pop("gift_states", None)
+        elif record.get("type") == "gift":
+            record["combo_mode"] = "live"
+    return result
+
+
 def _optional_quantity_suffix(value, unit="") -> str:
     return "" if value is None else _quantity_suffix(value, unit)
 
@@ -537,6 +587,12 @@ class LayoutCompiler:
         ordered_records = sorted(
             records,
             key=lambda item: (float(item.get("received_at", 0) or 0), item["_line"]),
+        )
+        gift_cfg = event_configs.get("gift") or {}
+        ordered_records = merge_gift_records(
+            ordered_records,
+            mode=str(gift_cfg.get("combo_mode", "live") or "live"),
+            window_seconds=float(gift_cfg.get("combo_window_seconds", 10) or 10),
         )
 
         for record in ordered_records:

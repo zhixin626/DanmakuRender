@@ -458,6 +458,9 @@ render_args:
 
       gift:
         enable: true
+        # 连续同用户同礼物在窗口内合并；live保留状态序列供GPU，total为一次性总数
+        combo_mode: live
+        combo_window_seconds: 10
         min_price_cny: 0
         use_event_background_colors: false
         use_event_duration: false
