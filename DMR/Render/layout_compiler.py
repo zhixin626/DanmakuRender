@@ -14,7 +14,14 @@ from DMR.utils import replace_keywords
 from DMR.utils.text_width import TextMeasurer
 
 from .emoji_width import EmojiWidthMeasurer
-from .layout_models import LayoutState, RenderPlan, TRACK_R2L, TRACK_SLIDE_LEFT, TRACK_SLIDE_RIGHT, EVENT_TRACKS
+from .layout_models import (
+    LayoutState,
+    RenderPlan,
+    TRACK_R2L,
+    TRACK_SLIDE_LEFT,
+    TRACK_SLIDE_RIGHT,
+    EVENT_TRACKS,
+)
 from .resolution import resolve_render_canvas
 
 
@@ -368,6 +375,7 @@ class LayoutCompiler:
     ):
         self.config = layout_config or {}
         from . import get_engine, DEFAULT_ENGINE
+
         self.engine = engine if engine is not None else DEFAULT_ENGINE
         self.engine_spec = get_engine(self.engine)
         self.engine_config = engine_config or {}
@@ -454,8 +462,8 @@ class LayoutCompiler:
         # Geometry/identity persist, but carried panels must use this backend's
         # drawing capability instead of retaining the previous engine's mode.
         for event in state_events:
-            if (event.get('visual') or {}).get('type') == 'panel':
-                event['mode'] = 'raster' if self.engine_spec.panel_raster else 'ass'
+            if (event.get("visual") or {}).get("type") == "panel":
+                event["mode"] = "raster" if self.engine_spec.panel_raster else "ass"
 
         r2l_render = self.config.get(TRACK_R2L) or {}
         slide_left_render = self.config.get(TRACK_SLIDE_LEFT) or {}
@@ -737,7 +745,9 @@ class LayoutCompiler:
             canvas_resolution=current_canvas,
             source_resolution=source_resolution,
         )
-        plan = RenderPlan(duration=duration, events=plan_events)
+        plan = RenderPlan(
+            duration=duration, events=plan_events, platform=header.get("platform")
+        )
         accepted = sum(stats["accepted"] for stats in track_stats.values())
         dropped = (
             sum(stats["dropped"] for stats in track_stats.values())
@@ -996,15 +1006,16 @@ class LayoutCompiler:
             render_cfg,
             track_cfg,
         )
-        uname = name_measurer.truncate(
-            str(uname or ""), name_budget, ellipsis="..."
-        )
+        uname = name_measurer.truncate(str(uname or ""), name_budget, ellipsis="...")
         top_opacity = float(panel_setting("top_opacity", 0.7) or 0.7)
         bottom_opacity = float(panel_setting("bottom_opacity", 0.3) or 0.3)
         name_opacity = content_opacity = 1.0
         if self.engine_spec.panel_raster:
-            top_height = max(top_height, name_measurer.height(uname) + 10,
-                             name_measurer.height(price_text, text_budget) + 10)
+            top_height = max(
+                top_height,
+                name_measurer.height(uname) + 10,
+                name_measurer.height(price_text, text_budget) + 10,
+            )
             total_height = top_height + bottom_height
         name_outline_color = content_outline_color = "#000000"
 
@@ -1102,12 +1113,12 @@ class LayoutCompiler:
         }
         if self.engine_spec.panel_raster:
             for node in nodes:
-                if node['type'] != 'text':
+                if node["type"] != "text":
                     continue
-                node['width'] = name_budget if node is nodes[2] else text_budget
-                node['line_height'] = line_height
-            if self.engine_config.get('emoji_font'):
-                visual['emoji_font'] = self.engine_config['emoji_font']
+                node["width"] = name_budget if node is nodes[2] else text_budget
+                node["line_height"] = line_height
+            if self.engine_config.get("emoji_font"):
+                visual["emoji_font"] = self.engine_config["emoji_font"]
         return {
             "id": event_id,
             "track": track,

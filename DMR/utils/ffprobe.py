@@ -85,7 +85,7 @@ class FFprobe():
     @classmethod
     def ffprobe(cls) -> str:
         return ToolsList.get('ffprobe')
-    
+
     @classmethod
     def run_ffprobe(cls,fpath):
         out = subprocess.check_output([
@@ -99,7 +99,7 @@ class FFprobe():
         out = out.decode('utf8')
         res = json.loads(out)
         return res
-        
+
     @classmethod
     def get_duration(cls,fpath) -> float:
         try:
@@ -241,7 +241,7 @@ class FFprobe():
     def get_livestream_info(cls,url,header=None) -> dict:
         res = cls.run_ffprobe_livestream(url,header)
         return res['streams'][0]
-        
+
     @classmethod
     def get_resolution(cls, url:str, header=None) -> tuple:
         try:

@@ -5,26 +5,30 @@ import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
-from ..utils.utils import atomic_json_dump as _atomic_json_dump
-
+from DMR.utils.utils import atomic_json_dump as _atomic_json_dump
 
 LAYOUT_STATE_SCHEMA_VERSION = 3
 RENDER_PLAN_SCHEMA_VERSION = 1
-TRACK_R2L = 'r2l'
-TRACK_SLIDE_LEFT = 'slide_left'
-TRACK_SLIDE_RIGHT = 'slide_right'
-EVENT_TRACKS = {'danmaku':TRACK_R2L,'superchat':TRACK_SLIDE_LEFT,'gift':TRACK_SLIDE_RIGHT,'member':TRACK_SLIDE_RIGHT}
-TRACK_Z_ORDER = {TRACK_SLIDE_LEFT:0,TRACK_SLIDE_RIGHT:0,TRACK_R2L:1}
+TRACK_R2L = "r2l"
+TRACK_SLIDE_LEFT = "slide_left"
+TRACK_SLIDE_RIGHT = "slide_right"
+EVENT_TRACKS = {
+    "danmaku": TRACK_R2L,
+    "superchat": TRACK_SLIDE_LEFT,
+    "gift": TRACK_SLIDE_RIGHT,
+    "member": TRACK_SLIDE_RIGHT,
+}
+TRACK_Z_ORDER = {TRACK_SLIDE_LEFT: 0, TRACK_SLIDE_RIGHT: 0, TRACK_R2L: 1}
 
 
 def event_track(event: dict) -> str:
     """Resolve old plans at the boundary; new plans always retain their track."""
-    track = event.get('track')
+    track = event.get("track")
     if track is None:
-        visual = event['visual']
-        track = TRACK_R2L if visual['type']=='line' else EVENT_TRACKS[visual['class']]
+        visual = event["visual"]
+        track = TRACK_R2L if visual["type"] == "line" else EVENT_TRACKS[visual["class"]]
     if track not in TRACK_Z_ORDER:
-        raise ValueError(f'unknown render track: {track}')
+        raise ValueError(f"unknown render track: {track}")
     return track
 
 
@@ -102,10 +106,12 @@ class RenderPlan:
 
     duration: float
     events: list[dict] = field(default_factory=list)
+    platform: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "schema": RENDER_PLAN_SCHEMA_VERSION,
+            "platform": self.platform,
             "duration": float(self.duration),
             "events": copy.deepcopy(self.events),
         }
@@ -117,6 +123,7 @@ class RenderPlan:
         return cls(
             duration=float(data.get("duration", 0.0)),
             events=copy.deepcopy(data.get("events") or []),
+            platform=data.get("platform"),
         )
 
     @classmethod
@@ -161,7 +168,7 @@ class RenderEvent:
             end=float(value["end"]),
             path=tuple(tuple(float(part) for part in point) for point in value["path"]),
             motion=dict(value["motion"]),
-            track=value.get('track',TRACK_R2L),
+            track=value.get("track", TRACK_R2L),
         )
 
 
@@ -183,7 +190,12 @@ class PanelNode:
             if key not in value:
                 raise KeyError(key)
         return cls(
-            type=str(value["type"]), x=int(value["x"]), y=int(value["y"]),
-            width=int(value["width"]), height=int(value["height"]),
-            shape=value.get("shape"), font=value.get("font"), size=value.get("size"),
+            type=str(value["type"]),
+            x=int(value["x"]),
+            y=int(value["y"]),
+            width=int(value["width"]),
+            height=int(value["height"]),
+            shape=value.get("shape"),
+            font=value.get("font"),
+            size=value.get("size"),
         )

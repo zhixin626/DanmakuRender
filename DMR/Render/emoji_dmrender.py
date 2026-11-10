@@ -18,7 +18,6 @@ _MT_SCRIPT = abspath(join(dirname(__file__), "emoji_render_mt.py"))
 
 from .sprites import detect_platform
 
-
 class EmojiDmRender(BaseRender):
     """
     弹幕彩色 emoji 渲染引擎(方案2)：libass 烧普通弹幕 + Pillow 渲彩色 emoji/表情包贴图,
@@ -89,7 +88,7 @@ class EmojiDmRender(BaseRender):
 
     def render_one(self, video: VideoInfo, output: str, progress_cb=None, **kwargs):
         if self.is_stopped():
-            return False, RenderStopped('用户已停止渲染')
+            return False, RenderStopped("用户已停止渲染")
         if not exists(video.path):
             raise RuntimeError(f"不存在视频文件 {video.path}，跳过渲染.")
         render_plan = kwargs.get("render_plan")
@@ -191,14 +190,16 @@ class EmojiDmRender(BaseRender):
             self._proc.wait()
             rc = self._proc.returncode
             if self.is_stopped():
-                return False, RenderStopped('用户已停止渲染')
+                return False, RenderStopped("用户已停止渲染")
             output_ready = rc == 0 and exists(output)
 
             if output_ready:
                 success = True
                 self._output_complete = True
                 self.logger.debug(f"emoji 渲染完成: {output}")
-                return True, self.output_info(video,output,canvas_resolution,start_time)
+                return True, self.output_info(
+                    video, output, canvas_resolution, start_time
+                )
 
             err = "emoji 渲染失败(返回码 %s):\n%s" % (rc, "\n".join(tail[-15:]))
             self.logger.error(err)

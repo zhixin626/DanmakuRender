@@ -13,31 +13,31 @@ from typing import Union
 from pathlib import Path
 from datetime import datetime
 __all__ = [
-    'rename_safe',
-    'format_duration',
-    'isvideo',
-    'concat_rid',
-    'split_url',
-    'replace_keywords',
-    'replace_invalid_chars',
-    'sec2hms',
-    'hms2sec',
-    'BGR2RGB',
-    'RGB2BGR',
-    'uuid',
-    'get_platform',
-    'safe_filename',
-    'cookiestr2dict',
-    'random_user_agent',
-    'retry_safe',
-    'get_tempfile',
-    'merge_dict',
-    'multi_unescape',
-    'match1',
-    'filename_to_taskname',
-    'DateTimeEncoder',
-    'DateTimeDecoder',
-    'atomic_json_dump',
+    "rename_safe",
+    "format_duration",
+    "isvideo",
+    "concat_rid",
+    "split_url",
+    "replace_keywords",
+    "replace_invalid_chars",
+    "sec2hms",
+    "hms2sec",
+    "BGR2RGB",
+    "RGB2BGR",
+    "uuid",
+    "get_platform",
+    "safe_filename",
+    "cookiestr2dict",
+    "random_user_agent",
+    "retry_safe",
+    "get_tempfile",
+    "merge_dict",
+    "multi_unescape",
+    "match1",
+    "filename_to_taskname",
+    "DateTimeEncoder",
+    "DateTimeDecoder",
+    "atomic_json_dump",
 ]
 
 
@@ -52,11 +52,16 @@ def atomic_json_dump(path, data):
     """Replace a JSON checkpoint only after a complete same-directory write."""
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix='.dmr_', suffix='.tmp', dir=directory)
+    fd, temporary = tempfile.mkstemp(prefix=".dmr_", suffix=".tmp", dir=directory)
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump(data, stream, ensure_ascii=False, cls=DateTimeEncoder,
-                      separators=(',', ':'))
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(
+                data,
+                stream,
+                ensure_ascii=False,
+                cls=DateTimeEncoder,
+                separators=(",", ":"),
+            )
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -150,7 +155,7 @@ def get_platform(url:str) -> str:
         return 'bilibili'
     elif 'youtube.com' in url:
         return 'youtube'
-    
+
 def retry_safe(func, max_retries=5, sleep_interval=1):
     if max_retries <= 0:
         max_retries = 2**32-1

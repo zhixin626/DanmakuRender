@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
-import io
 import json
 import logging
 import os
 import pathlib
 import re
-import urllib.parse
-import urllib.request
 from typing import Any
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageFilter
+from DMR.EmojiPack.common import EmoticonStore
+
 try:
     from .layout_models import event_track
 except ImportError:  # emoji_render_mt's standalone subprocess
@@ -73,7 +71,12 @@ def has_special(body: str, pack: dict[str, str]) -> bool:
     clean = re.sub(r"\{[^}]*\}", "", body)
     if any(is_emoji(char) for char in clean):
         return True
-    return bool(pack and any(match.group(1).lower() in pack for match in SHORTCODE_RE.finditer(clean)))
+    return bool(
+        pack
+        and any(
+            match.group(1).lower() in pack for match in SHORTCODE_RE.finditer(clean)
+        )
+    )
 
 
 def tokenize(text: str, pack: dict[str, str]) -> list[tuple[str, str]]:
@@ -126,20 +129,31 @@ def resolve_font(family: str, bold: bool) -> str:
     try:
         import matplotlib.font_manager as font_manager
 
-        properties = font_manager.FontProperties(family=family, weight="bold" if bold else "normal")
+        properties = font_manager.FontProperties(
+            family=family, weight="bold" if bold else "normal"
+        )
         return font_manager.findfont(properties, fallback_to_default=False)
     except (ImportError, ValueError, OSError) as error:
         log.warning("找不到字体 '%s'（%s），回退到支持中文的系统字体。", family, error)
-    if os.name == 'nt':
-        candidates = [r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc"]
+    if os.name == "nt":
+        candidates = [
+            r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc"
+        ]
     else:
-        candidates = ['/System/Library/Fonts/PingFang.ttc',
-                      '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc' if bold
-                      else '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc']
+        candidates = [
+            "/System/Library/Fonts/PingFang.ttc",
+            (
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+                if bold
+                else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+            ),
+        ]
     for candidate in candidates:
         if os.path.isfile(candidate):
             return candidate
-    raise FileNotFoundError(f"字体 {family!r} 不存在，也找不到支持中文的系统字体；请配置已安装字体")
+    raise FileNotFoundError(
+        f"字体 {family!r} 不存在，也找不到支持中文的系统字体；请配置已安装字体"
+    )
 
 
 def resolve_emoji_font(value: str | None) -> str:
@@ -148,10 +162,20 @@ def resolve_emoji_font(value: str | None) -> str:
         return DEFAULT_EMOJI_FONT
     script_dir = os.path.dirname(os.path.abspath(__file__))
     extensions = ("", ".ttf", ".ttc", ".otf")
-    directories = ("", os.getcwd(), script_dir, os.path.join(script_dir, "test"), r"C:\Windows\Fonts")
+    directories = (
+        "",
+        os.getcwd(),
+        script_dir,
+        os.path.join(script_dir, "test"),
+        r"C:\Windows\Fonts",
+    )
     for directory in directories:
         for extension in extensions:
-            candidate = os.path.join(directory, value + extension) if directory else value + extension
+            candidate = (
+                os.path.join(directory, value + extension)
+                if directory
+                else value + extension
+            )
             if os.path.isfile(candidate):
                 return os.path.abspath(candidate)
     try:
@@ -185,163 +209,17 @@ def load_pack(pack_dirs: str | None) -> dict[str, str]:
     return pack
 
 
-class EmoticonStore:
-    """纯 emoticon 的本地表情库：按 unique 记账，图片按 URL 哈希落盘。"""
-    MAX_BYTES = 10 * 1024 * 1024
-    FORMAT_EXT = {"PNG": ".png", "WEBP": ".webp", "GIF": ".gif", "JPEG": ".jpg"}
-
-    def __init__(self, directory):
-        self.directory = os.path.abspath(directory) if directory else None
-        self.registry_path = os.path.join(self.directory, "emoticon.json") if self.directory else None
-        self.registry = {}
-        self.dirty = False
-        self._resolved = {}
-        if not self.directory:
-            return
-        os.makedirs(self.directory, exist_ok=True)
-        try:
-            with open(self.registry_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                self.registry = data
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            log.warning("读取 emoticon.json 失败，将按空表情库处理: %s", e)
-
-    @staticmethod
-    def _normalized_url(url):
-        url = str(url or "").strip()
-        if not url:
-            return ""
-        p = urllib.parse.urlsplit(url)
-        if p.scheme not in ("http", "https"):
-            return ""
-        # B站同一资源会混用 http/https，统一成 https 避免重复缓存。
-        scheme = "https" if (p.hostname or "").lower().endswith("hdslb.com") else p.scheme
-        return urllib.parse.urlunsplit((scheme, p.netloc, p.path, p.query, ""))
-
-    @staticmethod
-    def _key(meta, url):
-        unique = str(meta.get("emoticon_unique") or "").strip()
-        return unique or ("url_" + hashlib.sha256(url.encode("utf-8")).hexdigest())
-
-    def _entry_path(self, entry):
-        filename = os.path.basename(str(entry.get("file") or ""))
-        return os.path.join(self.directory, filename) if filename else None
-
-    def _download(self, url):
-        host = (urllib.parse.urlsplit(url).hostname or "").lower()
-        if host != "hdslb.com" and not host.endswith(".hdslb.com"):
-            raise ValueError(f"拒绝非 B站图片域名: {host or url}")
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            declared = int(resp.headers.get("Content-Length") or 0)
-            if declared > self.MAX_BYTES:
-                raise ValueError(f"图片过大: {declared} bytes")
-            data = resp.read(self.MAX_BYTES + 1)
-        if len(data) > self.MAX_BYTES:
-            raise ValueError(f"图片超过 {self.MAX_BYTES} bytes")
-
-        with Image.open(io.BytesIO(data)) as im:
-            image_format = (im.format or "").upper()
-            im.verify()
-        ext = self.FORMAT_EXT.get(image_format)
-        if not ext:
-            raise ValueError(f"不支持的图片格式: {image_format or 'unknown'}")
-
-        filename = hashlib.sha256(url.encode("utf-8")).hexdigest() + ext
-        target = os.path.join(self.directory, filename)
-        temp = target + f".{os.getpid()}.part"
-        try:
-            with open(temp, "wb") as f:
-                f.write(data)
-            os.replace(temp, target)
-        finally:
-            try:
-                if os.path.exists(temp):
-                    os.remove(temp)
-            except OSError:
-                pass
-        return filename, target
-
-    def resolve(self, meta):
-        """返回该条纯 emoticon 的精确本地图片；无法补齐时返回 None。"""
-        if not self.directory or not isinstance(meta, dict):
-            return None
-        url = self._normalized_url(meta.get("url"))
-        key = self._key(meta, url)
-        memo_key = (key, url)
-        if memo_key in self._resolved:
-            return self._resolved[memo_key]
-
-        entry = self.registry.get(key)
-        if isinstance(entry, dict):
-            path = self._entry_path(entry)
-            entry_url = self._normalized_url(entry.get("url"))
-            if path and os.path.isfile(path) and (not url or entry_url == url):
-                self._resolved[memo_key] = path
-                return path
-
-        if not url:
-            log.warning("emoticon 缺少可用 URL 且本地未命中: %s", meta.get("name") or key)
-            self._resolved[memo_key] = None
-            return None
-
-        try:
-            filename, path = self._download(url)
-        except Exception as e:
-            log.warning("emoticon 下载失败 %s: %s", meta.get("name") or key, e)
-            self._resolved[memo_key] = None
-            return None
-
-        self.registry[key] = {
-            "name": meta.get("name"),
-            "url": url,
-            "width": meta.get("width"),
-            "height": meta.get("height"),
-            "is_dynamic": meta.get("is_dynamic", 0),
-            "file": filename,
-        }
-        self.dirty = True
-        self._resolved[memo_key] = path
-        log.info("已补齐 emoticon: %s", meta.get("name") or key)
-        return path
-
-    def save(self):
-        if not self.directory or not self.dirty:
-            return
-        # 写入前重新合并磁盘内容，降低多个渲染任务同时补表情时互相覆盖的概率。
-        merged = {}
-        try:
-            with open(self.registry_path, encoding="utf-8") as f:
-                old = json.load(f)
-            if isinstance(old, dict):
-                merged.update(old)
-        except FileNotFoundError:
-            log.debug("emoticon 注册表尚未创建: %s", self.registry_path)
-        except Exception as error:
-            log.warning("合并 emoticon 注册表失败: %s", error)
-        merged.update(self.registry)
-        temp = self.registry_path + f".{os.getpid()}.tmp"
-        try:
-            with open(temp, "w", encoding="utf-8") as f:
-                json.dump(merged, f, ensure_ascii=False, indent=2)
-            os.replace(temp, self.registry_path)
-        finally:
-            try:
-                if os.path.exists(temp):
-                    os.remove(temp)
-            except OSError as error:
-                log.debug("清理 emoticon 临时文件失败: %s", error)
-
 class SpriteFactory:
     """Build and cache the exact RGBA/YUV sprites used by the old renderer."""
 
-    def __init__(self, text_font: str, emoji_font: str, pack: dict[str, str], font_size: float):
+    def __init__(
+        self, text_font: str, emoji_font: str, pack: dict[str, str], font_size: float
+    ):
         correction = max(1, int(round(font_size * SCALE)))
         self.text_font = ImageFont.truetype(text_font, correction)
-        self.emoji_font, self.emoji_scale = self._load_emoji_font(emoji_font, correction, text_font)
+        self.emoji_font, self.emoji_scale = self._load_emoji_font(
+            emoji_font, correction, text_font
+        )
         self.emoji_ascent, self.emoji_descent = self.emoji_font.getmetrics()
         self.ascent, self.descent = self.text_font.getmetrics()
         self.png_height = int(round(correction * 1.25))
@@ -374,7 +252,9 @@ class SpriteFactory:
         if path not in self.png_cache:
             image = Image.open(path).convert("RGBA")
             width = max(1, int(round(image.width * self.png_height / image.height)))
-            self.png_cache[path] = image.resize((width, self.png_height), Image.Resampling.LANCZOS)
+            self.png_cache[path] = image.resize(
+                (width, self.png_height), Image.Resampling.LANCZOS
+            )
         return self.png_cache[path]
 
     def text_layout(self, text: str, pack: dict[str, str]):
@@ -390,7 +270,9 @@ class SpriteFactory:
                 token_width = prepared.width
             elif kind == "emoji":
                 prepared = None
-                token_width = max(1, int(self.emoji_font.getlength(payload) * self.emoji_scale))
+                token_width = max(
+                    1, int(self.emoji_font.getlength(payload) * self.emoji_scale)
+                )
             else:
                 prepared = None
                 token_width = max(0, int(self.text_font.getlength(payload)))
@@ -399,13 +281,19 @@ class SpriteFactory:
 
         png_top = self.png_center - self.png_height // 2
         png_bottom = self.png_center + self.png_height - self.png_height // 2
-        emoji_ascent = int(round(self.emoji_ascent * self.emoji_scale)) if has_emoji else 0
-        emoji_descent = int(round(self.emoji_descent * self.emoji_scale)) if has_emoji else 0
+        emoji_ascent = (
+            int(round(self.emoji_ascent * self.emoji_scale)) if has_emoji else 0
+        )
+        emoji_descent = (
+            int(round(self.emoji_descent * self.emoji_scale)) if has_emoji else 0
+        )
         content_ascent = max(self.ascent, -png_top if has_png else 0, emoji_ascent)
         content_descent = max(self.descent, png_bottom if has_png else 0, emoji_descent)
         return prepared_tokens, content_width, content_ascent, content_descent
 
-    def measure(self, text: str, outline: float = OUTLINE, event_pack=None) -> tuple[int, int]:
+    def measure(
+        self, text: str, outline: float = OUTLINE, event_pack=None
+    ) -> tuple[int, int]:
         pack = self.pack if event_pack is None else event_pack
         _, width, ascent, descent = self.text_layout(text, pack)
         border = max(0, round(outline))
@@ -423,7 +311,9 @@ class SpriteFactory:
         """Return the cached sprite tuple consumed by the NV12 compositor."""
         outline = max(0, int(round(outline)))
         outline_rgb = tuple(int(value) for value in outline_rgb)
-        pill_key = tuple(pill["color"] + [pill["pad"], pill["border"]]) if pill else None
+        pill_key = (
+            tuple(pill["color"] + [pill["pad"], pill["border"]]) if pill else None
+        )
         active_pack = self.pack if event_pack is None else event_pack
         event_key = None if event_pack is None else tuple(sorted(event_pack.items()))
         key = (text, tuple(rgb), pill_key, event_key, outline, outline_rgb)
@@ -431,7 +321,9 @@ class SpriteFactory:
             self._last_image = self.image_cache[key]
             return self.cache[key]
 
-        prepared_tokens, content_width, content_ascent, content_descent = self.text_layout(text, active_pack)
+        prepared_tokens, content_width, content_ascent, content_descent = (
+            self.text_layout(text, active_pack)
+        )
         if pill:
             padding = pill["pad"]
             pill_height = content_ascent + content_descent + 2 * padding
@@ -439,7 +331,9 @@ class SpriteFactory:
             top_extent = int(round(content_ascent + padding))
             bottom_extent = int(round(content_descent + padding))
             content_x = int(round(pad_x))
-            total_width = max(int(round(content_width + 2 * pad_x)), int(round(pill_height)))
+            total_width = max(
+                int(round(content_width + 2 * pad_x)), int(round(pill_height))
+            )
             anchor_x_offset = 0
         else:
             top_extent = content_ascent + outline
@@ -449,7 +343,11 @@ class SpriteFactory:
             anchor_x_offset = outline
 
         baseline = top_extent
-        sprite = Image.new("RGBA", (max(int(total_width), 1), int(top_extent + bottom_extent)), (0, 0, 0, 0))
+        sprite = Image.new(
+            "RGBA",
+            (max(int(total_width), 1), int(top_extent + bottom_extent)),
+            (0, 0, 0, 0),
+        )
         draw = ImageDraw.Draw(sprite)
         x = content_x
         png_top = self.png_center - self.png_height // 2
@@ -458,13 +356,47 @@ class SpriteFactory:
                 sprite.alpha_composite(prepared, (int(x), baseline + png_top))
             elif kind == "emoji":
                 if self.emoji_scale == 1.0:
-                    draw.text((x, baseline), payload, font=self.emoji_font, embedded_color=True, anchor="ls")
+                    draw.text(
+                        (x, baseline),
+                        payload,
+                        font=self.emoji_font,
+                        embedded_color=True,
+                        anchor="ls",
+                    )
                 else:
                     emoji_width = max(1, int(self.emoji_font.getlength(payload)))
-                    temporary = Image.new("RGBA", (emoji_width, self.emoji_ascent + self.emoji_descent), (0, 0, 0, 0))
-                    ImageDraw.Draw(temporary).text((0, self.emoji_ascent), payload, font=self.emoji_font, embedded_color=True, anchor="ls")
-                    temporary = temporary.resize((token_width, max(1, int((self.emoji_ascent + self.emoji_descent) * self.emoji_scale))), Image.Resampling.LANCZOS)
-                    sprite.alpha_composite(temporary, (int(x), baseline - int(round(self.emoji_ascent * self.emoji_scale))))
+                    temporary = Image.new(
+                        "RGBA",
+                        (emoji_width, self.emoji_ascent + self.emoji_descent),
+                        (0, 0, 0, 0),
+                    )
+                    ImageDraw.Draw(temporary).text(
+                        (0, self.emoji_ascent),
+                        payload,
+                        font=self.emoji_font,
+                        embedded_color=True,
+                        anchor="ls",
+                    )
+                    temporary = temporary.resize(
+                        (
+                            token_width,
+                            max(
+                                1,
+                                int(
+                                    (self.emoji_ascent + self.emoji_descent)
+                                    * self.emoji_scale
+                                ),
+                            ),
+                        ),
+                        Image.Resampling.LANCZOS,
+                    )
+                    sprite.alpha_composite(
+                        temporary,
+                        (
+                            int(x),
+                            baseline - int(round(self.emoji_ascent * self.emoji_scale)),
+                        ),
+                    )
             else:
                 draw.text(
                     (x, baseline),
@@ -481,10 +413,10 @@ class SpriteFactory:
         if pill:
             border = pill["border"]
             color = tuple(pill["color"]) + (255,)
-            border_image = draw_round(sprite.size, sprite.height / 2, "stadium",
-                                      outline=color, border=border)
+            border_image = draw_round(
+                sprite.size, sprite.height / 2, "stadium", outline=color, border=border
+            )
             sprite.alpha_composite(border_image)
-
 
         values = np.asarray(sprite).astype(np.float32)
         red, green, blue = values[:, :, 0], values[:, :, 1], values[:, :, 2]
@@ -529,7 +461,10 @@ class SpriteFactory:
         )
         image = self._last_image.copy()
         if fit_width is not None and image.width > fit_width:
-            target = (max(1, fit_width), max(1, round(image.height * fit_width / image.width)))
+            target = (
+                max(1, fit_width),
+                max(1, round(image.height * fit_width / image.width)),
+            )
             image = image.resize(target, Image.Resampling.LANCZOS)
         return image
 
@@ -537,8 +472,12 @@ class SpriteFactory:
 class PillowText:
     """Measure/wrap with exactly the font, tokens and outline used to draw."""
 
-    def __init__(self, font: str, size: float, outline: float = 0, pack=None, emoji_font=None):
-        self.factory = SpriteFactory(resolve_font(font, True), resolve_emoji_font(emoji_font), pack or {}, size)
+    def __init__(
+        self, font: str, size: float, outline: float = 0, pack=None, emoji_font=None
+    ):
+        self.factory = SpriteFactory(
+            resolve_font(font, True), resolve_emoji_font(emoji_font), pack or {}, size
+        )
         self.outline = outline
 
     def measure(self, text: str) -> int:
@@ -550,16 +489,22 @@ class PillowText:
 
     def units(self, text: str):
         for kind, value in tokenize(text, self.factory.pack):
-            if kind == 'png':
+            if kind == "png":
                 # Keep recognized shortcodes intact while wrapping.
-                name = next(name for name, path in self.factory.pack.items() if path == value)
-                yield '[' + name + ']'
-            elif kind == 'emoji':
-                cluster = ''
+                name = next(
+                    name for name, path in self.factory.pack.items() if path == value
+                )
+                yield "[" + name + "]"
+            elif kind == "emoji":
+                cluster = ""
                 for char in value:
-                    if cluster and ord(char) not in _STRIP and not cluster.endswith('\u200d'):
+                    if (
+                        cluster
+                        and ord(char) not in _STRIP
+                        and not cluster.endswith("\u200d")
+                    ):
                         yield cluster
-                        cluster = ''
+                        cluster = ""
                     cluster += char
                 if cluster:
                     yield cluster
@@ -569,37 +514,39 @@ class PillowText:
     def wrap(self, text: str, budget_px: int) -> list[str]:
         """Wrap words/kinsoku clusters; indivisible overwide groups fit on draw."""
         if budget_px <= 0:
-            raise ValueError('panel text width must be positive')
-        opening = set('（([{【《〈「『〔〖〘〚')
-        closing = set('。，、！？；：」』）》】〕〉〗〙〛）)]},.!?;:')
+            raise ValueError("panel text width must be positive")
+        opening = set("（([{【《〈「『〔〖〘〚")
+        closing = set("。，、！？；：」』）》】〕〉〗〙〛）)]},.!?;:")
 
         def ascii_word(unit):
-            return len(unit) == 1 and unit.isascii() and (unit.isalnum() or unit == '_')
+            return len(unit) == 1 and unit.isascii() and (unit.isalnum() or unit == "_")
 
         def atoms(paragraph):
             units = list(self.units(paragraph))
             tokens = []
-            word = ''
+            word = ""
             for index, unit in enumerate(units):
-                following = units[index + 1] if index + 1 < len(units) else ''
-                connector = unit in ('.', "'", '’', '-', '/') or (unit == ',' and word[-1:].isdigit())
+                following = units[index + 1] if index + 1 < len(units) else ""
+                connector = unit in (".", "'", "’", "-", "/") or (
+                    unit == "," and word[-1:].isdigit()
+                )
                 if ascii_word(unit) or (word and connector and ascii_word(following)):
                     word += unit
                     continue
                 if word:
                     tokens.append(word)
-                    word = ''
+                    word = ""
                 tokens.append(unit)
             if word:
                 tokens.append(word)
             # Only a word wider than the whole line may break internally.
             for token in tokens:
                 if token and ascii_word(token[0]) and self.measure(token) > budget_px:
-                    fragment = ''
+                    fragment = ""
                     for char in token:
                         if fragment and self.measure(fragment + char) > budget_px:
                             yield fragment
-                            fragment = ''
+                            fragment = ""
                         fragment += char
                     if fragment:
                         yield fragment
@@ -607,19 +554,19 @@ class PillowText:
                     yield token
 
         lines = []
-        for paragraph in str(text).split('\n'):
+        for paragraph in str(text).split("\n"):
             paragraph_start = len(lines)
             groups = []
-            prefix = ''
+            prefix = ""
             for atom in atoms(paragraph):
                 if atom in opening or (prefix and atom.isspace()):
                     prefix += atom
                 elif atom in closing:
                     if prefix:
                         groups.append(prefix + atom)
-                        prefix = ''
+                        prefix = ""
                     else:
-                        spaces = ''
+                        spaces = ""
                         while groups and groups[-1].isspace():
                             spaces = groups.pop() + spaces
                         if groups:
@@ -628,19 +575,19 @@ class PillowText:
                             groups.append(spaces + atom)
                 else:
                     groups.append(prefix + atom)
-                    prefix = ''
+                    prefix = ""
             if prefix:
                 if groups:
                     groups[-1] += prefix
                 else:
                     groups.append(prefix)
-            current = ''
+            current = ""
             for group in groups:
                 if group.isspace() and not current:
                     continue
                 if current and self.measure(current + group) > budget_px:
                     lines.append(current.rstrip())
-                    current = ''
+                    current = ""
                 if group.isspace() and not current:
                     continue
                 current += group
@@ -648,12 +595,12 @@ class PillowText:
                 lines.append(current.rstrip())
         return lines
 
-    def truncate(self, text: str, budget_px: int, ellipsis='...') -> str:
+    def truncate(self, text: str, budget_px: int, ellipsis="...") -> str:
         if self.measure(text) <= budget_px:
             return text
         if self.measure(ellipsis) > budget_px:
-            return ''
-        result = ''
+            return ""
+        result = ""
         for unit in self.units(text):
             if self.measure(result + unit + ellipsis) > budget_px:
                 break
@@ -666,7 +613,7 @@ def parse_color(value: str, default: str = "FFFFFF") -> tuple[int, int, int]:
     text = str(value or default).lstrip("#")
     if len(text) != 6:
         text = default
-    return tuple(int(text[index:index + 2], 16) for index in (0, 2, 4))
+    return tuple(int(text[index : index + 2], 16) for index in (0, 2, 4))
 
 
 def materialize_emoticons(visual: dict[str, Any], store: Any) -> None:
@@ -691,7 +638,9 @@ def round_mask(size, radius, shape, supersample=SUPERSAMPLE):
         radius = min(width, height) / 2
     else:
         # A half-panel can have a radius larger than half its own height.
-        radius = min(float(radius), width / 2, height if shape != "round" else height / 2)
+        radius = min(
+            float(radius), width / 2, height if shape != "round" else height / 2
+        )
     scale = supersample
     mask = Image.new("L", (width * scale, height * scale), 0)
     draw = ImageDraw.Draw(mask)
@@ -702,9 +651,9 @@ def round_mask(size, radius, shape, supersample=SUPERSAMPLE):
         return mask
     # Extend the unused half instead of Pillow's radius clamp at h/2.
     if shape == "round_top":
-        draw.rounded_rectangle((0, 0, w - 1, h + 2*r - 1), radius=r, fill=255)
+        draw.rounded_rectangle((0, 0, w - 1, h + 2 * r - 1), radius=r, fill=255)
     elif shape == "round_bottom":
-        draw.rounded_rectangle((0, -2*r, w - 1, h - 1), radius=r, fill=255)
+        draw.rounded_rectangle((0, -2 * r, w - 1, h - 1), radius=r, fill=255)
     else:
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=r, fill=255)
     return mask
@@ -717,18 +666,24 @@ def draw_round(size, radius, shape, fill=(0, 0, 0, 0), outline=(0, 0, 0, 0), bor
     image = Image.new("RGBA", mask.size, fill)
     image.putalpha(ImageChops.multiply(mask, Image.new("L", mask.size, fill[3])))
     if border > 0:
-        padded = Image.new("L", (mask.width + 2*scale, mask.height + 2*scale), 0)
+        padded = Image.new("L", (mask.width + 2 * scale, mask.height + 2 * scale), 0)
         padded.paste(mask, (scale, scale))
-        inner = padded.filter(ImageFilter.MinFilter(2 * max(1, round(border * scale)) + 1))
+        inner = padded.filter(
+            ImageFilter.MinFilter(2 * max(1, round(border * scale)) + 1)
+        )
         inner = inner.crop((scale, scale, scale + mask.width, scale + mask.height))
         edge = ImageChops.subtract(mask, inner)
         layer = Image.new("RGBA", image.size, outline)
-        layer.putalpha(ImageChops.multiply(edge, Image.new("L", image.size, outline[3])))
+        layer.putalpha(
+            ImageChops.multiply(edge, Image.new("L", image.size, outline[3]))
+        )
         image.alpha_composite(layer)
     return image.resize(size, Image.Resampling.LANCZOS)
 
 
-def draw_panel(visual: dict[str, Any], width: int, height: int, pack=None, emoji_font=None) -> Image.Image:
+def draw_panel(
+    visual: dict[str, Any], width: int, height: int, pack=None, emoji_font=None
+) -> Image.Image:
     """Draw a panel from configured nodes; outlines form one outer contour."""
     scale = SUPERSAMPLE
     image = Image.new("RGBA", (width * scale, height * scale))
@@ -744,46 +699,74 @@ def draw_panel(visual: dict[str, Any], width: int, height: int, pack=None, emoji
         fill = parse_color(node["color"]) + (round(255 * node["opacity"]),)
         layer = Image.new("RGBA", mask.size, fill)
         layer.putalpha(ImageChops.multiply(mask, Image.new("L", mask.size, fill[3])))
-        image.alpha_composite(layer, (x*scale, y*scale))
+        image.alpha_composite(layer, (x * scale, y * scale))
         combined = Image.new("L", image.size, 0)
-        combined.paste(mask, (x*scale, y*scale))
+        combined.paste(mask, (x * scale, y * scale))
         panel_mask = ImageChops.lighter(panel_mask, combined)
         border = max(border, node["outline"])
-        outline = parse_color(node["outline_color"]) + (round(255 * node["outline_opacity"]),)
+        outline = parse_color(node["outline_color"]) + (
+            round(255 * node["outline_opacity"]),
+        )
     if border:
         padding = max(1, round(border * scale))
-        expanded = Image.new("L", (image.width + 2*padding, image.height + 2*padding), 0)
+        expanded = Image.new(
+            "L", (image.width + 2 * padding, image.height + 2 * padding), 0
+        )
         expanded.paste(panel_mask, (padding, padding))
-        inner = expanded.filter(ImageFilter.MinFilter(2*padding + 1))
-        inner = inner.crop((padding, padding, padding + image.width, padding + image.height))
+        inner = expanded.filter(ImageFilter.MinFilter(2 * padding + 1))
+        inner = inner.crop(
+            (padding, padding, padding + image.width, padding + image.height)
+        )
         edge = ImageChops.subtract(panel_mask, inner)
         layer = Image.new("RGBA", image.size, outline)
-        layer.putalpha(ImageChops.multiply(edge, Image.new("L", image.size, outline[3])))
+        layer.putalpha(
+            ImageChops.multiply(edge, Image.new("L", image.size, outline[3]))
+        )
         image.alpha_composite(layer)
     image = image.resize((width, height), Image.Resampling.LANCZOS)
     for node in nodes:
         if node["type"] != "text":
             continue
         images = dict(pack or {})
-        for token,asset in (node.get('images') or {}).items():
-            name = token.strip('[]').lower()
-            if asset.get('path'):
-                images[name] = asset['path']
+        for token, asset in (node.get("images") or {}).items():
+            name = token.strip("[]").lower()
+            if asset.get("path"):
+                images[name] = asset["path"]
             else:
-                images.pop(name,None)
-        text = PillowText(node['font'],node['size'],node['outline'],images,emoji_font or visual.get('emoji_font'))
+                images.pop(name, None)
+        text = PillowText(
+            node["font"],
+            node["size"],
+            node["outline"],
+            images,
+            emoji_font or visual.get("emoji_font"),
+        )
         factory = text.factory
         for index, line in enumerate(str(node["text"]).splitlines() or [""]):
-            sprite = factory.get_sprite_image(line, parse_color(node["color"]), event_pack=images or None,
-                                               outline=node["outline"], outline_rgb=parse_color(node["outline_color"]),
-                                               fit_width=node.get('width'))
-            sprite.putalpha(sprite.getchannel("A").point(lambda value: round(value * node["opacity"])))
+            sprite = factory.get_sprite_image(
+                line,
+                parse_color(node["color"]),
+                event_pack=images or None,
+                outline=node["outline"],
+                outline_rgb=parse_color(node["outline_color"]),
+                fit_width=node.get("width"),
+            )
+            sprite.putalpha(
+                sprite.getchannel("A").point(
+                    lambda value: round(value * node["opacity"])
+                )
+            )
             x = int(node["x"]) - (sprite.width if node["anchor"] == "top_right" else 0)
-            image.alpha_composite(sprite, (x, int(node["y"] + index * node.get('line_height',node['size']))))
+            image.alpha_composite(
+                sprite,
+                (x, int(node["y"] + index * node.get("line_height", node["size"]))),
+            )
     return image
 
 
-def rgba_to_yuv(image: Image.Image) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def rgba_to_yuv(
+    image: Image.Image,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Convert RGBA pixels to BT.601 NV12-compatible planes."""
     values = np.asarray(image, dtype=np.float32)
     red = values[:, :, 0]
@@ -793,35 +776,71 @@ def rgba_to_yuv(image: Image.Image) -> tuple[np.ndarray, np.ndarray, np.ndarray,
     y = np.clip(16 + 0.1826 * red + 0.6142 * green + 0.0620 * blue, 0, 255)
     u = np.clip(128 - 0.1006 * red - 0.3386 * green + 0.4392 * blue, 0, 255)
     v = np.clip(128 + 0.4392 * red - 0.3989 * green - 0.0403 * blue, 0, 255)
-    return tuple(np.rint(plane).astype(np.uint8).reshape(-1) for plane in (y, u, v)) + (np.rint(alpha).astype(np.uint8).reshape(-1),)
-
-
+    return tuple(np.rint(plane).astype(np.uint8).reshape(-1) for plane in (y, u, v)) + (
+        np.rint(alpha).astype(np.uint8).reshape(-1),
+    )
 
 
 def detect_platform(source_path):
-    """从 ASS 头(Title 里的直播URL)判断平台,用于选 emoji_pack 子目录"""
+    """Prefer structured metadata; retain ASS/legacy URL detection as fallback."""
     try:
-        head = open(source_path, encoding="utf-8").read(2000)
-        if '"platform":"bilibili"' in head or '"platform": "bilibili"' in head: return "bilibili"
-        if '"platform":"douyin"' in head or '"platform": "douyin"' in head: return "douyin"
-        if '"platform":"douyu"' in head or '"platform": "douyu"' in head: return "douyu"
-        if '"platform":"huya"' in head or '"platform": "huya"' in head: return "huya"
-        if "bilibili.com" in head: return "bilibili"
-        if "douyin.com" in head: return "douyin"
-        if "douyu.com" in head: return "douyu"
-        if "huya.com" in head: return "huya"
-    except Exception as error:
+        path = pathlib.Path(source_path)
+        with path.open(encoding="utf-8-sig") as stream:
+            metadata = {}
+            try:
+                if path.suffix.lower() == ".json":
+                    metadata = json.load(stream)
+                elif path.suffix.lower() == ".jsonl":
+                    metadata = json.loads(next(line for line in stream if line.strip()))
+            except (ValueError, StopIteration) as error:
+                log.debug("平台头不可解析，使用旧格式匹配 (%s): %s", path, error)
+            if (
+                isinstance(metadata, dict)
+                and isinstance(metadata.get("platform"), str)
+                and metadata["platform"].strip()
+            ):
+                return metadata["platform"].strip().lower()
+            stream.seek(0)
+            head = stream.read(2000)
+        if '"platform":"bilibili"' in head or '"platform": "bilibili"' in head:
+            return "bilibili"
+        if '"platform":"douyin"' in head or '"platform": "douyin"' in head:
+            return "douyin"
+        if '"platform":"douyu"' in head or '"platform": "douyu"' in head:
+            return "douyu"
+        if '"platform":"huya"' in head or '"platform": "huya"' in head:
+            return "huya"
+        if "bilibili.com" in head:
+            return "bilibili"
+        if "douyin.com" in head:
+            return "douyin"
+        if "douyu.com" in head:
+            return "douyu"
+        if "huya.com" in head:
+            return "huya"
+    except (OSError, ValueError, TypeError, StopIteration) as error:
         log.debug("读取平台信息失败 (%s): %s", source_path, error)
     return ""
 
 
-def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=None, pack_dir=None, emoji_font=None):
+def build_atlas(
+    plan_path,
+    platform="bilibili",
+    emoticon_dir=None,
+    stop_check=None,
+    pack_dir=None,
+    emoji_font=None,
+):
     """Build cached GPU planes from a RenderPlan in the task directory."""
-    plan = plan_path if isinstance(plan_path, dict) else json.loads(pathlib.Path(plan_path).read_text(encoding="utf-8"))
+    plan = (
+        plan_path
+        if isinstance(plan_path, dict)
+        else json.loads(pathlib.Path(plan_path).read_text(encoding="utf-8"))
+    )
     emoticon_dir = emoticon_dir or pathlib.Path("emoji_pack") / platform / "emoticon"
     emoticon_store = EmoticonStore(str(emoticon_dir))
     emoji_name = resolve_emoji_font(emoji_font)
-    platform_pack = load_pack(pack_dir or str(pathlib.Path('emoji_pack')/platform))
+    platform_pack = load_pack(pack_dir or str(pathlib.Path("emoji_pack") / platform))
     factories: dict[tuple[str, str, float], SpriteFactory] = {}
     atlas: list[list[int]] = [[], [], [], []]
     metadata = []
@@ -840,7 +859,7 @@ def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=No
             if asset.get("path"):
                 image_pack[key] = asset["path"]
         if visual.get("type") == "panel":
-            image = draw_panel(visual, width, height,platform_pack,emoji_font)
+            image = draw_panel(visual, width, height, platform_pack, emoji_font)
             arrays = rgba_to_yuv(image)
         else:
             rgb = parse_color(style["color"])
@@ -852,44 +871,65 @@ def build_atlas(plan_path, platform="bilibili", emoticon_dir=None, stop_check=No
             font_name = resolve_font(family, bold)
             factory_key = (font_name, emoji_name, size)
             if factory_key not in factories:
-                factories[factory_key] = SpriteFactory(font_name, emoji_name, platform_pack, size)
+                factories[factory_key] = SpriteFactory(
+                    font_name, emoji_name, platform_pack, size
+                )
             sprite = factories[factory_key].get_sprite(
                 visual.get("text", ""),
                 rgb,
                 pill=(
                     {
-                        "color": list(parse_color(visual["pill"].get("color", "#FFC0CB"))),
-                        "pad": int(visual["pill"].get("padding", visual["pill"].get("pad", 6))),
+                        "color": list(
+                            parse_color(visual["pill"].get("color", "#FFC0CB"))
+                        ),
+                        "pad": int(
+                            visual["pill"].get("padding", visual["pill"].get("pad", 6))
+                        ),
                         "border": int(visual["pill"].get("border", 1)),
                     }
                     if visual.get("pill")
                     else None
                 ),
-                event_pack=image_pack if visual.get('images') else None,
+                event_pack=image_pack if visual.get("images") else None,
                 outline=style["outline"],
                 outline_rgb=parse_color(style["outline_color"]),
             )
             opacity = float(style["opacity"])
-            arrays = (sprite[0], sprite[1], sprite[2], np.rint(sprite[3] * opacity * 255).astype(np.uint8))
+            arrays = (
+                sprite[0],
+                sprite[1],
+                sprite[2],
+                np.rint(sprite[3] * opacity * 255).astype(np.uint8),
+            )
             width = int(sprite[4])
             height = int(sprite[5])
-            arrays = tuple(np.rint(array).astype(np.uint8).reshape(-1) for array in arrays)
+            arrays = tuple(
+                np.rint(array).astype(np.uint8).reshape(-1) for array in arrays
+            )
         offset = len(atlas[0])
         for destination, source in zip(atlas, arrays):
             destination.extend(source.tolist())
         path = event.get("path") or []
-        metadata.append({
-            "id": event.get("id"),
-            'track':event_track(event),
-            "offset": offset,
-            "width": width,
-            "height": height,
-            "start": float(path[0][0]) if path else 0.0,
-            "end": float(path[-1][0]) if path else 0.0,
-            "path": path,
-            "motion": visual.get("motion") or {},
-        })
+        metadata.append(
+            {
+                "id": event.get("id"),
+                "track": event_track(event),
+                "offset": offset,
+                "width": width,
+                "height": height,
+                "start": float(path[0][0]) if path else 0.0,
+                "end": float(path[-1][0]) if path else 0.0,
+                "path": path,
+                "motion": visual.get("motion") or {},
+            }
+        )
     emoticon_store.save()
-    return {"duration": plan["duration"], "events": metadata,
-            **{key: np.asarray(values, dtype=np.uint8) for key, values in zip(("y", "u", "v", "a"), atlas)},
-            "atlas_bytes": sum(len(values) for values in atlas)}
+    return {
+        "duration": plan["duration"],
+        "events": metadata,
+        **{
+            key: np.asarray(values, dtype=np.uint8)
+            for key, values in zip(("y", "u", "v", "a"), atlas)
+        },
+        "atlas_bytes": sum(len(values) for values in atlas),
+    }

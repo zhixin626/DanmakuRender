@@ -24,7 +24,12 @@ def test_schedule_rejects_invalid_fps():
 
 def test_parse_bitrate_and_fixed_panel_shape():
     assert parse_bitrate("4M") == 4_000_000
-    assert PanelNode.from_mapping({"type": "rect", "x": 0, "y": 0, "width": 10, "height": 10}).width == 10
+    assert (
+        PanelNode.from_mapping(
+            {"type": "rect", "x": 0, "y": 0, "width": 10, "height": 10}
+        ).width
+        == 10
+    )
 
 
 def test_vfr_schedule_uses_latest_source_frame_and_tail():
@@ -36,8 +41,26 @@ def test_vfr_schedule_uses_latest_source_frame_and_tail():
 
 def test_scanline_enter_exit_and_source_order():
     events = [
-        RenderEvent("b", 0, 2, 2, 0.5, 2.0, ((0.5, 5, 6), (2.0, 5, 6)), {"enter_duration": 0.5, "exit_duration": 0.5}),
-        RenderEvent("a", 0, 2, 2, 0.0, 1.0, ((0.0, 1, 2), (1.0, 3, 4)), {"enter_duration": 0.0, "exit_duration": 0.0}),
+        RenderEvent(
+            "b",
+            0,
+            2,
+            2,
+            0.5,
+            2.0,
+            ((0.5, 5, 6), (2.0, 5, 6)),
+            {"enter_duration": 0.5, "exit_duration": 0.5},
+        ),
+        RenderEvent(
+            "a",
+            0,
+            2,
+            2,
+            0.0,
+            1.0,
+            ((0.0, 1, 2), (1.0, 3, 4)),
+            {"enter_duration": 0.0, "exit_duration": 0.0},
+        ),
     ]
     scanner = EventScanner(events)
     visible = scanner.visible(0.75)
@@ -59,6 +82,7 @@ def test_frame_rate_and_encoder_argument_name_guard():
     assert resolve_output_fps(25.0, 50.0) == 50.0
     from unittest.mock import Mock
     from DMR.Render.gpu_render import create_encoder
+
     nvc = Mock()
-    create_encoder(nvc,1920,1080,60,'hevc_nvenc',{})
-    assert nvc.CreateEncoder.call_args.kwargs == {'codec':'hevc','fps':'60'}
+    create_encoder(nvc, 1920, 1080, 60, "hevc_nvenc", {})
+    assert nvc.CreateEncoder.call_args.kwargs == {"codec": "hevc", "fps": "60"}

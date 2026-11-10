@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 
-
 LANDSCAPE_1080P = (1920, 1080)
 PORTRAIT_1080P = (1080, 1920)
 RESCALE_ORIENTATIONS = {"auto", "adaptive", "portrait", "landscape"}

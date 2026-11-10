@@ -1,11 +1,14 @@
 """Invoke the production GPU renderer with the active environment."""
+
 import argparse
 import json
 import logging
 import pathlib
 import sys
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from DMR.Render.gpu_render import load_cuda_modules, render_one
+
 
 def configure_cuda_dlls():
     load_cuda_modules()
@@ -36,10 +39,24 @@ def main() -> None:
         args.video,
         str(args.output),
         vencoder=args.vencoder,
-        vencoder_args=json.loads(args.venc_args) + [value for flag, item in (
-            ("-b:v", args.bitrate), ("-maxrate", args.maxbitrate), ("-bufsize", args.vbvbufsize),
-            ("-rc", args.rc), ("-preset", args.preset)) if item is not None for value in (flag, str(item))],
-        canvas_resolution=tuple(map(int, args.canvas_resolution.split("x"))) if args.canvas_resolution else None,
+        vencoder_args=json.loads(args.venc_args)
+        + [
+            value
+            for flag, item in (
+                ("-b:v", args.bitrate),
+                ("-maxrate", args.maxbitrate),
+                ("-bufsize", args.vbvbufsize),
+                ("-rc", args.rc),
+                ("-preset", args.preset),
+            )
+            if item is not None
+            for value in (flag, str(item))
+        ],
+        canvas_resolution=(
+            tuple(map(int, args.canvas_resolution.split("x")))
+            if args.canvas_resolution
+            else None
+        ),
         rescale_to_1080p=args.rescale_to_1080p,
         fps=args.fps,
         min_fps=args.min_fps,

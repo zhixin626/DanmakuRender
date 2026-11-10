@@ -21,21 +21,17 @@
     - --resize: 输出缩放,"宽x高" 或缩放系数(如 0.5);合成在渲染画布完成,仅最终编码缩放。
 """
 import os, re, sys, json, time, shutil, logging, subprocess, threading, queue, atexit, collections
-import hashlib
-import io
-import urllib.parse
-import urllib.request
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 try:
+    from ..EmojiPack.common import EmoticonStore
     from .plan_ass import render_plan_to_ass
     from .resolution import resolve_render_canvas
     from .resolution import resolve_output_fps
     from ..utils.ffprobe import source_frame_rate
     from .sprites import (
         DEFAULT_EMOJI_FONT,
-        EmoticonStore,
         EMOTICON_PREFIX,
         OUT,
         SCALE,
@@ -49,14 +45,15 @@ try:
         resolve_font,
     )
 except ImportError:
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+    sys.path.insert(0, os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..")))
+    from DMR.EmojiPack.common import EmoticonStore
     from plan_ass import render_plan_to_ass
     from resolution import resolve_render_canvas
     from resolution import resolve_output_fps
     from DMR.utils.ffprobe import source_frame_rate
     from sprites import (
         DEFAULT_EMOJI_FONT,
-        EmoticonStore,
         EMOTICON_PREFIX,
         OUT,
         SCALE,
@@ -130,6 +127,8 @@ def rmtree_retry(path, tries=5, wait=1.0):
             time.sleep(wait)
 
 # ============================ 单段渲染（worker） ============================
+
+
 def ass_time(value):
     """Convert an ASS timestamp to seconds."""
     hours, minutes, rest = value.split(":")
@@ -162,7 +161,8 @@ def render_segment(cfg):
     segdir = os.path.dirname(os.path.abspath(out_ts)) or "."
 
     fs_ass = cfg["fs"]
-    sprite_factory = SpriteFactory(cfg["textfont"], cfg["emojifont"], pack, fs_ass)
+    sprite_factory = SpriteFactory(
+        cfg["textfont"], cfg["emojifont"], pack, fs_ass)
     for event in emoji_events:
         event["_spr"] = sprite_factory.get_sprite(
             event["text"],
@@ -360,7 +360,8 @@ def render_segment(cfg):
                 ev for ev in emoji_events if ev["s"] <= t <= ev["e"]
             ]
             stats["active_event_samples"] += len(active)
-            stats["max_active_events"] = max(stats["max_active_events"], len(active))
+            stats["max_active_events"] = max(
+                stats["max_active_events"], len(active))
             if active:
                 arr = np.frombuffer(buf, np.uint8).copy()
                 Y = arr[:W * H].reshape(H, W)
@@ -471,7 +472,8 @@ def audio_codec(path):
     """Return the first audio stream codec, or an empty string on failure."""
     try:
         result = subprocess.run(
-            [FFPROBE, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
+            [FFPROBE, "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
             capture_output=True,
             text=True,
         )
@@ -973,7 +975,8 @@ def main():
             FFMPEG, "-v", "error", "-y", "-nostdin",
             "-fflags", "+discardcorrupt+genpts",
             "-i", flv, "-map", "0:a:0", "-vn",
-            "-af", "aresample=async=1000:first_pts=0" + (f",apad=whole_dur={dur:.6f}" if dur > 0 else ""),
+            "-af", "aresample=async=1000:first_pts=0" +
+            (f",apad=whole_dur={dur:.6f}" if dur > 0 else ""),
             "-c:a", audio_encoder, *audio_encode_args,
             "-ar", "48000", fixed_audio,
         ]

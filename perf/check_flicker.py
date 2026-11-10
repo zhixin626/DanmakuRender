@@ -9,28 +9,45 @@ from pathlib import Path
 
 import numpy as np
 import sys
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from perf.overlay_signal import OverlaySignal, find_dropouts
 from DMR.Render.sprites import build_atlas
 from DMR.utils import FFprobe
 
 
-def frame_stream(path: Path, fps: float, frames: int, start: float = 0, size=(270,480), indices=None):
+def frame_stream(
+    path: Path, fps: float, frames: int, start: float = 0, size=(270, 480), indices=None
+):
     """Decode a bounded stream once instead of spawning ffmpeg per frame."""
     width, height = size
     # Match the renderer's common audio/video origin: source video can start
     # after audio, so explicitly retain its first frame back to grid time zero.
-    filters = [f'fps={fps}:start_time=0',f'trim=start={start}','setpts=PTS-STARTPTS']
+    filters = [f"fps={fps}:start_time=0", f"trim=start={start}", "setpts=PTS-STARTPTS"]
     if indices is not None:
-        expression = '+'.join(f'eq(n,{index})' for index in indices)
+        expression = "+".join(f"eq(n,{index})" for index in indices)
         filters.append(f"select='{expression}'")
-    filters += [f'scale={width}:{height}:force_original_aspect_ratio=decrease',
-                f'pad={width}:{height}:(ow-iw)/2:(oh-ih)/2','format=rgb24']
+    filters += [
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+        "format=rgb24",
+    ]
     process = subprocess.Popen(
         [
-            "ffmpeg", "-v", "error", "-i", str(path), "-frames:v", str(frames),
-            "-vf", ','.join(filters), '-fps_mode','passthrough',
-            "-f", "rawvideo", "-",
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-frames:v",
+            str(frames),
+            "-vf",
+            ",".join(filters),
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-",
         ],
         stdout=subprocess.PIPE,
     )
@@ -41,7 +58,11 @@ def frame_stream(path: Path, fps: float, frames: int, start: float = 0, size=(27
             data = process.stdout.read(size)
             if len(data) != size:
                 break
-            last = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3).astype(np.float32)
+            last = (
+                np.frombuffer(data, dtype=np.uint8)
+                .reshape(height, width, 3)
+                .astype(np.float32)
+            )
             yield last
     finally:
         if process.poll() is None:
@@ -60,66 +81,93 @@ def main() -> None:
     parser.add_argument("--step", type=float, default=0.2)
     parser.add_argument("--fps", type=float)
     parser.add_argument("--frames", type=int)
-    parser.add_argument('--canvas')
-    parser.add_argument('--report', type=Path)
+    parser.add_argument("--canvas")
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     measurements = []
     step = 1.0 / args.fps if args.fps else args.step
     frame_limit = args.frames or int(round((args.end - args.start) / step)) + 1
-    if step<=0 or frame_limit<=0:
-        parser.error('检查帧率、步长和帧数必须为正数')
-    canvas = tuple(int(v) for v in args.canvas.split('x')) if args.canvas else FFprobe.get_resolution(str(args.gpu))
-    size = (round(canvas[0]/4),round(canvas[1]/4))
-    detector = OverlaySignal(build_atlas(plan),canvas,size)
-    source_frames = frame_stream(args.source, args.fps or (1.0 / step), frame_limit,args.start,size)
-    gpu_frames = frame_stream(args.gpu, args.fps or (1.0 / step), frame_limit,args.start,size)
+    if step <= 0 or frame_limit <= 0:
+        parser.error("检查帧率、步长和帧数必须为正数")
+    canvas = (
+        tuple(int(v) for v in args.canvas.split("x"))
+        if args.canvas
+        else FFprobe.get_resolution(str(args.gpu))
+    )
+    size = (round(canvas[0] / 4), round(canvas[1] / 4))
+    detector = OverlaySignal(build_atlas(plan), canvas, size)
+    source_frames = frame_stream(
+        args.source, args.fps or (1.0 / step), frame_limit, args.start, size
+    )
+    gpu_frames = frame_stream(
+        args.gpu, args.fps or (1.0 / step), frame_limit, args.start, size
+    )
     total_frames = 0
     try:
         for source, gpu in zip(source_frames, gpu_frames):
             current = args.start + total_frames * step
             total_frames += 1
-            measurements.append({'frame':total_frames-1,'seconds':round(current,4),
-                                 'signals':detector.measure(source,gpu,current)})
+            measurements.append(
+                {
+                    "frame": total_frames - 1,
+                    "seconds": round(current, 4),
+                    "signals": detector.measure(source, gpu, current),
+                }
+            )
     finally:
         source_frames.close()
         gpu_frames.close()
     suspicious = find_dropouts(measurements)
-    candidates = len({item['frame'] for item in suspicious})
+    candidates = len({item["frame"] for item in suspicious})
     if suspicious:
         # Quarter-size text edges can alias on a pale background. Verify only
         # candidates at native resolution, retaining the same threshold; never
         # lower the threshold just to make a rendered video pass.
-        indices = sorted({item['frame'] for item in suspicious})
-        selected = {(item['frame'],item['event']) for item in suspicious}
-        native = OverlaySignal(build_atlas(plan),canvas,canvas)
-        source_native = frame_stream(args.source,1/step,len(indices),args.start,canvas,indices)
-        gpu_native = frame_stream(args.gpu,1/step,len(indices),args.start,canvas,indices)
+        indices = sorted({item["frame"] for item in suspicious})
+        selected = {(item["frame"], item["event"]) for item in suspicious}
+        native = OverlaySignal(build_atlas(plan), canvas, canvas)
+        source_native = frame_stream(
+            args.source, 1 / step, len(indices), args.start, canvas, indices
+        )
+        gpu_native = frame_stream(
+            args.gpu, 1 / step, len(indices), args.start, canvas, indices
+        )
         verified = []
         native_count = 0
         try:
-            for index,(source,gpu) in zip(indices,zip(source_native,gpu_native)):
-                seconds = args.start+index*step
+            for index, (source, gpu) in zip(indices, zip(source_native, gpu_native)):
+                seconds = args.start + index * step
                 native_count += 1
-                for item in native.measure(source,gpu,seconds):
-                    if (index,item['event']) in selected and item['score']<.2:
-                        verified.append({**item,'frame':index,'seconds':round(seconds,4)})
+                for item in native.measure(source, gpu, seconds):
+                    if (index, item["event"]) in selected and item["score"] < 0.2:
+                        verified.append(
+                            {**item, "frame": index, "seconds": round(seconds, 4)}
+                        )
         finally:
             source_native.close()
             gpu_native.close()
-        if native_count!=len(indices):
-            raise RuntimeError('原分辨率候选帧检查不完整')
+        if native_count != len(indices):
+            raise RuntimeError("原分辨率候选帧检查不完整")
         suspicious = verified
-    report = {'total_frames':total_frames,'requested_frames':frame_limit,'complete':total_frames==frame_limit,
-              'checked':sum(bool(item['signals']) for item in measurements),
-              'candidate_frames':candidates,
-              'flicker_frames':len({item['frame'] for item in suspicious}),
-              'missing_regions':len(suspicious),'examples':suspicious[:20]}
+    report = {
+        "total_frames": total_frames,
+        "requested_frames": frame_limit,
+        "complete": total_frames == frame_limit,
+        "checked": sum(bool(item["signals"]) for item in measurements),
+        "candidate_frames": candidates,
+        "flicker_frames": len({item["frame"] for item in suspicious}),
+        "missing_regions": len(suspicious),
+        "examples": suspicious[:20],
+    }
     if args.report:
-        args.report.write_text(json.dumps({**report,'measurements':measurements},ensure_ascii=False),encoding='utf8')
-    print(json.dumps(report,ensure_ascii=False))
-    raise SystemExit(2 if total_frames!=frame_limit else (1 if suspicious else 0))
+        args.report.write_text(
+            json.dumps({**report, "measurements": measurements}, ensure_ascii=False),
+            encoding="utf8",
+        )
+    print(json.dumps(report, ensure_ascii=False))
+    raise SystemExit(2 if total_frames != frame_limit else (1 if suspicious else 0))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

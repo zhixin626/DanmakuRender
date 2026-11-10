@@ -191,8 +191,10 @@ class DmRender(BaseRender):
                 pass
 
         if not status:
-            return False, info if isinstance(info,Exception) else RuntimeError(str(info))
-        return True, self.output_info(video,output,canvas_resolution,start_time)
+            return False, (
+                info if isinstance(info, Exception) else RuntimeError(str(info))
+            )
+        return True, self.output_info(video, output, canvas_resolution, start_time)
 
     def stop(self):
         self._stopped = True

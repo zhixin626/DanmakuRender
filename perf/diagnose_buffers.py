@@ -1,4 +1,5 @@
 """Inspect the installed NVENC binding's packet timestamps and input lifetime."""
+
 import sys
 from pathlib import Path
 
@@ -8,8 +9,8 @@ from DMR.Render.gpu_render import load_cuda_modules, NV12Buffer
 
 def main():
     cp, nvc = load_cuda_modules()
-    encoder = nvc.CreateEncoder(1080, 1920, 'NV12', False, codec='hevc', fps='50')
-    print('Bframes', encoder.GetNumBFrames())
+    encoder = nvc.CreateEncoder(1080, 1920, "NV12", False, codec="hevc", fps="50")
+    print("Bframes", encoder.GetNumBFrames())
     buffers = [NV12Buffer(cp, 1080, 1920) for _ in range(50)]
     for index, buffer in enumerate(buffers):
         buffer.y.fill(16 + index)
@@ -19,9 +20,9 @@ def main():
         params.inputTimeStamp = index
         params.frameIdx = index
         packets = encoder.Encode(buffer, params)
-        print(index, [(item['timestamp'], item['picture_type']) for item in packets])
-    print('drain', [item['timestamp'] for item in encoder.EndEncode()])
+        print(index, [(item["timestamp"], item["picture_type"]) for item in packets])
+    print("drain", [item["timestamp"] for item in encoder.EndEncode()])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
