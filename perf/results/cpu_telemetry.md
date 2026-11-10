@@ -33,3 +33,16 @@
 - 已检查 `Tasks文件/峰哥` 的全部 FLV：没有除 8 月 18 日场次外、时长达到 40 分钟的其它录播。现有 7 月 30 日文件最长约 7.4 分钟，严格跳过前后 10 分钟后无法形成 3–5 分钟窗口，因此“换成 ≥40 分钟其它长录播”阻塞，未伪造素材；当前中段素材保留并已在 `00_素材与旧版/说明.txt` 标明限制。
 
 原始遥测 JSON：`perf/tmp/cpu_telemetry/telemetry.json`（本地临时目录，不提交）。
+
+## B 口径修正
+
+G 的 ffmpeg 不是渲染主循环，而是 `gpu_render.py:mux_with_audio` 在 GPU 编码完成后把 HEVC elementary stream 与源音频做 `-c:v copy -c:a copy` 封装。原始遥测中的“ffmpeg 平均 1.217 核”只在该进程存在的采样点上计算，因此不能和整个 G 运行的 0.941 核直接比较。
+
+单独对同体量 G 输出做 copy 封装复测：ffmpeg 运行 8.00s，平均 1.257 核，峰值 1.312 核，约 10.06 核·秒。后续总表以核·秒为跨进程比较口径；初次长片运行没有保存 ffmpeg 活跃时长，记为“未采集”，不把 active-sample 平均值冒充全程平均。
+
+## A 长片码率排查与修复
+
+- `CreateEncoder` 日志现在打印 codec、配置码率、实际传入的 bitrate/maxbitrate/vbvbufsize、rc、preset、framerate 和分辨率。60fps 长片日志显示配置 4,000,000/6,000,000/8,000,000，但直接传入时输出约 8.23Mbps。
+- `G_final_2h.mp4` 按分钟统计的视频码率曲线从第 0 分钟到第 119 分钟大多在 8.0–8.9Mbps，属于全程偏高，不是局部突增；曲线明细保存在 `perf/tmp/cpu_telemetry/G_final_2h_bitrate_curve.txt`。
+- 根因是当前 NVENC 驱动的 rate-control 目标随输出帧率放大：25fps 短片约 3.48Mbps，60fps 长片约 8.23Mbps，比例接近 60/25。修复为显式的 `reference_fps` 配置归一化：目标值仍来自配置，只有当输出帧率高于参考帧率时按 `reference_fps/output_fps` 转换传给该驱动；默认参考帧率 25 写入 `default.yml`，没有素材/驱动校准倍数。
+- 用同一 2 小时素材前 10 分钟复测：`G_final_10min_retest2.mp4`，60fps、36000 帧、599.983s，实际视频码率 3,596,879 bit/s，低于 4M 配置的 110% 上限 4.4M，A 阶段复测通过。

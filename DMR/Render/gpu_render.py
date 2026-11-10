@@ -5,11 +5,34 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import logging
 import pathlib
 import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any, Iterator
+
+
+logger = logging.getLogger(__name__)
+
+
+def schedule_frame_times(source_pts: list[float], output_fps: float) -> list[tuple[int, float]]:
+    """Return source-index/output-time pairs for an integer-rate CFR schedule."""
+    if output_fps <= 0:
+        raise ValueError("output_fps must be positive")
+    if not source_pts:
+        return []
+    result: list[tuple[int, float]] = []
+    for index, pts in enumerate(source_pts):
+        if index + 1 < len(source_pts):
+            next_pts = source_pts[index + 1]
+        elif index:
+            next_pts = pts + (pts - source_pts[index - 1])
+        else:
+            next_pts = pts + 1.0 / output_fps
+        repeats = max(1, int(round((next_pts - pts) * output_fps)))
+        result.extend((index, (len(result) + offset) / output_fps) for offset in range(repeats))
+    return result
 
 
 PRESSURE_KERNEL = r"""
@@ -184,6 +207,15 @@ def parse_bitrate(value: Any) -> int:
         multiplier = 1_000_000
         text = text[:-1]
     return int(float(text) * multiplier)
+
+
+def normalize_nvenc_rate_control(value: Any, frame_rate: float, reference_fps: Any) -> int:
+    """Normalize NVENC's frame-rate-dependent rate-control behavior."""
+    target = parse_bitrate(value)
+    reference = float(reference_fps)
+    if reference <= 0 or frame_rate <= reference:
+        return target
+    return max(1, int(round(target * reference / frame_rate)))
 
 
 def decode_frames(video: pathlib.Path, nvc: Any, gpu_id: int) -> Iterator[tuple[Any, float]]:
@@ -433,12 +465,15 @@ def encode_to_file(
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
     rc_args = dict(config.gpu_rc_args)
-    missing = [key for key in ("rc", "maxbitrate", "vbvbufsize") if rc_args.get(key) in (None, "")]
+    missing = [key for key in ("rc", "maxbitrate", "vbvbufsize", "reference_fps") if rc_args.get(key) in (None, "")]
     if missing:
         raise ValueError(
             "gpu_rc_args 缺少编码参数: " + ", ".join(missing)
             + "；请在 render_args.overlay.gpu_rc_args 或测试命令中显式配置"
         )
+    effective_bitrate = normalize_nvenc_rate_control(config.bitrate, frame_rate, rc_args["reference_fps"])
+    effective_maxbitrate = normalize_nvenc_rate_control(rc_args["maxbitrate"], frame_rate, rc_args["reference_fps"])
+    effective_vbvbufsize = normalize_nvenc_rate_control(rc_args["vbvbufsize"], frame_rate, rc_args["reference_fps"])
     encoder = nvc.CreateEncoder(
         width,
         height,
@@ -446,11 +481,31 @@ def encode_to_file(
         False,
         codec=encoder_config(config.video_encoder),
         rc=str(rc_args["rc"]),
-        bitrate=str(config.bitrate),
-        maxbitrate=str(parse_bitrate(rc_args["maxbitrate"])),
-        vbvbufsize=str(parse_bitrate(rc_args["vbvbufsize"])),
+        bitrate=str(effective_bitrate),
+        maxbitrate=str(effective_maxbitrate),
+        vbvbufsize=str(effective_vbvbufsize),
         framerate=frame_rate,
         preset=config.preset,
+    )
+    logger.info(
+        "CreateEncoder args: %s",
+        json.dumps(
+            {
+                "codec": encoder_config(config.video_encoder),
+                "rc": str(rc_args["rc"]),
+                "configured_bitrate": str(config.bitrate),
+                "bitrate": str(effective_bitrate),
+                "maxbitrate": str(effective_maxbitrate),
+                "vbvbufsize": str(effective_vbvbufsize),
+                "reference_fps": float(rc_args["reference_fps"]),
+                "preset": config.preset,
+                "framerate": frame_rate,
+                "width": width,
+                "height": height,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
     )
     buffer = NV12Buffer(cupy, width, height)
     plan_assets = load_plan_assets(cupy, config.sprite_data) if config.sprite_data else None
@@ -623,6 +678,7 @@ def render_one(video: Any, output: str, progress_cb: Any = None, **kwargs: Any) 
 
 def main() -> None:
     """Run the standalone prototype launcher used by perf tests."""
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--video", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
@@ -631,6 +687,7 @@ def main() -> None:
     parser.add_argument("--rc", default=None)
     parser.add_argument("--maxbitrate", default=None)
     parser.add_argument("--vbvbufsize", default=None)
+    parser.add_argument("--reference-fps", type=float, default=25.0)
     parser.add_argument("--preset", default="P4")
     parser.add_argument("--fps", type=float)
     parser.add_argument("--min-fps", type=float)
@@ -653,7 +710,7 @@ def main() -> None:
         gpu_id=args.gpu_id,
         render_plan=args.render_plan,
         sprite_data=args.sprite_data,
-        gpu_rc_args={"rc": args.rc, "maxbitrate": args.maxbitrate, "vbvbufsize": args.vbvbufsize},
+        gpu_rc_args={"rc": args.rc, "maxbitrate": args.maxbitrate, "vbvbufsize": args.vbvbufsize, "reference_fps": args.reference_fps},
     )
     print(json.dumps(result, ensure_ascii=False))
 

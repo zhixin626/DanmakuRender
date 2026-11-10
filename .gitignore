@@ -43,3 +43,4 @@ perf/outputs/
 # Local performance fixtures copied from the user machine; never commit large binary packs/configs.
 /emoji_pack/
 /perf/configs_snapshot/
+/**/__pycache__/
