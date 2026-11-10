@@ -294,6 +294,9 @@ DMR 在后台录制，会持续占用 CPU、磁盘和网络，正在渲染时还
 
 ## 阶段 1d：验收遗留问题（Claude 审查昨晚结果后追加，按顺序做，每项 ≤ 2 小时）
 
+0. **用户验收发现的两个问题（比下面各项都优先）**：
+   - **0a. 弹幕层闪烁**（演示视频 03 和 04 的 GPU 一侧，弹幕会突然消失一帧再出现）：`encode_to_file` 里 CuPy 的拷贝和 kernel 是**异步**执行的，`encoder.Encode(buffer)` 前没有同步，而 PyNvVideoCodec 读取输入时可能用的是另一个 CUDA stream，所以偶尔会在叠加完成前就把帧读走，编进去的就是没有弹幕的画面。**在每次 `Encode` 之前调用 `cupy.cuda.Stream.null.synchronize()`**（或者 `Device().synchronize()`），这一步开销极小。如果仍然闪烁，再检查编码器是否持有 `buffer` 的引用异步读取：改用 3 到 4 个 `NV12Buffer` 轮流使用。**验证**：新增 `perf/check_flicker.py`，逐帧解码 G 的输出，计算弹幕区域和源视频同一时刻的差值；预期有弹幕的帧，差值不能突然掉到接近 0。报告"疑似漏叠加的帧数"，修复后必须为 0。
+   - **0b. SC、礼物、会员面板的字号偏大、描边不对**（演示视频 02：GPU 面板文字明显比 E 大，名字和价格重叠，文字描边过粗，名字颜色也不对）。原因：`panel_sprite` 直接用 `node["size"]` 作为 Pillow 字号，而 ASS 字号到 Pillow 像素需要乘以 `sprites.SCALE`（0.75），`SpriteFactory` 就是这样换算的，所以面板文字大了约 1.33 倍。另外，面板文字绘制**又写了一份 tokenize 和 Emoji 的逻辑**，违反了"不重写已有函数"。修复：面板文字节点**改为调用 `SpriteFactory.get_sprite`**（字号、Emoji、表情包、描边都复用同一套逻辑），描边宽度和颜色按 node 中的 `outline`/`name_border_width`/`content_border_width` 设置（名字默认无描边），颜色用 node 的 `color`（名字是 `#666666`）。用演示视频 02 的同一时刻做放大对比截图，确认字号、描边、颜色、截断后的省略号都和 E 一致。
 1. **码率失控（最优先）**：2 小时测试中，G 的文件 10.12GB（约 11.3Mbps），E 是 5.71GB（约 6.4Mbps），而配置都是 `-b:v 4M`。GPU 版的 `CreateEncoder` 没有生效的码率控制。请对照 PyNvVideoCodec 文档，显式设置码率控制模式（例如 `rc=vbr`、`bitrate`、`maxbitrate`、`bufsize` 等实际参数名），让 G 的实际码率和 E 相近（±10%）。用 5 分钟的 full_coverage 素材验证，ffprobe 报告两者的码率。
 2. **修正画质对比方法（Claude 修正自己定的标准）**：E 和 G 是两次独立的有损编码，直接比较两者的 PSNR，天然就只有 35 到 40dB，"≥ 45dB" 是 Claude 定错了。改为：**分别计算 E 对源视频、G 对源视频的 PSNR**（只在无弹幕区域，同一时间戳，源视频解码后按同样方式缩放），要求 G ≥ E − 0.5dB；另外比较无弹幕区域 Y、U、V 三个分量的平均值，差值应 < 1，用来发现色彩矩阵（BT.601/709）或色彩范围（limited/full）不一致的问题。必须在码率统一（第 1 项）之后再测。
 3. **补采 CPU 和 GPU 数据（总目标是降噪，这是最关键的数据）**：从 2 小时素材中截取一段 20 分钟、弹幕最密集的片段，按阶段 0b 的方式分别测 E 和 G：平均和峰值核数、核·秒、GPU/NVENC/NVDEC 占用。
