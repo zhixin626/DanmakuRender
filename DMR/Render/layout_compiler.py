@@ -377,11 +377,13 @@ class LayoutCompiler:
     def __init__(
         self,
         layout_config: dict = None,
-        engine: str = "dmrender",
+        engine: str | None = None,
         engine_config: dict = None,
     ):
         self.config = layout_config or {}
-        self.engine = engine
+        from . import get_engine, DEFAULT_ENGINE
+        self.engine = engine if engine is not None else DEFAULT_ENGINE
+        self.engine_spec = get_engine(self.engine)
         self.engine_config = engine_config or {}
 
     def compile(
@@ -462,6 +464,12 @@ class LayoutCompiler:
                 else segment_start
             )
         ]
+        # Checkpoints may come from another backend (GPU failure -> fallback).
+        # Geometry/identity persist, but carried panels must use this backend's
+        # drawing capability instead of retaining the previous engine's mode.
+        for event in state_events:
+            if (event.get('visual') or {}).get('type') == 'panel':
+                event['mode'] = 'raster' if self.engine_spec.panel_raster else 'ass'
 
         r2l_render = self.config.get(TRACK_R2L) or {}
         slide_left_render = self.config.get(TRACK_SLIDE_LEFT) or {}
@@ -811,7 +819,7 @@ class LayoutCompiler:
         # 会走 libass，而带 Emoji 的 VIP 会走 Pillow，产生两套圆角、留白、
         # 描边透明度和文字基线。普通 dmrender 没有 Pillow 合成阶段，仍走 ASS。
         is_raster = (
-            self.engine in {"emoji_dmrender", "gpu_render"} and pill is not None
+            self.engine_spec.raster and pill is not None
         ) or emoji_measurer.is_special(text, emoticon)
         measure = (
             (lambda value: emoji_measurer.measure(value, emoticon))
@@ -1094,7 +1102,7 @@ class LayoutCompiler:
         return {
             "id": event_id,
             "track": track,
-            "mode": "raster" if self.engine == "gpu_render" else "ass",
+            "mode": "raster" if self.engine_spec.panel_raster else "ass",
             "bounds": {"width": box_width, "height": total_height},
             "path": [[float(start_at), 0.0, 0.0]],
             "visual": visual,

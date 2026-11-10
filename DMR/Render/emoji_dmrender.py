@@ -1,4 +1,3 @@
-import copy
 import json
 import logging
 import math
@@ -9,7 +8,7 @@ import subprocess
 import time
 from os.path import exists, abspath, join, dirname, isdir, splitext, basename
 
-from .baserender import BaseRender
+from .baserender import BaseRender, RenderStopped
 from .resolution import resolve_render_canvas
 from DMR.utils import *
 
@@ -89,6 +88,8 @@ class EmojiDmRender(BaseRender):
             return default
 
     def render_one(self, video: VideoInfo, output: str, progress_cb=None, **kwargs):
+        if self.is_stopped():
+            return False, RenderStopped('用户已停止渲染')
         if not exists(video.path):
             raise RuntimeError(f"不存在视频文件 {video.path}，跳过渲染.")
         render_plan = kwargs.get("render_plan")
@@ -189,26 +190,19 @@ class EmojiDmRender(BaseRender):
                 self._relay(line)
             self._proc.wait()
             rc = self._proc.returncode
+            if self.is_stopped():
+                return False, RenderStopped('用户已停止渲染')
             output_ready = rc == 0 and exists(output)
 
             if output_ready:
-                output_info: VideoInfo = copy.deepcopy(video)
-                output_info.dtype = "dm_video"
-                output_info.path = output
-                output_info.resolution = canvas_resolution
-                output_info.file_id = uuid()
-                output_info.size = os.path.getsize(output)
-                output_info.ctime = start_time
-                output_info.dm_file_id = None
-                output_info.src_video_id = video.file_id
                 success = True
                 self._output_complete = True
                 self.logger.debug(f"emoji 渲染完成: {output}")
-                return True, output_info
+                return True, self.output_info(video,output,canvas_resolution,start_time)
 
             err = "emoji 渲染失败(返回码 %s):\n%s" % (rc, "\n".join(tail[-15:]))
             self.logger.error(err)
-            return False, err
+            return False, RuntimeError(err)
         finally:
             p = self._proc
             if p and p.poll() is None:
@@ -220,6 +214,7 @@ class EmojiDmRender(BaseRender):
             self._active_output = None
 
     def stop(self):
+        self._stopped = True
         self.logger.debug("emoji render stop.")
         p = self._proc
         self._terminate_proc(p)

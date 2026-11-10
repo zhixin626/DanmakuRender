@@ -2,7 +2,7 @@ import itertools
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, MagicMock
 
 import numpy as np
 import pytest
@@ -12,7 +12,7 @@ from DMR.Render.sprites import build_atlas, detect_platform
 
 
 def fake_encoding(monkeypatch):
-    encoder=SimpleNamespace(Encode=Mock(return_value=[]),EndEncode=Mock(return_value=[]))
+    encoder=SimpleNamespace(Encode=Mock(return_value=[]),EndEncode=Mock(return_value=[]),GetNumBFrames=lambda:3)
     monkeypatch.setattr(gpu,'create_encoder',lambda *_:encoder)
     monkeypatch.setattr(gpu,'NV12Buffer',lambda *_:SimpleNamespace(load_into_canvas=lambda _:None))
     monkeypatch.setattr(gpu,'upload_atlas',lambda *_:{'events':[]})
@@ -20,7 +20,9 @@ def fake_encoding(monkeypatch):
     clock=itertools.count()
     monkeypatch.setattr(gpu.time,'perf_counter',lambda:next(clock))
     sync=Mock()
-    cp=SimpleNamespace(cuda=SimpleNamespace(Stream=SimpleNamespace(null=SimpleNamespace(synchronize=sync))))
+    stream=MagicMock()
+    stream.synchronize=sync
+    cp=SimpleNamespace(cuda=SimpleNamespace(Stream=Mock(return_value=stream),Event=Mock))
     config=SimpleNamespace(video_encoder='hevc_nvenc',encoder_options={},atlas={},max_frames=None)
     return encoder,cp,config,sync
 
@@ -28,7 +30,7 @@ def fake_encoding(monkeypatch):
 def test_progress_and_one_sync_per_frame(monkeypatch,tmp_path):
     encoder,cp,config,sync=fake_encoding(monkeypatch)
     progress=[]
-    result=gpu.encode_to_file(iter([(1,.04),(2,.08)]),(0,0),cp,None,tmp_path/'out.hevc',(2,2),25,config,
+    result=gpu.encode_to_file(iter([(1,.04),(2,.08)]),(0,0),cp,SimpleNamespace(NV_ENC_PIC_PARAMS=SimpleNamespace),tmp_path/'out.hevc',(2,2),25,config,
                               source_frame_rate=25,progress_cb=progress.append,expected_frames=3)
     assert result['frames']==3
     assert progress==sorted(progress) and 0<progress[0]<progress[-1]<=99
@@ -40,7 +42,7 @@ def test_stop_interrupts_encoding(monkeypatch,tmp_path):
     encoder,cp,config,sync=fake_encoding(monkeypatch)
     event=threading.Event()
     with pytest.raises(gpu.RenderStopped):
-        gpu.encode_to_file(iter([(1,.04),(2,.08)]),(0,0),cp,None,tmp_path/'out.hevc',(2,2),25,config,
+        gpu.encode_to_file(iter([(1,.04),(2,.08)]),(0,0),cp,SimpleNamespace(NV_ENC_PIC_PARAMS=SimpleNamespace),tmp_path/'out.hevc',(2,2),25,config,
                            source_frame_rate=25,progress_cb=lambda _:event.set(),expected_frames=3,stop_event=event)
     assert encoder.Encode.call_count==1
     encoder.EndEncode.assert_not_called()
@@ -117,33 +119,18 @@ def test_offline_configuration_merges_disabled_task(tmp_path,monkeypatch):
     with pytest.raises(ValueError):config.get_render_args('unknown')
 
 
-def test_month_configuration_and_bat(tmp_path,monkeypatch):
-    import re
-    import yaml
+def test_enabled_pipeline_configuration_uses_isolated_fixture(tmp_path,monkeypatch):
+    # Personal configs and launchers are user-editable runtime inputs. Validate
+    # the loader contract with a fixture instead of asserting the user's toggle.
     from DMR.Config import Config
     from DMR.utils import ToolsList
-    root=Path(__file__).resolve().parents[1]
-    task=yaml.safe_load((root/'configs/DMR-月亮3.yml').read_text(encoding='utf-8'))
-    assert task['enable'] is False
-    assert task['download_args']['url']=='https://live.bilibili.com/24486091'
-    assert task['common_event_args']['auto_render']
-    assert isinstance(task['common_event_args']['auto_upload'],bool)
-    assert task['render_args']['overlay']['engine']=='gpu_render'
-    assert task['upload_args']['dm_video']['account']=='b站_不可一世冷狗'
-    assert not task['upload_args']['dm_video']['skip_upload']
-    # Validate the normal three-layer task loader without starting DMR or uploading.
-    task['enable']=True
-    # Exercise the full pipeline irrespective of the user's current upload toggle.
-    task['common_event_args']['auto_upload']=True
-    (tmp_path/'DMR-month.yml').write_text(yaml.safe_dump(task,allow_unicode=True),encoding='utf-8')
+    (tmp_path/'DMR-demo.yml').write_text(
+        'enable: true\ncommon_event_args:\n  auto_render: true\n  auto_upload: true\n'
+        'render_args:\n  overlay:\n    engine: gpu_render\n'
+        'upload_args:\n  dm_video:\n    target: bilibili\n    account: demo\n',encoding='utf8')
     global_file=tmp_path/'global.yml'
-    global_file.write_text(f'dmr_engine_args:\n  config_path: {tmp_path.as_posix()}\n',encoding='utf-8')
+    global_file.write_text(f'dmr_engine_args:\n  config_path: {tmp_path.as_posix()}\n',encoding='utf8')
     monkeypatch.setattr(ToolsList,'get',lambda *_,**__:'ffmpeg')
-    config=Config(str(global_file)).get_task_config('month')
+    config=Config(str(global_file)).get_task_config('demo')
     assert config['render_args']['overlay']['engine']=='gpu_render'
-    assert config['upload_args']['dm_video'][0]['account']=='b站_不可一世冷狗'
-    batch=(root/'DMR-月亮3.bat').read_text(encoding='utf-8')
-    snippets=re.findall(r'^"%PYTHON%" -c "(.*)"$',batch,re.M)
-    assert len(snippets)==2
-    for snippet in snippets:compile(snippet,'launcher','exec')
-    assert 'main.py --skip_update' in batch and 'choice /C YN' in batch
+    assert config['upload_args']['dm_video'][0]['account']=='demo'

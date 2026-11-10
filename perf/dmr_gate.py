@@ -21,6 +21,8 @@ import json
 import pathlib
 import sys
 import time
+import urllib.request
+import yaml
 
 import psutil
 
@@ -46,16 +48,49 @@ RENDER_SCRIPT_MARKERS = ("emoji_render_mt.py", "render_only.py", "merge_only.py"
 
 
 def find_dmr_main() -> list[psutil.Process]:
-    """Return the running DMR main.py processes (excluding our perf worktree)."""
+    """Find DMR in any checkout, including the worktree and Python launchers."""
     found = []
     for proc in psutil.process_iter(["name", "cmdline"]):
         try:
-            cmdline = " ".join(proc.info.get("cmdline") or []).replace("/", "\\").lower()
+            command = proc.info.get('cmdline') or []
+            is_python = (proc.info.get('name') or '').lower() in ('python','python.exe','pythonw.exe')
+            is_main = any(pathlib.PureWindowsPath(arg).name.lower() == 'main.py' for arg in command)
+            root = pathlib.Path(proc.cwd())
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-        if "main.py" in cmdline and "danmakurender-perf" not in cmdline:
+        if is_python and is_main and (root / 'DMR').is_dir():
             found.append(proc)
-    return found
+    # The venv launcher and its real interpreter have the same command. Inspect
+    # their tree once, otherwise recording counts and boundaries are duplicated.
+    ids = {proc.pid for proc in found}
+    roots = []
+    for proc in found:
+        try:
+            if proc.ppid() not in ids:
+                roots.append(proc)
+        except (psutil.NoSuchProcess,psutil.AccessDenied):
+            continue
+    return roots
+
+
+def web_activity(main):
+    """Read in-process GPU work from this instance's configured local WebUI.
+
+    GPU rendering runs in a main.py thread, with no renderer subprocess. A
+    missing/unreadable API is unknown, never evidence that the GPU is idle.
+    """
+    root = pathlib.Path(main.cwd())
+    command = main.cmdline()
+    config_path = root / 'configs/global.yml'
+    if '--config' in command:
+        config_path = root / command[command.index('--config')+1]
+    base = yaml.safe_load((root/'DMR/Config/default.yml').read_text(encoding='utf-8'))
+    current = yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
+    web = {**base['webservice_kernel_args'],**current.get('webservice_kernel_args',{})}
+    # Always query loopback, even when the UI listens on all interfaces.
+    url = f"http://127.0.0.1:{int(web['port'])}/api/tasks"
+    with urllib.request.urlopen(url,timeout=2) as response:
+        return json.load(response)
 
 
 def classify(proc: psutil.Process) -> str | None:
@@ -82,23 +117,35 @@ def classify(proc: psutil.Process) -> str | None:
 
 def dmr_activity() -> dict:
     """Count DMR child processes by kind and remember when recorders started."""
-    counts = {"dmr_running": 0, "recording": 0, "rendering": 0, "recorder_started": []}
+    counts = {"dmr_running": 0, "recording": 0, "rendering": 0, "recorder_started": [], 'unknown_instances':[]}
     for main in find_dmr_main():
         counts["dmr_running"] += 1
         try:
             children = main.children(recursive=True)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
+        child_rendering = 0
+        child_recording = 0
         for child in children:
             kind = classify(child)
             if not kind:
                 continue
-            counts[kind] += 1
+            child_rendering += kind == 'rendering'
+            child_recording += kind == 'recording'
             if kind == "recording":
                 try:
                     counts["recorder_started"].append(child.create_time())
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
+        try:
+            data = web_activity(main)
+            api_rendering = len(data['render_queue']['active']) + len(data['merge_queue']['active'])
+            api_recording = sum(item['status'] == 1 for item in data['recording_tasks'])
+        except (OSError,ValueError,KeyError,IndexError,psutil.Error,yaml.YAMLError):
+            counts['unknown_instances'].append(main.pid)
+            api_rendering = api_recording = 0
+        counts['rendering'] += max(child_rendering, api_rendering)
+        counts['recording'] += max(child_recording, api_recording)
     return counts
 
 
@@ -142,6 +189,8 @@ def decide(need_minutes: float) -> dict:
     }
     if activity["rendering"]:
         result.update(go=False, reason="DMR 正在渲染/合并/转码")
+    elif activity['unknown_instances']:
+        result.update(go=False, reason='DMR 状态接口不可读取，无法排除进程内 GPU 渲染')
     elif not activity["recording"]:
         result.update(go=True, reason="DMR 空闲（未录制、未渲染）")
     else:

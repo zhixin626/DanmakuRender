@@ -51,3 +51,6 @@ perf/outputs/
 !/tests/references/
 !/tests/references/*.png
 !/tests/references/*.json
+!/tests/references/flicker/
+!/tests/references/flicker/*.png
+!/tests/references/flicker/*.json

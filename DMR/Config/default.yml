@@ -312,7 +312,7 @@ render_args:
 
   # 弹幕叠加：先由 LayoutCompiler 把 JSONL 编译成渲染计划，再交给渲染引擎
   overlay:
-    # dmrender：纯 libass，适合纯文字；emoji_dmrender：支持 Unicode/内联/平台表情
+    # dmrender：纯 libass；emoji_dmrender：彩色表情；gpu_render：GPU 解码、叠加和编码
     engine: dmrender
     # 留空时在原视频目录生成“弹幕版”文件
     output_dir: ~
@@ -348,9 +348,8 @@ render_args:
     # 也可用portrait或landscape强制固定方向
     rescale_orientation: auto
 
-    # 以下参数只供 emoji_dmrender 使用
-    # 最低输出帧率；低于该值时补帧后逐帧渲染弹幕，高于该值时保持源帧率；~ 表示完全跟随源
-    # Minimum output fps; the renderer raises the source rate to an integer multiple.
+    # 以下参数适用于 emoji_dmrender 和 gpu_render
+    # 输出帧率取源帧率的最小整数倍，使其不低于此值（25→50、30→60）；~ 跟随源帧率
     min_fps: 50
     # 表情包目录；留空时按 JSONL 平台使用 ./emoji_pack/<platform>
     emoji_pack: ~

@@ -1,4 +1,3 @@
-import copy
 import logging
 import os
 import platform
@@ -192,19 +191,10 @@ class DmRender(BaseRender):
                 pass
 
         if not status:
-            return status, info
-        output_info: VideoInfo = copy.deepcopy(video)
-        output_info.dtype = "dm_video"
-        output_info.path = output
-        if self.rescale_to_1080p and not self.output_resize:
-            output_info.resolution = canvas_resolution
-        output_info.file_id = uuid()
-        output_info.size = os.path.getsize(output)
-        output_info.ctime = start_time
-        output_info.dm_file_id = None
-        output_info.src_video_id = video.file_id
-        return status, output_info
+            return False, info if isinstance(info,Exception) else RuntimeError(str(info))
+        return True, self.output_info(video,output,canvas_resolution,start_time)
 
     def stop(self):
+        self._stopped = True
         self.logger.debug("ffmpeg render stop.")
         self.raw_ffmpeg.stop()

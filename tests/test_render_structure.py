@@ -48,3 +48,16 @@ def test_emoticon_cache_uses_shared_store():
         source=(ROOT/'DMR/Render'/name).read_text(encoding='utf-8')
         assert 'detect_platform' in source and 'emoticon' in source
     assert 'def _detect_platform' not in (ROOT/'DMR/Render/emoji_dmrender.py').read_text(encoding='utf-8')
+
+
+def test_engine_names_are_only_defined_in_the_registry_or_engine_module():
+    from DMR.Render import ENGINES
+    # 'transcode' is also a configuration-section/operation name, independent
+    # of backend selection. Overlay backend IDs have no such dual meaning.
+    overlay_names = {name for name,spec in ENGINES.items() if spec.overlay}
+    for path in [*ROOT.glob('DMR/**/*.py'),ROOT/'render_only.py']:
+        if path == ROOT/'DMR/Render/__init__.py' or path.stem in ENGINES:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding='utf8'))):
+            if isinstance(node,ast.Constant) and isinstance(node.value,str):
+                assert node.value not in overlay_names,(path,node.value)

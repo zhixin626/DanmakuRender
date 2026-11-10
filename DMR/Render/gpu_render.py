@@ -13,15 +13,18 @@ import subprocess
 import tempfile
 import time
 import threading
+import warnings
+from datetime import datetime
 from DMR.utils.ffprobe import FFprobe
 from dataclasses import dataclass
 from typing import Any, Iterator
+from fractions import Fraction
 
 try:
     from .layout_models import RenderEvent
     from .resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
     from ..utils.ffprobe import source_frame_rate
-    from .baserender import BaseRender
+    from .baserender import BaseRender, RenderStopped
     from .sprites import build_atlas
 except ImportError:  # standalone perf launcher
     import sys
@@ -29,7 +32,7 @@ except ImportError:  # standalone perf launcher
     from DMR.Render.layout_models import RenderEvent
     from DMR.Render.resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
     from DMR.utils.ffprobe import source_frame_rate
-    from DMR.Render.baserender import BaseRender
+    from DMR.Render.baserender import BaseRender, RenderStopped
     from DMR.Render.sprites import build_atlas
 
 
@@ -130,7 +133,13 @@ def load_cuda_modules() -> tuple[Any, Any]:
         for directory in (packages / "PyNvVideoCodec", cuda / "bin", packages / "nvidia" / "cuda_runtime" / "bin"):
             if directory.exists():
                 _dll_handles.append(os.add_dll_directory(str(directory)))
-    import cupy
+    # CuPy 14's pathfinder deliberately returns no common root for split
+    # CUDA 12 wheels, even with CUDA_PATH set. The DLLs above are configured;
+    # suppress only that discovery warning, never CUDA load/runtime errors.
+    with warnings.catch_warnings():
+        if os.environ.get("CUDA_PATH") and _dll_handles:
+            warnings.filterwarnings("ignore", message=r"CUDA path could not be detected\..*", category=UserWarning)
+        import cupy
     import PyNvVideoCodec
 
     return cupy, PyNvVideoCodec
@@ -266,10 +275,6 @@ def upload_atlas(cupy, atlas):
     """Upload the in-memory atlas once; no intermediate serialization."""
     return {"events": [RenderEvent.from_mapping(item) for item in atlas["events"]],
             **{key: cupy.asarray(atlas[key]) for key in ("y", "u", "v", "a")}}
-
-
-class RenderStopped(RuntimeError):
-    """Explicit cancellation, which must not trigger the CPU fallback."""
 
 
 def check_stop(stop_event):
@@ -457,16 +462,47 @@ class SpriteCompositor:
         return len(active)
 
 
-def create_encoder(nvc, width, height, frame_rate, video_encoder, configured_options):
+def create_encoder(nvc, width, height, frame_rate, video_encoder, configured_options, stream=None):
     """Use the native fps name and pass only explicitly configured options."""
     options = {"codec": codec_name(video_encoder), "fps": str(frame_rate), **configured_options}
     logger.info("CreateEncoder args: %s", json.dumps({"width": width, "height": height, **options}, sort_keys=True))
+    if stream is not None:
+        options['cudastream'] = stream.ptr
     return nvc.CreateEncoder(width, height, "NV12", False, **options)
 
 
+class FrameRing:
+    """Keep four application inputs alive until NVENC's CUDA input copy ends.
+
+    The encoder copies application planes to its own delayed/B-frame surfaces
+    on the explicitly supplied CUDA stream. A slot's event is recorded after
+    Encode enqueues that copy. Waiting only on slot reuse avoids overwriting
+    an input without adding a device-wide synchronization after every Encode.
+    Output packets cannot fence these four slots: the default B-frame pipeline
+    returns its first packet only after seven submissions.
+    """
+
+    def __init__(self, cupy: Any, width: int, height: int, stream: Any):
+        self.stream = stream
+        self.buffers = [NV12Buffer(cupy, width, height) for _ in range(4)]
+        self.copied = [cupy.cuda.Event(disable_timing=True) for _ in self.buffers]
+        self.used = [False] * len(self.buffers)
+
+    def acquire(self, index: int) -> NV12Buffer:
+        slot = index % len(self.buffers)
+        if self.used[slot]:
+            self.copied[slot].synchronize()
+        return self.buffers[slot]
+
+    def submitted(self, index: int) -> None:
+        slot = index % len(self.buffers)
+        self.copied[slot].record(self.stream)
+        self.used[slot] = True
+
+
 def encode_to_file(
-    frames: Iterator[tuple[Any, int]],
-    first: tuple[Any, int],
+    frames: Iterator[tuple[Any, float]],
+    first: tuple[Any, float],
     cupy: Any,
     nvc: Any,
     bitstream: pathlib.Path,
@@ -481,8 +517,9 @@ def encode_to_file(
 ) -> dict[str, Any]:
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
-    encoder = create_encoder(nvc, width, height, frame_rate, config.video_encoder, config.encoder_options)
-    buffer = NV12Buffer(cupy, width, height)
+    encode_stream = cupy.cuda.Stream(non_blocking=True)
+    encoder = create_encoder(nvc, width, height, frame_rate, config.video_encoder, config.encoder_options, encode_stream)
+    ring = FrameRing(cupy, width, height, encode_stream)
     plan_assets = upload_atlas(cupy, config.atlas)
     event_count = len(plan_assets['events'])
     compositor = SpriteCompositor(cupy, width, height, plan_assets)
@@ -499,6 +536,7 @@ def encode_to_file(
             yield item
 
     frame_count = 0
+    packet_times = []
     started = time.perf_counter()
     last_progress = started
     try:
@@ -512,11 +550,19 @@ def encode_to_file(
                 start_offset=start_offset,
             ):
                 check_stop(stop_event)
-                buffer.load_into_canvas(decoded)
-                active_counts.append(compositor.apply(buffer, frame_time))
-                cupy.cuda.Stream.null.synchronize()
-                for packet in encoder.Encode(buffer):
+                buffer = ring.acquire(frame_count)
+                with encode_stream:
+                    buffer.load_into_canvas(decoded)
+                    active_counts.append(compositor.apply(buffer, frame_time))
+                encode_stream.synchronize()
+                picture = nvc.NV_ENC_PIC_PARAMS()
+                picture.frameIdx = frame_count
+                picture.inputTimeStamp = frame_count
+                packets = encoder.Encode(buffer, picture)
+                ring.submitted(frame_count)
+                for packet in packets:
                     stream.write(packet["data"])
+                    packet_times.append(int(packet['timestamp']))
                 frame_count += 1
                 now = time.perf_counter()
                 if progress_cb and now - last_progress >= 0.5:
@@ -524,11 +570,19 @@ def encode_to_file(
                     last_progress = now
             for packet in encoder.EndEncode():
                 stream.write(packet["data"])
+                packet_times.append(int(packet['timestamp']))
+            bframes = encoder.GetNumBFrames()
     finally:
-        del compositor, plan_assets, buffer, encoder
+        # Destroy the encoder before releasing any application input storage.
+        del encoder, compositor, plan_assets, ring
+        # Exceptions retain this frame until the caller clears the traceback.
+        # Drop input references now, before render_one releases the CUDA pool.
+        buffer = decoded = first = frames = None
     elapsed = time.perf_counter() - started
     return {
         "frames": frame_count,
+        "packet_times": packet_times,
+        "bframes": bframes,
         "wall_s": elapsed,
         "fps": frame_count / elapsed if elapsed else 0.0,
         "plan_events": event_count,
@@ -541,19 +595,53 @@ def encode_to_file(
     }
 
 
+def stamp_video(bitstream: pathlib.Path, output: pathlib.Path, frame_rate: float,
+                packet_times: list[int], bframes: int, stop_event=None) -> None:
+    """Preserve NVENC's presentation indices across B-frame reordering.
+
+    Raw HEVC has no container PTS. Guessing PTS from packet order can discard
+    initial frames and reorder displayed frames. Negative DTS is valid; every
+    presentation timestamp starts at or after zero.
+    """
+    import av
+    time_base = Fraction(1, 1) / Fraction(str(frame_rate))
+    with av.open(str(bitstream)) as source, av.open(str(output), 'w') as target:
+        stream = target.add_stream_from_template(source.streams.video[0], opaque=True)
+        stream.time_base = time_base
+        count = 0
+        for packet in source.demux(video=0):
+            check_stop(stop_event)
+            if not packet.size:
+                continue
+            if count >= len(packet_times):
+                raise ValueError('more video packets than encoder timestamps')
+            packet.pts = packet_times[count]
+            packet.dts = count - bframes
+            packet.duration = 1
+            packet.time_base = time_base
+            packet.stream = stream
+            target.mux(packet)
+            count += 1
+        if count != len(packet_times):
+            raise ValueError('video packet/timestamp count differs')
+
+
 def mux_audio(bitstream: pathlib.Path, source: pathlib.Path, output: pathlib.Path, frame_rate: float, trim_duration: float | None = None,
-              audio_encoder: str = "copy", audio_args: list[str] | None = None, video_duration: float | None = None, stop_event=None) -> None:
+              audio_encoder: str = "copy", audio_args: list[str] | None = None, video_duration: float | None = None, stop_event=None,
+              packet_times=None, bframes=0) -> None:
     """Mux encoded video with the source audio without truncating either stream."""
+    if packet_times is not None:
+        timestamped = bitstream.with_suffix('.mp4')
+        stamp_video(bitstream, timestamped, frame_rate, packet_times, bframes, stop_event)
+        bitstream = timestamped
+    input_options = [] if bitstream.suffix == '.mp4' else ['-f',bitstream.suffix.lstrip('.'),'-r',str(frame_rate)]
     command = [
         "ffmpeg",
         "-v",
         "error",
         "-y",
         "-nostdin",
-        "-f",
-        bitstream.suffix.lstrip("."),
-        "-r",
-        str(frame_rate),
+        *input_options,
         "-i",
         str(bitstream),
         "-i",
@@ -650,7 +738,8 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
             video_duration = result["frames"] / frame_rate
             truncated = config.max_frames is not None and video_duration < source_duration - 1 / frame_rate
             mux_audio(bitstream, source, partial, frame_rate, video_duration if truncated else None,
-                      kwargs.get("aencoder", "copy"), kwargs.get("aencoder_args"), video_duration, stop_event)
+                      kwargs.get("aencoder", "copy"), kwargs.get("aencoder_args"), video_duration, stop_event,
+                      result.pop('packet_times'), result['bframes'])
             if not truncated:
                 validate_av_duration(partial)
             check_stop(stop_event)
@@ -678,8 +767,12 @@ class GpuRender(BaseRender):
 
     def render_one(self, video, output, progress_cb=None, **kwargs):
         try:
-            return True, render_one(video, output, progress_cb=progress_cb,
-                                    stop_event=self.stop_event, **{**self.options, **kwargs})
+            started = datetime.now()
+            result = render_one(video, output, progress_cb=progress_cb,
+                                          stop_event=self.stop_event, **{**self.options, **kwargs})
+            self.logger.info('GPU render statistics: %s', json.dumps(result,ensure_ascii=False))
+            return True, self.output_info(video,output,(result['width'],result['height']),started,
+                                          duration=result['frames']/result['frame_rate'])
         except RenderStopped as error:
             error.__traceback__ = None
             return False, error

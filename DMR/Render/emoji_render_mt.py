@@ -973,7 +973,7 @@ def main():
             FFMPEG, "-v", "error", "-y", "-nostdin",
             "-fflags", "+discardcorrupt+genpts",
             "-i", flv, "-map", "0:a:0", "-vn",
-            "-af", "aresample=async=1000:first_pts=0",
+            "-af", "aresample=async=1000:first_pts=0" + (f",apad=whole_dur={dur:.6f}" if dur > 0 else ""),
             "-c:a", audio_encoder, *audio_encode_args,
             "-ar", "48000", fixed_audio,
         ]

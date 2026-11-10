@@ -22,31 +22,119 @@ sys.path.append('..')
 sys.path.append('.')
 
 from DMR.Config import Config
+from DMR.Render import get_engine, DEFAULT_ENGINE, EMOJI_ENGINE, TRANSCODE_ENGINE
 from DMR.utils import FFprobe, isvideo, VideoInfo
 
 
-def resolve_render_args(config, input_dir, mode):
-    """按输入文件夹自动匹配任务:哪个任务的 download_args.output_dir 就是这个文件夹,
-    就用该任务合并后的 render_args(全局+任务覆盖,与主管线口径一致,emoji 开关也在其中)。
-    没匹配到任何任务则用全局配置。返回 (render_args, 来源说明)。"""
-    target = os.path.normcase(os.path.abspath(input_dir))
-    for taskname, tconf in (config.task_configs or {}).items():
-        out_dir = (tconf.get('download_args') or {}).get('output_dir')
-        if not out_dir:
-            continue
-        if os.path.normcase(os.path.abspath(out_dir)) == target:
-            root = tconf.get('render_args') or {}
-            key = 'transcode' if mode == 'transcode' else 'overlay'
-            ra = root.get(key)
-            if ra:
-                return ra, f'任务「{taskname}」'
-    root = config.global_config.get('render_args', {})
-    key = 'transcode' if mode == 'transcode' else 'overlay'
-    ra = root.get(key) or {}
-    return ra, '全局配置(未匹配到任务)'
+def input_path(prompt):
+    """Accept a pasted Windows path, including surrounding quotes."""
+    return input(prompt).strip().strip('"').strip("'")
 
 
-def build_tasks(videos, mode, render_args, output_dir_arg):
+def show_progress(label, pct):
+    """Erase the previous line before writing a shorter progress value."""
+    print(f'\r\x1b[2K{label} 进度 {float(pct):.1f}%', end='', flush=True)
+
+
+def enable_console_escapes():
+    """Enable erase-line escapes in native Windows console sessions."""
+    if os.name != 'nt' or not sys.stdout.isatty():
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.windll.kernel32
+    kernel.GetStdHandle.restype = wintypes.HANDLE
+    kernel.GetConsoleMode.argtypes = [wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD)]
+    kernel.SetConsoleMode.argtypes = [wintypes.HANDLE,wintypes.DWORD]
+    handle = kernel.GetStdHandle(-11)
+    mode = wintypes.DWORD()
+    if kernel.GetConsoleMode(handle,ctypes.byref(mode)):
+        kernel.SetConsoleMode(handle,mode.value | 0x0004)
+
+
+def find_danmaku(video):
+    base = os.path.splitext(video)[0]
+    return next((path for path in (base + '.jsonl', base + '_augmented.jsonl', base + '.ass')
+                 if exists(path)), None)
+
+
+def ask_danmaku(video, allow_skip=False):
+    """Show the discovered sidecar and require an explicit confirmation."""
+    found = find_danmaku(video)
+    while True:
+        if found:
+            value = input_path(f'弹幕文件：{found}\n回车确认，或输入其他弹幕路径：') or found
+        else:
+            hint = '（回车跳过此视频）' if allow_skip else ''
+            value = input_path(f'{os.path.basename(video)} 未找到同名弹幕，请输入 JSONL/ASS 路径{hint}：')
+        if not value and allow_skip:
+            return None
+        if os.path.isfile(value) and value.lower().endswith(('.jsonl','.ass')):
+            return value
+        print('弹幕文件不存在或格式不是 JSONL/ASS，请重新输入。')
+
+
+def choose_render_args(config, mode):
+    """Offer every task, including disabled tasks; global is an explicit choice."""
+    from DMR.utils import filename_to_taskname
+    names = [filename_to_taskname(path) for path in config.task_config_files()]
+    print('任务配置：[0] 全局配置（回车）')
+    for index, name in enumerate(names, 1):
+        print(f'[{index}] {name}')
+    while True:
+        value = input('请选择任务编号：').strip()
+        if not value or value == '0':
+            return config.global_config['render_args'][mode], '全局配置（用户选择）'
+        if value.isdigit() and 1 <= int(value) <= len(names):
+            name = names[int(value)-1]
+            return config.get_render_args(name, mode), f'任务「{name}」(default → global → task)'
+        print('任务编号无效，请重新选择。')
+
+
+def interactive_tasks(config, args, mode):
+    default = args.input_dir or ''
+    while True:
+        path = input_path(f'请输入视频文件路径或文件夹{f"（回车使用 {default}）" if default else ""}：') or default
+        if os.path.isdir(path) or (os.path.isfile(path) and isvideo(path)):
+            break
+        print('视频文件或文件夹不存在，请重新输入。')
+    batch = os.path.isdir(path)
+    danmaku = None if batch or mode == 'transcode' else ask_danmaku(path)
+    options, source = choose_render_args(config, 'transcode' if mode == 'transcode' else 'overlay')
+    directory = os.path.abspath(path if batch else os.path.dirname(path) or '.')
+    output_dir = args.output_dir or input_path(f'输出文件夹（回车使用 {directory}）：') or directory
+    if batch:
+        videos = sorted(f for f in glob(join(path, '*')) if isvideo(f))
+        tasks, ignores = build_tasks(videos, mode, options, output_dir, missing_danmaku=lambda video: ask_danmaku(video,True))
+        for filename, message in ignores:
+            print(f'忽略 {filename}: {message}')
+        if not tasks:
+            return [], options, source
+        for index, task in enumerate(tasks):
+            print(f'[{index}] {task["video"]} -> {task["output"]}')
+        while True:
+            value = input('输入视频编号（空格分隔），或回车渲染全部：').strip()
+            try:
+                indices = [int(v) for v in value.split()] if value else range(len(tasks))
+                if any(i < 0 or i >= len(tasks) for i in indices):
+                    raise ValueError()
+                return [tasks[i] for i in indices], options, source
+            except ValueError:
+                print('视频编号无效，请重新输入。')
+    suffix = '（转码后）' if mode == 'transcode' else '（弹幕版）'
+    name = os.path.splitext(os.path.basename(path))[0] + suffix + '.mp4'
+    while True:
+        filename = input_path(f'输出文件名（回车使用 {name}）：') or name
+        output = join(output_dir, filename)
+        if os.path.basename(filename) != filename:
+            print('此处只输入文件名，目录请在上一步指定。')
+        elif exists(output):
+            print('输出已存在，请另选文件名。')
+        else:
+            return [{'video':path,'danmaku':danmaku,'output':output}], options, source
+
+
+def build_tasks(videos, mode, render_args, output_dir_arg, missing_danmaku=None):
     """扫描视频列表,生成渲染任务和忽略清单(已渲染过/缺弹幕的跳过)。"""
     tasks, ignores = [], []
     fmt = render_args.get('format', 'mp4')
@@ -56,7 +144,7 @@ def build_tasks(videos, mode, render_args, output_dir_arg):
         base = os.path.splitext(vname)[0]
         jsonl = base + '.jsonl'
         legacy_ass = base + '.ass'
-        danmu = jsonl if exists(jsonl) else legacy_ass
+        danmu = find_danmaku(vname)
         filename = os.path.splitext(os.path.basename(vname))[0] + f'{suffix}.{fmt}'
         output_dir = output_dir_arg or (os.path.dirname(vname) + suffix)
         output = join(output_dir, filename)
@@ -64,13 +152,15 @@ def build_tasks(videos, mode, render_args, output_dir_arg):
         if exists(output) and FFprobe.get_duration(output) - FFprobe.get_duration(vname) < 30:
             ignores.append((vname, f'已存在渲染产物 {output}，跳过.'))
             continue
-        if mode != 'transcode' and not exists(danmu):
+        if mode != 'transcode' and not danmu and missing_danmaku:
+            danmu = missing_danmaku(vname)
+        if mode != 'transcode' and not danmu:
             ignores.append((vname, '不存在匹配的 JSONL 或 ASS 弹幕文件，跳过.'))
             continue
         segment_start = None
-        if jsonl == danmu:
+        if danmu and danmu.lower().endswith('.jsonl'):
             try:
-                with open(jsonl, 'r', encoding='utf-8') as fp:
+                with open(danmu, 'r', encoding='utf-8') as fp:
                     segment_start = float(json.loads(fp.readline())['segment_start_time'])
             except Exception:
                 pass
@@ -91,6 +181,7 @@ def build_tasks(videos, mode, render_args, output_dir_arg):
 
 
 def main():
+    enable_console_escapes()
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='configs/global.yml')
     parser.add_argument('--input_dir', type=str)
@@ -127,44 +218,27 @@ def main():
         source = f'任务「{args.task}」(default → global → task)'
         selected = [{'video': args.video, 'danmaku': args.danmaku, 'output': args.output}]
     else:
-        input_dir = args.input_dir or config.global_config.get('downloader_args', {}).get('output_dir', '直播回放')
-        inp = input(f'请输入视频文件夹路径 (回车使用默认路径 {input_dir}): \n')
-        input_dir = inp or input_dir
-        render_args, source = resolve_render_args(config, input_dir, mode)
-        videos = sorted(f for f in glob(join(input_dir, '*')) if isvideo(f))
-        tasks, ignores = build_tasks(videos, mode, render_args, args.output_dir)
-        for filename, message in ignores:
-            print(f'忽略 {filename}: {message}')
-        for index, item in enumerate(tasks):
-            print(f'[{index}] {item["video"]} -> {item["output"]}')
-        inp = input('输入视频编号（空格分隔），或回车渲染全部：\n')
-        indices = [int(value) for value in inp.split()] if inp else range(len(tasks))
-        selected = [tasks[index] for index in indices]
+        selected, render_args, source = interactive_tasks(config, args, mode)
 
     if mode == 'transcode':
-        engine_name = 'transcode'
+        engine_name = TRANSCODE_ENGINE
     elif args.emoji:
-        engine_name = 'emoji_dmrender'
+        engine_name = EMOJI_ENGINE
     elif args.no_emoji:
-        engine_name = 'dmrender'
+        engine_name = DEFAULT_ENGINE
     else:
-        engine_name = render_args.get('engine', 'dmrender')
-    if engine_name not in ('transcode', 'dmrender', 'emoji_dmrender', 'gpu_render'):
-        parser.error(f'不支持的引擎: {engine_name}')
+        engine_name = render_args['engine']
+    try:
+        engine = get_engine(engine_name)
+    except ValueError as error:
+        parser.error(str(error))
     print(f'渲染参数来源: {source} → 渲染引擎: {engine_name}')
-
-    if mode == 'transcode':
-        from DMR.Render.transcode import Transcoder as TargetRender
-    elif engine_name == 'gpu_render':
-        from DMR.Render.gpu_render import GpuRender as TargetRender
-    elif engine_name == 'emoji_dmrender':
-        from DMR.Render.emoji_dmrender import EmojiDmRender as TargetRender
-    else:
-        from DMR.Render.dmrender import DmRender as TargetRender
+    TargetRender = engine.load()
 
     total = len(selected)
     n_ok = n_fail = 0
     layout_state = None
+    cancelled = False
     for seq, task in enumerate(selected, 1):
         resolution = FFprobe.get_resolution(task['video'])
         video = VideoInfo(
@@ -182,8 +256,9 @@ def main():
         print(f'{label} 开始渲染')
 
         def on_progress(pct, *_, _label=label):
-            print(f'\r{_label} 进度 {pct}%   ', end='', flush=True)
+            show_progress(_label,pct)
 
+        target_render = None
         try:
             target_args = render_args
             render_kwargs = {}
@@ -198,7 +273,7 @@ def main():
                     key: value for key, value in render_args.items()
                     if key != 'engine' and key not in layout_keys
                 }
-                if engine_name == 'dmrender':
+                if not engine.raster:
                     for key in (
                         'emoji_pack', 'emoji_font', 'min_fps',
                     ):
@@ -228,7 +303,9 @@ def main():
                 **render_kwargs,
             )
         except KeyboardInterrupt:
-            target_render.stop()
+            if target_render is not None:
+                target_render.stop()
+            cancelled = True
             status, info = False, "用户停止"
         except Exception as e:
             status, info = False, e
@@ -243,6 +320,8 @@ def main():
         else:
             n_fail += 1
             print(f'{label} 失败: {info}')
+        if cancelled:
+            break
 
     print(f'\n全部结束：成功 {n_ok} 个，失败 {n_fail} 个。')
     return 1 if n_fail else 0

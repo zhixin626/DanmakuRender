@@ -56,12 +56,24 @@ def check_video(spec):
     source_motion=[float(np.mean(np.abs(a-b))) for a,b in zip(src,src[1:])]
     if max(output_motion) < 0.1 and max(source_motion) > 0.5:
         raise ValueError(f'frozen tail: {path}; output={output_motion}, source={source_motion}')
-    return {'output':spec['output'],'durations':durations,'tail_output_mad':output_motion,'tail_source_mad':source_motion}
+    result = {'output':spec['output'],'durations':durations,'tail_output_mad':output_motion,'tail_source_mad':source_motion}
+    if 'plan' in spec:
+        report = path.with_name(path.stem+'_flicker.json')
+        command = [sys.executable,str(ROOT/'perf/check_flicker.py'),'--source',str(source),'--gpu',str(path),
+                   '--plan',str(ROOT/spec['plan']),'--start','0','--fps',str(spec['fps']),
+                   '--frames',str(round(durations['video']*spec['fps'])),'--report',str(report)]
+        completed = subprocess.run(command,cwd=ROOT,capture_output=True,text=True,encoding='utf8')
+        if completed.returncode:
+            raise ValueError(f'flicker check failed: {path}: {completed.stdout[-2000:]} {completed.stderr[-500:]}')
+        raw = json.loads(report.read_text(encoding='utf8'))
+        result['flicker'] = {key:value for key,value in raw.items() if key!='measurements'}
+    return result
 
 
 def main() -> int:
     parser=argparse.ArgumentParser()
     parser.add_argument('--manifest',type=pathlib.Path,default=ROOT/'perf/delivery_checks.json')
+    parser.add_argument('--report',type=pathlib.Path,default=ROOT/'perf/tmp/verification.json')
     args=parser.parse_args()
     failures: list[str] = []
     test = subprocess.run([sys.executable, "-m", "pytest", "tests", "-q"], cwd=ROOT)
@@ -75,7 +87,8 @@ def main() -> int:
                 checks.append(check_video(spec))
             except (ValueError,KeyError,subprocess.CalledProcessError) as error:
                 failures.append(str(error))
-        report = ROOT / '演示视频/2026-11-10_05_单文件GPU与停止/媒体自检.json'
+        report = args.report
+        report.parent.mkdir(parents=True,exist_ok=True)
         report.write_text(json.dumps(checks,ensure_ascii=False,indent=2),encoding='utf-8')
     if failures:
         print("verify_all failed:", *failures, sep="\n- ")

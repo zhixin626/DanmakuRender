@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime
 
 from DMR.LiveAPI import LiveAPI
+from DMR.Render import get_engine, DEFAULT_ENGINE, TRANSCODE_ENGINE
 from DMR.utils.bark_notifier import bark_notify_url
 from .baseevents import BaseEvents
 from ..utils import *
@@ -47,6 +48,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             'downloader/livestop': self.onLiveEnd,
             'render/end': self.onRenderEnd,
             'render/error': self.onRenderError,
+            'render/stopped': self.onRenderStop,
             'uploader/end': self.onUploadEnd,
             'uploader/error': self.onUploadError,
             'cleaner/end': self.onCleanEnd,
@@ -127,7 +129,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         output = os.path.join(output_dir, filename)
         transcode_msg = PipeMessage(
             source=self.name, target='render', event='newtask', request_id=uuid(),
-            data={'taskname': self.name, 'mode': 'transcode', 'video': video,
+            data={'taskname': self.name, 'mode': TRANSCODE_ENGINE, 'video': video,
                   'output': output, 'args': transcode_args})
         slot = self.state_dict[video.group_id][-1]['src_video']
         slot['status'] = 'rendering'
@@ -142,10 +144,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         if not self.config['common_event_args'].get('auto_render'):
             return ret_msgs
         render_args = self.config['render_args']['overlay']
-        render_mode = render_args.get('engine', 'dmrender')
-        if render_mode not in ('dmrender', 'emoji_dmrender', 'gpu_render'):
-            self.logger.warning('未知弹幕渲染后端 %s，回退 dmrender', render_mode)
-            render_mode = 'dmrender'
+        render_mode = render_args.get('engine',DEFAULT_ENGINE)
+        if not get_engine(render_mode).overlay:
+            raise ValueError(f'弹幕渲染不支持引擎：{render_mode}')
         if render_args.get('output_name'):
             filename = replace_keywords(render_args['output_name'], video, replace_invalid=True) + \
                     f".{render_args.get('format','mp4')}"
@@ -301,7 +302,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
     def onRenderEnd(self, message:PipeMessage):
         mode = message.data.get('config', {}).get('mode')
-        log_render_end = self.logger.debug if mode == 'emoji_dmrender' else self.logger.info
+        log_render_end = self.logger.debug if get_engine(mode).raster else self.logger.info
         log_render_end(f'{self.name}: {message.msg}.')
 
         request_id = message.request_id
@@ -491,6 +492,16 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         except Exception:
             base['size'] = None
         return VideoInfo(**base)
+
+    def onRenderStop(self,message:PipeMessage):
+        """Clear cancellation from in-flight work without retrying or uploading."""
+        self.logger.info('%s: %s',self.name,message.msg)
+        self._dispatched.pop(message.request_id,None)
+        for group_id,index,vtype in self._locate_all_by_request(message.request_id):
+            slot = self.state_dict[group_id][index][vtype]
+            slot['wait'] = [value for value in slot['wait'] if value != message.request_id]
+            slot['status'] = 'stopped'
+        return []
 
     def onRenderError(self, message:PipeMessage):
         """渲染失败转人工：挂起此段，详情交 WebUI。"""

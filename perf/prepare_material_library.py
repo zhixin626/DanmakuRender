@@ -6,6 +6,8 @@ import json
 import pathlib
 import shutil
 import subprocess
+import copy
+import argparse
 from collections import Counter
 
 
@@ -120,6 +122,72 @@ def copy_config(destination: pathlib.Path, task_name: str) -> None:
         shutil.copy2(CONFIGS / name, destination / name)
 
 
+def enhance_bilibili(path: pathlib.Path) -> dict:
+    """Extend only the augmented JSONL; keep source footage and events intact."""
+    meta, existing = read_jsonl(path)
+    start = float(meta['segment_start_time'])
+    events = [event for event in existing if event.get('_scenario') != 'panel_coverage']
+    templates = {}
+    for event in events:
+        templates.setdefault(event['type'],event)
+    real_meta, real = read_jsonl(SAMPLES/'full_coverage/原始/峰哥_8月18日14点19分_1860-2160_source.jsonl')
+    for event in real:
+        if event['type'] in ('superchat','member'):
+            templates[event['type']] = event
+    additions = []
+
+    def add(kind, seconds, price=None, **overrides):
+        event = copy.deepcopy(templates[kind])
+        event.update(received_at=start+seconds,_synthetic='modified',_scenario='panel_coverage',
+                     _source_note='复制隔离素材中的真实事件结构并改写测试参数')
+        event.update(overrides)
+        if price is not None:
+            event['price_cny'] = price
+            if kind == 'gift':
+                event.update(gift_price=price*10,unit_price_cny=price,gift_count=1,price_unit='电池')
+            elif kind == 'superchat':
+                event.update(price=price)
+            elif kind == 'member':
+                event.update(member_price=price,member_count=1)
+        event['uname'] = f'覆盖{kind}{len(additions)+1}'
+        # Distinct users avoid a future combo-merger accidentally collapsing a
+        # deliberately simultaneous cohort.
+        event['uid'] = f'coverage-{len(additions)+1}'
+        additions.append(event)
+
+    # Seven values cover all six color ranges AND all four duration ranges.
+    # The expensive 180s panels enter first, so they also leave within this clip.
+    for seconds,price in zip((.75,1.25,2,3,4,5,6),(1000,100,50,30,10,1,.5)):
+        add('gift',seconds,price,gift_name=f'档位{price}元',content=f'礼物档位{price}')
+        add('superchat',seconds,price,content=f'SC {price}元\n价格与时长覆盖 😀')
+    # Five gifts + one member at the exact same timestamp. The five low-price
+    # gifts and the three SCs all expire at 110s, leaving the member to reflow.
+    for price in (1,5,10,20,25):
+        add('gift',80,price,gift_name='同时进入',content='同时进入/110秒同时退出')
+    add('member',80,138,member_name='舰长',member_unit='月',content='同刻会员保留')
+    for price in (1,5,10):
+        add('superchat',80,price,content='同刻 SC\n110秒同时退出')
+    for index,price in enumerate((1,5,30,50,100,1000,10,1)):
+        add('gift',120+index*.8,price,gift_name=f'连续{index+1}',content='10秒内8条')
+    registry = json.loads((ROOT/'emoji_pack/bilibili/emoticon/emoticon.json').read_text(encoding='utf-8'))
+    pure = [(key,value) for key,value in registry.items() if value.get('url')][:5]
+    for index,(key,asset) in enumerate(pure):
+        emote = {k:asset[k] for k in ('name','url','width','height','is_dynamic') if k in asset}
+        emote['emoticon_unique'] = key
+        token = '['+str(asset['name']).strip('[]')+']'
+        add('danmaku',16+index*2,content=token,color='ffffff',emoticon=emote)
+        if index<3:
+            add('danmaku',28+index*2,content=f'文字混排 {token} 下载表情',color='ffffff',emoticon=emote)
+    write_jsonl(path,meta,events+additions)
+    return {'added':len(additions),'types':dict(Counter(e['type'] for e in additions)),
+            'price_values':[.5,1,10,30,50,100,1000],
+            'moments':{'price_tiers':'.75–6s','pure_emoticon':'16/18/20/22/24s',
+                       'mixed_emoticon':'28/30/32s','simultaneous_enter':80,
+                       'simultaneous_exit':110,'burst':'120–125.6s',
+                       'staggered_exit':'34/35/36/63/122/180.75/181.25s'},
+            'total_types':dict(Counter(e['type'] for e in events+additions))}
+
+
 def copy_case(name: str, video: pathlib.Path, raw: pathlib.Path, augmented: pathlib.Path, config_name: str) -> dict:
     destination = DEST / name
     destination.mkdir(parents=True, exist_ok=True)
@@ -134,6 +202,12 @@ def copy_case(name: str, video: pathlib.Path, raw: pathlib.Path, augmented: path
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--enhance-bilibili',type=pathlib.Path)
+    args = parser.parse_args()
+    if args.enhance_bilibili:
+        print(json.dumps(enhance_bilibili(args.enhance_bilibili),ensure_ascii=False,indent=2))
+        return
     DEST.mkdir(parents=True, exist_ok=True)
     cases: list[dict] = []
 
