@@ -126,3 +126,51 @@ def test_interleaved_gift_state_keeps_slot_at_number_change(tmp_path):
         assert states[0]["path"][-1][2] == states[1]["path"][0][2]
     finally:
         compiled.cleanup()
+
+
+def test_gift_state_survives_segment_boundary_without_overlap(tmp_path):
+    config = yaml.safe_load(Path("DMR/Config/default.yml").read_text(encoding="utf8"))["render_args"]["overlay"]
+    first_events = tmp_path / "first.jsonl"
+    second_events = tmp_path / "second.jsonl"
+    first_events.write_text(
+        "\n".join(
+            json.dumps(row, ensure_ascii=False)
+            for row in [
+                {"type": "meta", "schema": 1, "platform": "bilibili", "segment_start_time": 100},
+                {"type": "gift", "received_at": 100, "uid": "a", "uname": "a", "gift_name": "小心心", "gift_count": 1, "price_cny": 1},
+            ]
+        ),
+        encoding="utf8",
+    )
+    second_events.write_text(
+        "\n".join(
+            json.dumps(row, ensure_ascii=False)
+            for row in [
+                {"type": "meta", "schema": 1, "platform": "bilibili", "segment_start_time": 110},
+                {"type": "gift", "received_at": 110, "uid": "b", "uname": "b", "gift_name": "小心心", "gift_count": 1, "price_cny": 1},
+            ]
+        ),
+        encoding="utf8",
+    )
+    video = VideoInfo(path="source.flv", dm_file_id=str(first_events), duration=10, resolution=(1080, 1920))
+    first = LayoutCompiler(config, engine="gpu_render", engine_config=config).compile(
+        video=video, events_path=str(first_events), work_dir=str(tmp_path)
+    )
+    try:
+        video.dm_file_id = str(second_events)
+        second = LayoutCompiler(config, engine="gpu_render", engine_config=config).compile(
+            video=video,
+            events_path=str(second_events),
+            previous_state=first.next_state,
+            work_dir=str(tmp_path),
+        )
+        try:
+            plan = RenderPlan.load(second.render_plan_path)
+            panels = [event for event in plan.events if event["track"] == "slide_right"]
+            assert len(panels) >= 2
+            assert all(event["path"][0][2] != 0 for event in panels)
+            assert len({event["path"][-1][2] for event in panels}) == len(panels)
+        finally:
+            second.cleanup()
+    finally:
+        first.cleanup()

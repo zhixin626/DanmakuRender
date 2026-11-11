@@ -780,7 +780,7 @@ class LayoutCompiler:
             existing = [event for event in state_events if event.get("track") == track]
             combined, track_order = self._layout_stacked_panels(
                 track=track,
-                existing=self._coalesce_gift_states(existing),
+                existing=existing,
                 newcomers=self._coalesce_gift_states(new_panels[track]),
                 state_at=old_state.at,
                 initial_order=old_state.track_orders.get(track),
@@ -790,8 +790,31 @@ class LayoutCompiler:
                 height=height,
                 track_cfg=track_render,
             )
+            representative_by_id = {
+                str(event.get("id")): event for event in combined
+            }
             combined = self._expand_gift_states(combined)
-            track_order = [str(event.get("id")) for event in combined]
+            expanded_by_group = {}
+            for event in combined:
+                group = event.get("gift_state_group")
+                if group:
+                    expanded_by_group.setdefault(group, []).append(event)
+            mapped_order = []
+            for event_id in track_order:
+                representative = representative_by_id.get(str(event_id))
+                group = (
+                    representative.get("gift_state_group")
+                    if representative
+                    else None
+                )
+                candidates = expanded_by_group.get(group, []) if group else []
+                if candidates:
+                    mapped_order.append(
+                        str(candidates[-1].get("id"))
+                    )
+                else:
+                    mapped_order.append(str(event_id))
+            track_order = mapped_order
             next_track_orders[track] = track_order
             state_events = [event for event in state_events if event.get("track") != track]
             state_events.extend(combined)
