@@ -618,7 +618,7 @@ class LayoutCompiler:
 
             event_id = self._event_id(video, events_path, record["_line"])
             if event_type == "danmaku":
-                prepared = self._prepare_line(
+                prepared = self._compile_danmaku(
                     record=record,
                     event_id=event_id,
                     start_at=start_at,
@@ -640,90 +640,32 @@ class LayoutCompiler:
                 continue
 
             if event_type == "gift":
-                states = record.get("gift_states") or []
-                state_records = []
-                cumulative_price = 0.0
-                for state_time, state_count, state_price in states:
-                    cumulative_price += float(state_price or 0)
-                    state_record = dict(record)
-                    state_record["received_at"] = state_time
-                    state_record["gift_count"] = state_count
-                    state_record["price_cny"] = cumulative_price
-                    state_records.append(state_record)
-                if not state_records:
-                    state_records = [record]
-                final_count = _positive_count(record.get("gift_count"))
-                final_duration = _panel_duration(
-                    record, gift_render, slide_right_render
+                panels = self._compile_gift(
+                    record=record,
+                    event_id=event_id,
+                    event_track=event_track,
+                    segment_time_shift=segment_time_shift,
+                    width=width,
+                    height=height,
+                    gift_render=gift_render,
+                    slide_right_render=slide_right_render,
+                    emoji_measurer=emoji_measurer,
                 )
-                for state_index, state_record in enumerate(state_records):
-                    state_start = float(state_record["received_at"]) + segment_time_shift
-                    if state_index + 1 < len(state_records):
-                        state_end = float(state_records[state_index + 1]["received_at"]) + segment_time_shift
-                    else:
-                        state_end = state_start + final_duration
-                    state_duration = max(0.1, state_end - state_start)
-                    display_record = dict(state_record)
-                    display_record["gift_count_suffix"] = _quantity_suffix(
-                        state_record.get("gift_count")
-                    )
-                    content = self._format_template(
-                        gift_render.get("template"),
-                        display_record,
-                        (
-                            f"送出 {record.get('gift_name', '')}"
-                            f"{display_record['gift_count_suffix']}"
-                        ),
-                    )
-                    panel = self._prepare_panel(
-                        event_id if len(state_records) == 1 else f"{event_id}:state{state_index}",
-                        event_track,
-                        state_start,
-                        state_duration,
-                        record.get("uname", ""),
-                        content,
-                        width,
-                        height,
-                        gift_render,
-                        slide_right_render,
-                        panel_class="gift",
-                        record=display_record,
-                        emoji_measurer=emoji_measurer,
-                    )
-                    panel["_gift_state_index"] = state_index
-                    if len(state_records) > 1:
-                        panel["gift_state_group"] = event_id
-                    new_panels[event_track].append(panel)
+                new_panels[event_track].extend(panels)
+                for _ in panels:
                     mark_accepted(event_track)
                 continue
 
             if event_type == "member":
-                display_record = dict(record)
-                display_record["member_count_suffix"] = _optional_quantity_suffix(
-                    record.get("member_count"),
-                    record.get("member_unit", ""),
-                )
-                content = self._format_template(
-                    member_render.get("template"),
-                    display_record,
-                    (
-                        f"开通 {record.get('member_name', '')}"
-                        f"{display_record['member_count_suffix']}"
-                    ),
-                )
-                panel = self._prepare_panel(
-                    event_id,
-                    event_track,
-                    start_at,
-                    _panel_duration(record, member_render, slide_right_render),
-                    record.get("uname", ""),
-                    content,
-                    width,
-                    height,
-                    member_render,
-                    slide_right_render,
-                    panel_class="member",
+                panel = self._compile_member(
                     record=record,
+                    event_id=event_id,
+                    event_track=event_track,
+                    start_at=start_at,
+                    width=width,
+                    height=height,
+                    member_render=member_render,
+                    slide_right_render=slide_right_render,
                     emoji_measurer=emoji_measurer,
                 )
                 new_panels[event_track].append(panel)
@@ -731,19 +673,15 @@ class LayoutCompiler:
                 continue
 
             if event_type == "superchat":
-                panel = self._prepare_panel(
-                    event_id,
-                    event_track,
-                    start_at,
-                    _panel_duration(record, sc_render, slide_left_render),
-                    record.get("uname", ""),
-                    str(record.get("content", "") or ""),
-                    width,
-                    height,
-                    sc_render,
-                    slide_left_render,
-                    panel_class="superchat",
+                panel = self._compile_superchat(
                     record=record,
+                    event_id=event_id,
+                    event_track=event_track,
+                    start_at=start_at,
+                    width=width,
+                    height=height,
+                    sc_render=sc_render,
+                    slide_left_render=slide_left_render,
                     emoji_measurer=emoji_measurer,
                 )
                 new_panels[event_track].append(panel)
@@ -877,6 +815,181 @@ class LayoutCompiler:
             track_stats=track_stats,
             unrouted_dropped_count=unrouted_dropped,
             cleanup_paths=[plan_path],
+        )
+
+    def _compile_danmaku(
+        self,
+        *,
+        record: dict,
+        event_id: str,
+        start_at: float,
+        width: int,
+        height: int,
+        dan_render: dict,
+        style: dict,
+        vip_map: dict,
+        keyword_patterns: list,
+        username_patterns: list,
+        max_length: int | None,
+        text_measurer,
+        emoji_measurer,
+    ) -> dict | None:
+        """Compile one scrolling danmaku record without changing placement."""
+        return self._prepare_line(
+            record=record,
+            event_id=event_id,
+            start_at=start_at,
+            width=width,
+            height=height,
+            dan_render=dan_render,
+            style=style,
+            vip_map=vip_map,
+            keyword_patterns=keyword_patterns,
+            username_patterns=username_patterns,
+            max_length=max_length,
+            text_measurer=text_measurer,
+            emoji_measurer=emoji_measurer,
+        )
+
+    def _compile_gift(
+        self,
+        *,
+        record: dict,
+        event_id: str,
+        event_track: str,
+        segment_time_shift: float,
+        width: int,
+        height: int,
+        gift_render: dict,
+        slide_right_render: dict,
+        emoji_measurer,
+    ) -> list[dict]:
+        """Compile all contiguous quantity states for one merged gift."""
+        states = record.get("gift_states") or []
+        state_records = []
+        cumulative_price = 0.0
+        for state_time, state_count, state_price in states:
+            cumulative_price += float(state_price or 0)
+            state_record = dict(record)
+            state_record["received_at"] = state_time
+            state_record["gift_count"] = state_count
+            state_record["price_cny"] = cumulative_price
+            state_records.append(state_record)
+        if not state_records:
+            state_records = [record]
+        final_duration = _panel_duration(record, gift_render, slide_right_render)
+        panels = []
+        for state_index, state_record in enumerate(state_records):
+            state_start = float(state_record["received_at"]) + segment_time_shift
+            if state_index + 1 < len(state_records):
+                state_end = float(state_records[state_index + 1]["received_at"]) + segment_time_shift
+            else:
+                state_end = state_start + final_duration
+            state_duration = max(0.1, state_end - state_start)
+            display_record = dict(state_record)
+            display_record["gift_count_suffix"] = _quantity_suffix(
+                state_record.get("gift_count")
+            )
+            content = self._format_template(
+                gift_render.get("template"),
+                display_record,
+                (
+                    f"送出 {record.get('gift_name', '')}"
+                    f"{display_record['gift_count_suffix']}"
+                ),
+            )
+            panel = self._prepare_panel(
+                event_id if len(state_records) == 1 else f"{event_id}:state{state_index}",
+                event_track,
+                state_start,
+                state_duration,
+                record.get("uname", ""),
+                content,
+                width,
+                height,
+                gift_render,
+                slide_right_render,
+                panel_class="gift",
+                record=display_record,
+                emoji_measurer=emoji_measurer,
+            )
+            panel["_gift_state_index"] = state_index
+            if len(state_records) > 1:
+                panel["gift_state_group"] = event_id
+            panels.append(panel)
+        return panels
+
+    def _compile_member(
+        self,
+        *,
+        record: dict,
+        event_id: str,
+        event_track: str,
+        start_at: float,
+        width: int,
+        height: int,
+        member_render: dict,
+        slide_right_render: dict,
+        emoji_measurer,
+    ) -> dict:
+        """Compile one membership panel using the shared slide-right layout."""
+        display_record = dict(record)
+        display_record["member_count_suffix"] = _optional_quantity_suffix(
+            record.get("member_count"),
+            record.get("member_unit", ""),
+        )
+        content = self._format_template(
+            member_render.get("template"),
+            display_record,
+            (
+                f"开通 {record.get('member_name', '')}"
+                f"{display_record['member_count_suffix']}"
+            ),
+        )
+        return self._prepare_panel(
+            event_id,
+            event_track,
+            start_at,
+            _panel_duration(record, member_render, slide_right_render),
+            record.get("uname", ""),
+            content,
+            width,
+            height,
+            member_render,
+            slide_right_render,
+            panel_class="member",
+            record=record,
+            emoji_measurer=emoji_measurer,
+        )
+
+    def _compile_superchat(
+        self,
+        *,
+        record: dict,
+        event_id: str,
+        event_track: str,
+        start_at: float,
+        width: int,
+        height: int,
+        sc_render: dict,
+        slide_left_render: dict,
+        emoji_measurer,
+    ) -> dict:
+        """Compile one superchat panel using the slide-left layout."""
+        return self._prepare_panel(
+            event_id,
+            event_track,
+            start_at,
+            _panel_duration(record, sc_render, slide_left_render),
+            record.get("uname", ""),
+            str(record.get("content", "") or ""),
+            width,
+            height,
+            sc_render,
+            slide_left_render,
+            panel_class="superchat",
+            record=record,
+            emoji_measurer=emoji_measurer,
         )
 
     @staticmethod

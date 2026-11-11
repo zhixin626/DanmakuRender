@@ -273,7 +273,7 @@ download_args:
 # 渲染器核心参数
 render_kernel_args:
   # 同时执行的渲染/转码任务数。emoji_dmrender 单个任务内部固定整段单路渲染；
-  # 多个任务同时执行时，显存和CPU占用仍会叠加
+  # 多个任务同时执行时，显存和CPU占用仍会叠加。gpu_render 实测：2 路并发吞吐约为单路的 1.8 倍，CPU 平均约 1.5 核；3 路时 NVDEC 饱和，收益很小。建议不超过 2。
   nrenders: 1
 
 # 渲染器默认参数
