@@ -82,7 +82,7 @@
 ### 5. 代码收尾（Claude 检查后列出，第 2 项之后做）
 - **README-gpu.md**：补一节"相关配置"，说明 `r2l.speed`（单位：画布像素/秒）、`combo_window_seconds`（5 秒滑动窗口，数字逐步上涨）和 `resolution_*` 的 4 个阈值。说明 `rescale_orientation: adaptive` 已经映射为 auto，由整场重渲染策略代替。
 - **PLAN.md**：阶段 3 和阶段 4 的设计以最终实现为准。在 `combo_id`/`combo_mode`/10 秒的旧描述旁标注"已被 2026-11-11 用户决定取代：5 秒滑动窗口、不使用平台连击字段、数字逐步上涨、E/G 共用"。`CURRENT_TASK.md` 第 16 条也同样标注。
-- **MERGE_CHECKLIST.md**：在排除清单里明确写出 `configs/DMR-月亮3.yml`。这个文件现在已经被 git 跟踪，合并时不要带进去。
+- **MERGE_CHECKLIST.md**：在排除清单里明确写出 `configs/DMR-月亮3.yml`。这个文件现在已经被 git 跟踪，合并时不要带进去。另加一条合并后的人工步骤：把用户自己 `configs/global.yml` 中的 `rescale_orientation: adaptive` 改为 `auto`。这一步由用户合并时自己处理，Codex 不改这个文件。
 - **`_log_resolution_policy`**：完成第 2 项后，确认只在整场结束、真正派发合并时才执行一次，不在每个分段结束时重复执行。
 
 ### 通用要求
