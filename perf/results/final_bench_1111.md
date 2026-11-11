@@ -59,8 +59,8 @@ G 最终相对 G 优化前墙钟慢 0.8%，但进程 CPU 平均下降约 63%，�
 | A4 | 36s | `[doge]`、URL 表情、混排、不存在短码 | 部分通过，A4 图；URL 表情依赖缓存 |
 | A5 | 120–130s | 150 条爆发与 50 条同时间戳 | 通过，A5 图和 RenderPlan 丢弃计数 |
 | A6 | 200–206s | 三个任务 VIP uid、VIP 超长 | 通过，A6 图 |
-| A7 | 100s | 关键词/用户过滤 | 未测：任务配置过滤规则为空，覆盖配置未单独渲染 |
-| A8 | 110s | entry 事件 | 通过，新增 `entry → r2l` 映射，A8 图 |
+| A7 | 100s | 关键词/用户过滤 | 通过：`perf/configs_bench/` 覆盖配置单独渲染前 2 分钟 E/G，`FILTERME` 和 `blocked-user` 均被丢弃；A7_filter 图 |
+| A8 | 110s | entry 事件 | 不适用：原有产品设计是录制端写入、渲染端默认忽略；已撤回 entry 映射并补默认丢弃测试，A8 图用于确认无进场弹幕 |
 | A9 | 140–152s | 缺 uname/uid、空/null content | 通过，A9 图 |
 | B1 | 300–325s | SC 价格/颜色/时长档 | 通过，B1 图 |
 | B2 | 310s | 4 行以上、无空格长词、标点 | 通过，B2 图 |
@@ -82,7 +82,7 @@ G 最终相对 G 优化前墙钟慢 0.8%，但进程 CPU 平均下降约 63%，�
 | F2 | 560/570s | 文件顺序与时间顺序相反 | 通过，F2 图 |
 | F3 | 580s | 完全重复的两行 | 通过，F3 图；按当前无 tid 行为保留 |
 
-补齐后的 G 功能输出前 10 分钟逐帧检查：请求 36000 帧、实际 35964 帧，`candidate_frames=0`、`flicker_frames=0`、`missing_regions=0`。E/G 功能视频为 `functional_E_10m.mp4`、`functional_G_10m.mp4`（临时渲染输出），截图和说明已放入演示目录。
+补齐后的 G 功能输出前 10 分钟逐帧检查：请求 36000 帧、实际 35964 帧，`candidate_frames=0`、`flicker_frames=0`、`missing_regions=0`。A7 专用覆盖 E/G 前 2 分钟均成功，计数快照见 `filter_counts.json`。E/G 功能视频为 `functional_E_10m.mp4`、`functional_G_10m.mp4`（临时渲染输出），截图和说明已放入演示目录。
 
 ## 10b 贡献与遗留
 

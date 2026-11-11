@@ -11,6 +11,29 @@ from DMR.Render.layout_compiler import LayoutCompiler, clean_text, _hex_color
 def test_invalid_event_color_falls_back_to_default():
     assert _hex_color("zzzzzz", "#FFFFFF") == "#FFFFFF"
     assert _hex_color("123456", "#FFFFFF") == "#123456"
+
+
+def test_entry_events_are_dropped_by_default(tmp_path):
+    events = tmp_path / "entry.jsonl"
+    events.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "meta", "schema": 1, "platform": "bilibili", "segment_start_time": 100}),
+                json.dumps({"type": "entry", "received_at": 100, "uid": "1", "uname": "entry", "content": "进入"}),
+            ]
+        ),
+        encoding="utf8",
+    )
+    config = {"r2l": {"danmaku": {"font": "Microsoft YaHei", "fontsize": 30}}, "slide_left": {}, "slide_right": {}}
+    video = VideoInfo(path="source.flv", dm_file_id=str(events), duration=20, resolution=(1920, 1080))
+    compiled = LayoutCompiler(config, engine="gpu_render", engine_config=config).compile(
+        video=video, events_path=str(events), work_dir=str(tmp_path)
+    )
+    try:
+        assert compiled.event_count == 0
+        assert compiled.dropped_count == 1
+    finally:
+        compiled.cleanup()
 from DMR.Render.layout_models import RenderPlan
 from DMR.Render.sprites import SpriteFactory
 from DMR.utils import VideoInfo

@@ -14,7 +14,6 @@ TRACK_SLIDE_LEFT = "slide_left"
 TRACK_SLIDE_RIGHT = "slide_right"
 EVENT_TRACKS = {
     "danmaku": TRACK_R2L,
-    "entry": TRACK_R2L,
     "superchat": TRACK_SLIDE_LEFT,
     "gift": TRACK_SLIDE_RIGHT,
     "member": TRACK_SLIDE_RIGHT,
