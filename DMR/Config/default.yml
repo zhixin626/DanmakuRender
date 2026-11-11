@@ -362,8 +362,8 @@ render_args:
     emoji_font: ~
     # GPU/Pillow 文字回退链；按顺序查找缺失字形，留空时只使用主字体
     fallback_fonts: [Malgun Gothic, Yu Gothic, Leelawadee UI, Segoe UI, Segoe UI Symbol, Cambria Math]
-    # Pillow 复杂文字排版：auto 优先 RAQM，依赖不可用时回退 BASIC
-    layout_engine: auto
+    # Pillow 复杂文字排版：默认 BASIC；安装并验证 fribidi 后才改为 auto/raqm
+    layout_engine: basic
     # 轨道是第一层，事件类型嵌套在所属轨道中。
     r2l:
       # 固定滚动速度，单位为画布像素/秒；关闭1080p缩放使用其他分辨率时也不自动缩放

@@ -35,7 +35,7 @@ render_args:
 - `slide_left`、`slide_right` 的 `price_duration_ranges` 支持 4 个价格档位：0–30、30–50、50–100、100 元以上；档位的 `seconds` 决定药丸显示时长。
 - `rescale_orientation: adaptive` 已映射为 `auto`，由整场结束时的少数方向分段重渲染策略统一到主画布；不再按每段即时切换画布。
 - `fallback_fonts` 按顺序为 GPU/Pillow 缺字选择回退字体；测量和绘制共用同一条 cmap 分段链，找不到的字只警告一次并使用主字体。
-- `layout_engine: auto` 会在活动 venv 的相对 `Library/bin`、`bin` 或 `DLLs` 目录寻找 RAQM 依赖；本机没有可信 fribidi DLL 时自动使用 BASIC，不下载或提交 DLL。可信安装来源应为 MSYS2 或 conda-forge，并在部署记录版本和 SHA256。
+- `layout_engine` 默认是 `basic`；确认安装并验证 RAQM 后可改为 `auto`/`raqm`。加载器只在活动 venv 的相对 `Library/bin`、`bin` 或 `DLLs` 目录寻找依赖，不下载或提交 DLL。可信安装来源应为 MSYS2 或 conda-forge，并在部署记录版本和 SHA256。
 
 GPU 初始化或渲染失败时自动回退到 `emoji_dmrender`，并从同一布局检查点重编译 E 计划。用户停止不自动回退或重试；停止任务进入失败列表，可在 WebUI 中重试，成片独立保留，已释放直播组不会自动恢复合并/上传。未知引擎名直接报错。回退沿用原编码器配置：无 NVENC 的机器需要自行配置可用的软件编码器，回退不会自动改编码器。
 
