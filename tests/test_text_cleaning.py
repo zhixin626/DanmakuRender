@@ -57,7 +57,7 @@ def test_invisible_uname_falls_back_to_uid_and_empty_content_drops(tmp_path):
     events = tmp_path / "events.jsonl"
     rows = [
         {"type": "meta", "schema": 1, "platform": "bilibili", "segment_start_time": 100},
-        {"type": "danmaku", "received_at": 100, "uid": "604006167", "uname": "\u3164\u200b", "content": "保留"},
+        {"type": "danmaku", "received_at": 100, "uid": "604006167", "tid": "  same  ", "uname": "\u3164\u200b", "content": "保留"},
         {"type": "danmaku", "received_at": 101, "uid": "2", "uname": "用户", "content": "\u2028\u200b"},
     ]
     events.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf8")
@@ -71,6 +71,8 @@ def test_invisible_uname_falls_back_to_uid_and_empty_content_drops(tmp_path):
         video=video, events_path=str(events), work_dir=str(tmp_path)
     )
     try:
+        _, records = LayoutCompiler._read_events(str(events))
+        assert records[0]["tid"] == "  same  "
         plan = RenderPlan.load(compiled.render_plan_path)
         lines = [event for event in plan.events if event["track"] == "r2l"]
         assert len(lines) == 1
@@ -81,9 +83,16 @@ def test_invisible_uname_falls_back_to_uid_and_empty_content_drops(tmp_path):
 
 def test_scroll_sprite_margin_does_not_change_measurement():
     factory = SpriteFactory("C:/Windows/Fonts/msyhbd.ttc", "C:/Windows/Fonts/seguiemj.ttf", {}, 36)
-    plain = factory.get_sprite("Ấ กิ่", (255, 255, 255), scroll_margin=False)
-    padded = factory.get_sprite("Ấ กิ่", (255, 255, 255), scroll_margin=True)
-    assert padded[4] > plain[4]
+    plain = factory.get_sprite("Ấ กิ่", (255, 255, 255), scroll_vertical_gap=0)
+    padded = factory.get_sprite("Ấ กิ่", (255, 255, 255), scroll_vertical_gap=10)
     assert padded[5] > plain[5]
-    assert padded[8] > plain[8]
+    assert padded[4] == plain[4]
     assert padded[9] > plain[9]
+
+
+def test_scroll_sprite_margin_is_half_the_configured_gap():
+    factory = SpriteFactory("C:/Windows/Fonts/msyhbd.ttc", "C:/Windows/Fonts/seguiemj.ttf", {}, 36)
+    no_gap = factory.get_sprite("Ấ", (255, 255, 255), scroll_vertical_gap=0)
+    ten_px = factory.get_sprite("Ấ", (255, 255, 255), scroll_vertical_gap=10)
+    assert no_gap[5] < ten_px[5]
+    assert ten_px[5] - no_gap[5] == 10

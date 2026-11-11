@@ -60,6 +60,16 @@ _VISIBLE_SPACE_CHARS = {
     "\uffa0",
     "\u2800",
 }
+DISPLAY_FIELDS = (
+    "uname",
+    "content",
+    "gift_name",
+    "member_name",
+    "member_unit",
+    "message",
+    "title",
+    "text",
+)
 
 
 def clean_text(value) -> str:
@@ -79,17 +89,6 @@ def clean_text(value) -> str:
             output.append(char)
     return re.sub(r" +", " ", "".join(output)).strip()
 
-
-def _clean_event_value(value):
-    if isinstance(value, dict):
-        return {key: _clean_event_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_clean_event_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_clean_event_value(item) for item in value)
-    if isinstance(value, str):
-        return clean_text(value)
-    return value
 
 PANEL_ENTER_DURATION = 0.5
 PANEL_EXIT_DURATION = 0.5
@@ -695,6 +694,7 @@ class LayoutCompiler:
                     max_length=max_length,
                     text_measurer=text_measurer,
                     emoji_measurer=emoji_measurer,
+                    scroll_vertical_gap=_pixels(r2l_render.get("vertical_gap"), 6.0),
                 )
                 if prepared is None:
                     mark_dropped(event_track)
@@ -902,6 +902,7 @@ class LayoutCompiler:
         max_length: int | None,
         text_measurer,
         emoji_measurer,
+        scroll_vertical_gap: float,
     ) -> dict | None:
         """Compile one scrolling danmaku record without changing placement."""
         return self._prepare_line(
@@ -918,6 +919,7 @@ class LayoutCompiler:
             max_length=max_length,
             text_measurer=text_measurer,
             emoji_measurer=emoji_measurer,
+            scroll_vertical_gap=scroll_vertical_gap,
         )
 
     def _compile_gift(
@@ -1148,10 +1150,11 @@ class LayoutCompiler:
         max_length,
         text_measurer,
         emoji_measurer,
+        scroll_vertical_gap,
     ):
-        content = clean_text(record.get("content", ""))
-        uid = clean_text(record.get("uid", ""))
-        uname = clean_text(record.get("uname", "")) or uid
+        content = str(record.get("content", "") or "")
+        uid = str(record.get("uid", "") or "")
+        uname = str(record.get("uname", "") or "") or uid
         if record.get("type") == "entry":
             content = content or f"{uname} 进入直播间"
         if not content:
@@ -1208,6 +1211,7 @@ class LayoutCompiler:
         visual = {
             "type": "line",
             "text": text,
+            "scroll_vertical_gap": scroll_vertical_gap,
             "style": {
                 **style,
                 "color": _hex_color(record.get("color"), "#FFFFFF"),
@@ -1350,8 +1354,8 @@ class LayoutCompiler:
             measurer = PillowText(font, fontsize, content_outline, pack, emoji_font)
             name_measurer = PillowText(font, fontsize, name_outline, pack, emoji_font)
         record = record or {}
-        content = clean_text(content)
-        uname = clean_text(uname) or clean_text(record.get("uid", ""))
+        content = str(content or "")
+        uname = str(uname or "") or str(record.get("uid", "") or "")
         if not content:
             return None
         lines = measurer.wrap(content, text_budget) or [""]
@@ -1824,15 +1828,18 @@ class LayoutCompiler:
 
     @staticmethod
     def _format_template(template, record, default):
+        def normalize(value):
+            return str(value or "").replace("\n", " ")
+
         if not template:
-            return clean_text(default)
+            return normalize(default)
         try:
-            return clean_text(str(template).format_map(_SafeFormatDict(record)))
+            return normalize(str(template).format_map(_SafeFormatDict(record)))
         except Exception:
             try:
-                return clean_text(replace_keywords(template, record))
+                return normalize(replace_keywords(template, record))
             except Exception:
-                return clean_text(default)
+                return normalize(default)
 
     @staticmethod
     def _event_id(video, events_path, line_number):
@@ -1866,7 +1873,9 @@ class LayoutCompiler:
                     raise ValueError(f"{path} 包含多个 meta")
                 header = data
             else:
-                data = _clean_event_value(data)
+                for field in DISPLAY_FIELDS:
+                    if field in data and isinstance(data[field], str):
+                        data[field] = clean_text(data[field])
                 data["_line"] = index + 1
                 records.append(data)
         if not header:
