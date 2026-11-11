@@ -23,6 +23,8 @@
 
 `CUPY_CUDA_ARRAY_INTERFACE_SYNC=0` 的验证跑为 wall 17.92s、copy/scale 0.59s（3.0%），证明隐藏 CAI 同步来源判断正确。基线与 10b0 输出均完成前 1500 帧逐帧检查：0 candidate / 0 flicker；ffprobe 两条流均 182.100s、9105 帧。
 
+10b7 的 A/B 实验也未发现可采纳的流拆分收益：A 不传 `cudastream` 40.233s，B 拆分 compose/encoder stream 40.834s；NVML 采样下两组均约 41.018s，B 反而慢约 1.5%。
+
 ## 10b4 实验结论
 
 在隔离 worktree 中只移除 `blend_ready.synchronize()`，不提交实验代码。相同素材、相同 500ms `nvidia-smi` 采样：保留等待 40.7538s，去等待 40.7736s，墙钟改善约 -0.05%。两者均成功输出 9105 帧、182.100s，去等待版本前 1500 帧逐帧检查 0 flicker。采样均值（保留 / 去等待）：NVENC 20.62% / 20.70%，NVDEC 11.47% / 11.52%，GPU 5.41% / 4.92%，显存峰值均 1637 MiB。`nvidia-smi` 每次启动本身会拉长测试，故只比较同一采样方法的相对值。
