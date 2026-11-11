@@ -11,14 +11,6 @@ from DMR.Render import gpu_render as gpu
 from DMR.Render.sprites import build_atlas, detect_platform
 
 
-def test_create_wait_event_uses_blocking_cuda_fence():
-    event = object()
-    constructor = Mock(return_value=event)
-    cupy = SimpleNamespace(cuda=SimpleNamespace(Event=constructor))
-    assert gpu.create_wait_event(cupy) is event
-    constructor.assert_called_once_with(block=True, disable_timing=True)
-
-
 def fake_encoding(monkeypatch):
     monkeypatch.setattr(gpu, "frame_geometry", lambda _: (2, 2))
     encoder = SimpleNamespace(
@@ -66,7 +58,8 @@ def test_progress_and_one_sync_per_frame(monkeypatch, tmp_path):
     )
     assert result["frames"] == 3
     assert progress == sorted(progress) and 0 < progress[0] < progress[-1] <= 99
-    assert encoder.Encode.call_count == sync.call_count == 3
+    assert encoder.Encode.call_count == 3
+    assert sync.call_count == 0
     encoder.EndEncode.assert_called_once()
 
 

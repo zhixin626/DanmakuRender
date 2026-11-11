@@ -209,14 +209,6 @@ def load_cuda_modules() -> tuple[Any, Any]:
     return cupy, PyNvVideoCodec
 
 
-def create_wait_event(cupy: Any):
-    """Create a CUDA fence that sleeps the host while waiting for reuse."""
-    try:
-        return cupy.cuda.Event(block=True, disable_timing=True)
-    except TypeError:
-        return cupy.cuda.Event(disable_timing=True)
-
-
 def codec_name(video_encoder: str) -> str:
     """Convert an FFmpeg NVENC name into PyNvVideoCodec's codec name."""
     return video_encoder.removesuffix("_nvenc")
@@ -301,7 +293,7 @@ def decode_frames(
         owned = buffers[slot]
         if owned is None or (owned.width, owned.height) != geometry:
             owned = buffers[slot] = NV12Buffer(cupy, *geometry)
-            owned.ready = create_wait_event(cupy)
+            owned.ready = cupy.cuda.Event(block=True, disable_timing=True)
         owned.load(decoded)
         owned.ready.record()
         copied = owned.ready
@@ -473,23 +465,6 @@ class PipelineProfiler:
         return result
 
 
-def event_position(event: RenderEvent, timestamp: float) -> tuple[int, int] | None:
-    """Interpolate one RenderPlan path at a presentation timestamp."""
-    path = event.path
-    if not path:
-        return None
-    if timestamp <= path[0][0]:
-        return int(round(path[0][1])), int(round(path[0][2]))
-    for left, right in zip(path, path[1:]):
-        if timestamp <= right[0]:
-            span = max(1e-9, float(right[0]) - float(left[0]))
-            ratio = (timestamp - float(left[0])) / span
-            x = left[1] + (right[1] - left[1]) * ratio
-            y = left[2] + (right[2] - left[2]) * ratio
-            return int(round(x)), int(round(y))
-    return int(round(path[-1][1])), int(round(path[-1][2]))
-
-
 class EventScanner:
     """Maintain active events with a start-time scanline."""
 
@@ -546,6 +521,8 @@ class EventScanner:
         }
         if expired:
             self.active.difference_update(expired)
+            for index in expired:
+                self.path_indices.pop(index, None)
             self.active_order = [
                 item for item in self.active_order if item[1] not in expired
             ]
@@ -763,7 +740,7 @@ class FrameRing:
     def __init__(self, cupy: Any, width: int, height: int, stream: Any):
         self.stream = stream
         self.buffers = [NV12Buffer(cupy, width, height) for _ in range(4)]
-        self.copied = [create_wait_event(cupy) for _ in self.buffers]
+        self.copied = [cupy.cuda.Event(block=True, disable_timing=True) for _ in self.buffers]
         self.used = [False] * len(self.buffers)
 
     def acquire(self, index: int) -> NV12Buffer:
@@ -797,6 +774,7 @@ def encode_to_file(
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
     encode_stream = cupy.cuda.Stream(non_blocking=True)
+    blend_ready = cupy.cuda.Event(block=True, disable_timing=True)
     encoder = create_encoder(
         nvc,
         width,
@@ -875,9 +853,10 @@ def encode_to_file(
                     profiler.cuda_end(blend_event, encode_stream)
                 if profiled:
                     profiler.add("scanner_kernel_enqueue", time.perf_counter() - stage_start)
+                blend_ready.record(encode_stream)
                 sync_wall_start = time.perf_counter() if profiled else 0.0
                 sync_cpu_start = time.process_time() if profiled else 0.0
-                encode_stream.synchronize()
+                blend_ready.synchronize()
                 if profiled:
                     sync_cpu_seconds += time.process_time() - sync_cpu_start
                     profiler.add("synchronize_wait", time.perf_counter() - sync_wall_start)
