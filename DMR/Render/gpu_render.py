@@ -402,6 +402,7 @@ class PipelineProfiler:
         self.seconds = defaultdict(float)
         self.counts = defaultdict(int)
         self.output = os.environ.get("DMR_PIPELINE_PROFILE_OUTPUT")
+        self.cuda_events = []
 
     def add(self, name: str, seconds: float) -> None:
         if not self.enabled:
@@ -409,13 +410,43 @@ class PipelineProfiler:
         self.seconds[name] += max(0.0, float(seconds))
         self.counts[name] += 1
 
-    def finish(self, wall_s: float, frames: int) -> dict[str, Any] | None:
+    def cuda_start(self, cupy, stream, name: str):
+        if not self.enabled:
+            return None
+        start = cupy.cuda.Event(disable_timing=False)
+        end = cupy.cuda.Event(disable_timing=False)
+        start.record(stream)
+        return name, start, end
+
+    def cuda_end(self, token, stream) -> None:
+        if token is None:
+            return
+        token[2].record(stream)
+        self.cuda_events.append(token)
+
+    def collect_cuda(self) -> None:
+        if not self.enabled:
+            return
+        for name, start, end in self.cuda_events:
+            self.add(f"gpu_{name}", start.elapsed_time(end) / 1000.0)
+        self.cuda_events.clear()
+
+    def finish(
+        self,
+        wall_s: float,
+        frames: int,
+        process_cpu_s: float = 0.0,
+        sync_cpu_s: float = 0.0,
+    ) -> dict[str, Any] | None:
         if not self.enabled:
             return None
         total = sum(self.seconds.values())
         result = {
             "frames": frames,
             "wall_s": wall_s,
+            "process_cpu_s": process_cpu_s,
+            "sync_cpu_s": sync_cpu_s,
+            "sync_cpu_fraction": sync_cpu_s / max(1e-9, wall_s),
             "stages": {
                 name: {
                     "seconds": value,
@@ -771,6 +802,8 @@ def encode_to_file(
     frame_count = 0
     packet_times = []
     started = time.perf_counter()
+    process_started = time.process_time()
+    sync_cpu_seconds = 0.0
     previous_body_end = started
     last_progress = started
     try:
@@ -783,35 +816,48 @@ def encode_to_file(
                 source_fps=source_frame_rate,
                 start_offset=start_offset,
             ):
-                body_start = time.perf_counter()
-                profiler.add("decode_wait", body_start - previous_body_end)
+                profiled = profiler.enabled
+                body_start = time.perf_counter() if profiled else 0.0
+                if profiled:
+                    profiler.add("decode_wait", body_start - previous_body_end)
                 check_stop(stop_event)
                 buffer = ring.acquire(frame_count)
-                stage_start = time.perf_counter()
+                stage_start = time.perf_counter() if profiled else 0.0
+                scale_event = profiler.cuda_start(cupy, encode_stream, "scale")
                 with encode_stream:
                     buffer.load_into_canvas(decoded)
-                profiler.add("copy_scale", time.perf_counter() - stage_start)
-                stage_start = time.perf_counter()
-                with encode_stream:
+                    profiler.cuda_end(scale_event, encode_stream)
+                    if profiled:
+                        profiler.add("copy_scale", time.perf_counter() - stage_start)
+                    stage_start = time.perf_counter() if profiled else 0.0
+                    blend_event = profiler.cuda_start(cupy, encode_stream, "blend")
                     active_counts.append(compositor.apply(buffer, frame_time))
-                profiler.add("scanner_kernel_enqueue", time.perf_counter() - stage_start)
-                stage_start = time.perf_counter()
+                    profiler.cuda_end(blend_event, encode_stream)
+                if profiled:
+                    profiler.add("scanner_kernel_enqueue", time.perf_counter() - stage_start)
+                sync_wall_start = time.perf_counter() if profiled else 0.0
+                sync_cpu_start = time.process_time() if profiled else 0.0
                 encode_stream.synchronize()
-                profiler.add("synchronize_wait", time.perf_counter() - stage_start)
+                if profiled:
+                    sync_cpu_seconds += time.process_time() - sync_cpu_start
+                    profiler.add("synchronize_wait", time.perf_counter() - sync_wall_start)
                 picture = nvc.NV_ENC_PIC_PARAMS()
                 picture.frameIdx = frame_count
                 picture.inputTimeStamp = frame_count
-                stage_start = time.perf_counter()
+                stage_start = time.perf_counter() if profiled else 0.0
                 packets = encoder.Encode(buffer, picture)
-                profiler.add("encode_call", time.perf_counter() - stage_start)
+                if profiled:
+                    profiler.add("encode_call", time.perf_counter() - stage_start)
                 ring.submitted(frame_count)
-                stage_start = time.perf_counter()
+                stage_start = time.perf_counter() if profiled else 0.0
                 for packet in packets:
                     stream.write(packet["data"])
                     packet_times.append(int(packet["timestamp"]))
-                profiler.add("write_packet", time.perf_counter() - stage_start)
+                if profiled:
+                    profiler.add("write_packet", time.perf_counter() - stage_start)
                 frame_count += 1
-                previous_body_end = time.perf_counter()
+                if profiled:
+                    previous_body_end = time.perf_counter()
                 now = time.perf_counter()
                 if progress_cb and now - last_progress >= 0.5:
                     progress_cb(
@@ -834,7 +880,13 @@ def encode_to_file(
         # Drop input references now, before render_one releases the CUDA pool.
         buffer = decoded = first = frames = None
     elapsed = time.perf_counter() - started
-    pipeline_profile = profiler.finish(elapsed, frame_count)
+    profiler.collect_cuda()
+    pipeline_profile = profiler.finish(
+        elapsed,
+        frame_count,
+        process_cpu_s=time.process_time() - process_started,
+        sync_cpu_s=sync_cpu_seconds,
+    )
     return {
         "frames": frame_count,
         "packet_times": packet_times,
