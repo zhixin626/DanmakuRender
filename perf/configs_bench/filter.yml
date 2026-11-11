@@ -1,0 +1,7 @@
+# 10c A7 functional-only overlay: keep task/global defaults unchanged.
+render_args:
+  overlay:
+    r2l:
+      danmaku:
+        filter_keywords: [FILTERME]
+        filter_users: [blocked-user]
