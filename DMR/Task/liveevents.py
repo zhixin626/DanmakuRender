@@ -1,17 +1,19 @@
 import logging
 import os
-import re
 import time
 from pathlib import Path
 from datetime import datetime
+import copy
+from send2trash import send2trash
 
-from DMR.LiveAPI import LiveAPI
+from DMR.Render import get_engine, DEFAULT_ENGINE, RERENDER_ENGINE, TRANSCODE_ENGINE
 from DMR.utils.bark_notifier import bark_notify_url
 from .baseevents import BaseEvents
 from ..utils import *
 from ..utils.utils import format_duration
 from ..utils.gifts_utils import generate_gift_statistics
 from ..utils.session_record import read_last_complete_session
+from ..Render.resolution import decide_session_parts
 
 logger = logging.getLogger(__name__)
 
@@ -39,23 +41,24 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def event_dict(self):
         # 事件名(source/event) -> 处理函数；由上层 ReplayTask 分发
         return {
-            'ready': self.onReady,
-            'exit': self.onExit,
-            'downloader/livestart': self.onLiveStart,
-            'downloader/livesegment': self.onLiveSegment,
-            'downloader/liveend': self.onLiveEnd,
-            'downloader/livestop': self.onLiveEnd,
-            'render/end': self.onRenderEnd,
-            'render/error': self.onRenderError,
-            'uploader/end': self.onUploadEnd,
-            'uploader/error': self.onUploadError,
-            'cleaner/end': self.onCleanEnd,
-            'cleaner/error': self.defaultEvent,
-            'merger/end': self.onMergeEnd,
-            'merger/error': self.onMergeError,
-            'webservice/resume': self.onResume,   # 人工处理完，喂回结果让管线继续
-            'webservice/retry': self.onRetry,     # 人工处理「重试」：原样重发渲染/合并/上传
-            'default': self.defaultEvent,
+            "ready": self.onReady,
+            "exit": self.onExit,
+            "downloader/livestart": self.onLiveStart,
+            "downloader/livesegment": self.onLiveSegment,
+            "downloader/liveend": self.onLiveEnd,
+            "downloader/livestop": self.onLiveEnd,
+            "render/end": self.onRenderEnd,
+            "render/error": self.onRenderError,
+            "render/stopped": self.onRenderStop,
+            "uploader/end": self.onUploadEnd,
+            "uploader/error": self.onUploadError,
+            "cleaner/end": self.onCleanEnd,
+            "cleaner/error": self.defaultEvent,
+            "merger/end": self.onMergeEnd,
+            "merger/error": self.onMergeError,
+            "webservice/resume": self.onResume,  # 人工处理完，喂回结果让管线继续
+            "webservice/retry": self.onRetry,  # 人工处理「重试」：原样重发渲染/合并/上传
+            "default": self.defaultEvent,
         }
 
     def defaultEvent(self, message:PipeMessage):  # event_dict 里没匹配上的事件走这里
@@ -80,15 +83,20 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
     def onReady(self, *args, **kwargs):
         return PipeMessage(
             source=self.name,
-            target='downloader',
-            event='newtask',
+            target="downloader",
+            event="newtask",
             data={
-                'dltype': self.config['download_args']['dltype'],
-                'taskname': self.name,
-                'config': self.config['download_args'],
-            }
+                "dltype": self.config["download_args"]["dltype"],
+                "taskname": self.name,
+                "config": self.config["download_args"],
+            },
         )
-    
+
+
+
+
+
+
     def onLiveSegment(self, message:PipeMessage):
         self.logger.info(f'{self.name}: {message.msg}')
         video:VideoInfo = message.data
@@ -126,9 +134,18 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         output_dir = transcode_args.get('output_dir') or (os.path.dirname(video.path) + '（转码后）')
         output = os.path.join(output_dir, filename)
         transcode_msg = PipeMessage(
-            source=self.name, target='render', event='newtask', request_id=uuid(),
-            data={'taskname': self.name, 'mode': 'transcode', 'video': video,
-                  'output': output, 'args': transcode_args})
+            source=self.name,
+            target="render",
+            event="newtask",
+            request_id=uuid(),
+            data={
+                "taskname": self.name,
+                "mode": TRANSCODE_ENGINE,
+                "video": video,
+                "output": output,
+                "args": transcode_args,
+            },
+        )
         slot = self.state_dict[video.group_id][-1]['src_video']
         slot['status'] = 'rendering'
         slot['wait'].append(transcode_msg.request_id)
@@ -142,10 +159,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         if not self.config['common_event_args'].get('auto_render'):
             return ret_msgs
         render_args = self.config['render_args']['overlay']
-        render_mode = render_args.get('engine', 'dmrender')
-        if render_mode not in ('dmrender', 'emoji_dmrender'):
-            self.logger.warning('未知弹幕渲染后端 %s，回退 dmrender', render_mode)
-            render_mode = 'dmrender'
+        render_mode = render_args.get("engine", DEFAULT_ENGINE)
+        if not get_engine(render_mode).overlay:
+            raise ValueError(f"弹幕渲染不支持引擎：{render_mode}")
         if render_args.get('output_name'):
             filename = replace_keywords(render_args['output_name'], video, replace_invalid=True) + \
                     f".{render_args.get('format','mp4')}"
@@ -160,6 +176,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                   'output': output, 'args': render_args})
         slot = self.state_dict[video.group_id][-1]['dm_video']
         slot['status'] = 'rendering'
+        slot['source'] = video
         slot['wait'].append(render_msg.request_id)
         self._dispatched[render_msg.request_id] = render_msg
         ret_msgs.append(render_msg)
@@ -301,12 +318,45 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
     def onRenderEnd(self, message:PipeMessage):
         mode = message.data.get('config', {}).get('mode')
-        log_render_end = self.logger.debug if mode == 'emoji_dmrender' else self.logger.info
+        log_render_end = (
+            self.logger.debug if get_engine(mode).raster else self.logger.info
+        )
         log_render_end(f'{self.name}: {message.msg}.')
 
         request_id = message.request_id
         self._dispatched.pop(request_id, None)
         video:VideoInfo = message.data.get('output')
+        config = message.data.get("config", {}) or {}
+        rerender_config = config.get("args", {}) or {}
+        if config.get("_resolution_rerender") or rerender_config.get("_resolution_rerender"):
+            loc = self._locate_by_request(request_id)
+            if loc:
+                group_id, index, vtype = loc
+                slot = self.state_dict[group_id][index][vtype]
+                old_file = slot.pop("_resolution_original_file", None)
+                slot["wait"] = []
+                slot["status"] = "ready"
+                slot["file"] = video
+                slot.pop("_resolution_rerender", None)
+                if old_file and getattr(old_file, "path", None) != video.path:
+                    try:
+                        send2trash(old_file.path)
+                    except Exception as error:
+                        self.logger.warning("少数方向旧产物删除失败：%s", error)
+                state = self.session_data.get(group_id, {})
+                state["_resolution_rerender_ids"].discard(request_id)
+                if not state["_resolution_rerender_ids"]:
+                    state["_resolution_rerender_pending"] = False
+                    state["_resolution_rerender_done"] = True
+                return self.reconcile(group_id, clean_trigger="onRenderEnd")
+        if (
+            config.get("_independent_retry")
+            or video.group_id not in self.state_dict
+        ):
+            self.logger.info(
+                "%s: 独立重试完成，产物保留供人工合并/上传: %s", self.name, video.path
+            )
+            return []
         video_states = self.state_dict[video.group_id]
         # 按 request_id 移除对应的等待；wait 清空则该段标 ready 并挂上渲染产物
         for idx, video_state in enumerate(video_states):
@@ -355,7 +405,16 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         target_slot = {'src_video': 'src_video', 'dm_video': 'dm_video'}
 
         ret_msgs = []
+        resolution_decision = self._log_resolution_policy(group_id)
+        rerender_msgs = self._dispatch_resolution_rerender(
+            group_id, resolution_decision
+        )
+        if rerender_msgs:
+            return rerender_msgs
+        resolution_state = self.session_data.get(group_id, {})
         for vt in merge_type:
+            if vt == "dm_video" and resolution_state.get("_resolution_rerender_pending"):
+                continue
             # 检查该 vt 所有分段是否都 ready/uploaded（None=未参与，跳过；其余状态=还不能合）
             entries = []
             ok = True
@@ -400,6 +459,140 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             self._dispatched[merge_msg.request_id] = merge_msg
             ret_msgs.append(merge_msg)
         return ret_msgs
+
+    def _log_resolution_policy(self, group_id):
+        """Record the session canvas decision before Merger groups segments."""
+        session = self.session_data.setdefault(group_id, {})
+        if session.get("_resolution_policy_logged"):
+            return session.get("_resolution_decision")
+        if any(
+            (state.get("dm_video") or {}).get("status") not in ("ready", "uploaded")
+            for state in self.state_dict.get(group_id, [])
+            if (state.get("dm_video") or {}).get("status") is not None
+        ):
+            return None
+        spans = []
+        offset = 0.0
+        for state in self.state_dict.get(group_id, []):
+            video = (state.get("dm_video") or {}).get("file")
+            if video is None:
+                continue
+            for start, end, width, height in getattr(video, "resolution_spans", []) or []:
+                spans.append((offset + float(start), offset + float(end), width, height))
+            offset += float(getattr(video, "duration", 0) or 0)
+        if not spans:
+            session["_resolution_policy_logged"] = True
+            session["_resolution_decision"] = None
+            return None
+        overlay = self.config.get("render_args", {}).get("overlay", {})
+        try:
+            decision = decide_session_parts(
+                spans,
+                ignore_head_seconds=float(
+                    overlay.get("resolution_ignore_head_seconds", 30)
+                ),
+                min_span_seconds=float(
+                    overlay.get("resolution_min_span_seconds", 60)
+                ),
+                minority_ratio=float(overlay.get("resolution_minority_ratio", 0.15)),
+                minority_minutes=float(overlay.get("resolution_minority_minutes", 10)),
+                forced_orientation=overlay.get("rescale_orientation", "auto"),
+            )
+        except ValueError as error:
+            self.logger.warning("分辨率时间线无法判定：%s", error)
+            session["_resolution_policy_logged"] = True
+            session["_resolution_decision"] = None
+            return None
+        self.logger.info(
+            "分辨率时间线策略: group=%s dominant=%s action=%s minority=%.1fs runs=%s",
+            group_id,
+            decision["dominant"],
+            decision["action"],
+            decision["minority_seconds"],
+            decision["runs"],
+        )
+        session["_resolution_policy_logged"] = True
+        session["_resolution_decision"] = decision
+        return decision
+
+    def _dispatch_resolution_rerender(self, group_id, decision):
+        """Queue minority segments through the normal Render plugin."""
+        if not decision or decision.get("action") != "re_render_minority":
+            return []
+        session = self.session_data.setdefault(group_id, {})
+        if session.get("_resolution_rerender_failed"):
+            return []
+        if session.get("_resolution_rerender_done"):
+            return []
+        states = self.state_dict.get(group_id, [])
+        for state in states:
+            slot = state.get("dm_video", {})
+            if slot.get("status") is not None and slot.get("status") not in (
+                "ready",
+                "uploaded",
+            ):
+                return []
+        minority = []
+        for index, state in enumerate(states):
+            slot = state.get("dm_video") or {}
+            video = slot.get("file")
+            spans = getattr(video, "resolution_spans", []) if video else []
+            if not spans:
+                continue
+            totals = {"portrait": 0.0, "landscape": 0.0}
+            for start, end, width, height in spans:
+                orientation = "landscape" if width >= height else "portrait"
+                totals[orientation] += max(0.0, float(end) - float(start))
+            orientation = max(totals, key=totals.get)
+            if orientation != decision["dominant"]:
+                minority.append((index, state, slot, video))
+        if not minority:
+            session["_resolution_rerender_done"] = True
+            return []
+        if session.get("_resolution_rerender_started"):
+            return []
+        gpu_mode = RERENDER_ENGINE
+        render_args = self.config["render_args"]["overlay"]
+        messages = []
+        session["_resolution_rerender_started"] = True
+        session["_resolution_rerender_pending"] = True
+        session["_resolution_rerender_ids"] = set()
+        for index, state, slot, video in minority:
+            source = slot.get("source") or (state.get("src_video_pre") or {}).get("file")
+            if source is None:
+                session["_resolution_rerender_failed"] = True
+                session["_resolution_rerender_pending"] = False
+                return []
+            # Preserve the exact object used for the first render so a
+            # minority rerender cannot silently switch to a different source.
+            slot["source"] = source
+            args = copy.deepcopy(render_args)
+            args["rescale_to_1080p"] = True
+            args["rescale_orientation"] = decision["dominant"]
+            stem, suffix = os.path.splitext(video.path)
+            output = f"{stem}（主方向重渲染）{suffix or '.mp4'}"
+            request_id = uuid()
+            message = PipeMessage(
+                source=self.name,
+                target="render",
+                event="newtask",
+                request_id=request_id,
+                data={
+                    "taskname": self.name,
+                    "mode": gpu_mode,
+                    "video": source,
+                    "output": output,
+                    "args": {**args, "_resolution_rerender": True},
+                },
+            )
+            slot["status"] = "rendering"
+            slot["wait"] = [request_id]
+            slot["_resolution_original_file"] = video
+            slot["_resolution_rerender"] = True
+            session["_resolution_rerender_ids"].add(request_id)
+            self._dispatched[request_id] = message
+            messages.append(message)
+        return messages
 
     def onMergeEnd(self, message: PipeMessage):
         """Merger 回报合并完成：把被合并段按 remove_source 标状态、把合并产物按序作为新段追加，
@@ -474,11 +667,18 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         retry_msg 是原始派发消息，供 WebUI「重试」时原样重发。"""
         hid = uuid()
         self.held_tasks[hid] = {
-            'hold_id': hid, 'stage': stage, 'group_id': group_id,
-            'segs': list(segs), 'vtype': vtype, 'info': info, 'time': datetime.now(),
-            'retry_msg': retry_msg,
+            "hold_id": hid,
+            "stage": stage,
+            "group_id": group_id,
+            "segs": list(segs),
+            "vtype": vtype,
+            "info": info,
+            "time": datetime.now(),
+            "retry_msg": retry_msg,
         }
-        self.logger.warning(f'{self.name}: {stage} 失败，已挂起等待人工处理 (hold_id={hid})')
+        self.logger.warning(
+            f"{self.name}: {stage} 失败，已挂起等待人工处理 (hold_id={hid})"
+        )
         return hid
 
     def _build_videoinfo_from(self, src, path, dtype):
@@ -492,6 +692,30 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             base['size'] = None
         return VideoInfo(**base)
 
+    def onRenderStop(self, message: PipeMessage):
+        """Clear cancellation from in-flight work without retrying or uploading."""
+        self.logger.info("%s: %s", self.name, message.msg)
+        self._dispatched.pop(message.request_id, None)
+        affected = set()
+        for group_id, index, vtype in self._locate_all_by_request(message.request_id):
+            slot = self.state_dict[group_id][index][vtype]
+            slot["wait"] = [
+                value for value in slot["wait"] if value != message.request_id
+            ]
+            slot["status"] = "stopped"
+            if slot.get("_resolution_rerender"):
+                slot["status"] = "ready"
+                slot["file"] = slot.pop("_resolution_original_file", slot.get("file"))
+                slot.pop("_resolution_rerender", None)
+                state = self.session_data.get(group_id, {})
+                state["_resolution_rerender_ids"].discard(message.request_id)
+                state["_resolution_rerender_failed"] = True
+                self.logger.warning("少数方向重渲染被停止，回退按方向分P：group=%s segment=%s", group_id, index)
+                if not state["_resolution_rerender_ids"]:
+                    state["_resolution_rerender_pending"] = False
+            affected.add(group_id)
+        return [followup for gid in affected for followup in self.reconcile(gid)]
+
     def onRenderError(self, message:PipeMessage):
         """渲染失败转人工：挂起此段，详情交 WebUI。"""
         self.logger.info(f'{self.name}: {message.msg}')
@@ -500,6 +724,20 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             return []
         group_id, seg_idx, vtype = loc
         slot = self.state_dict[group_id][seg_idx][vtype]
+        if slot.get("_resolution_rerender"):
+            slot["wait"] = []
+            slot["status"] = "ready"
+            slot["file"] = slot.pop("_resolution_original_file", slot.get("file"))
+            slot.pop("_resolution_rerender", None)
+            state = self.session_data.get(group_id, {})
+            state["_resolution_rerender_ids"].discard(message.request_id)
+            state["_resolution_rerender_failed"] = True
+            self.logger.warning("少数方向重渲染失败，回退按方向分P：group=%s segment=%s error=%s", group_id, seg_idx, message.msg)
+            self._dispatched.pop(message.request_id, None)
+            if not state["_resolution_rerender_ids"]:
+                state["_resolution_rerender_pending"] = False
+                return self.reconcile(group_id, clean_trigger=None)
+            return []
         slot['wait'] = [r for r in slot['wait'] if r != message.request_id]
         slot['status'] = 'holding'
         src = (self.state_dict[group_id][seg_idx].get('src_video_pre') or {}).get('file')
@@ -767,6 +1005,12 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         video_states = self.state_dict.get(group_id)
         if not video_states:
             return ret_msgs
+        if any(
+            slot["status"] in ("rendering", "stopped")
+            for segment in video_states
+            for slot in segment.values()
+        ):
+            return ret_msgs  # Recovery still needs both source and completed sibling files.
 
         # 落地成型、磁盘上有真实文件、可被清理的状态（不分产物/源）；在途/无文件/已清理的不在此列
         cleanable = ('ready', 'uploaded', 'merged', 'merge_src')   # 渲染产物/已上传/合并产物/被合并源 都是真实文件，可清理
@@ -804,7 +1048,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                             ret_msgs.append(clean_msg)
 
         return ret_msgs
-    
+
     def _group_is_done(self, group_id, ignore_cleaning=False):
         """这一组的所有段是否都到终态、且无在途任务（只回答“完事没”，不做回收）。
         ignore_cleaning=True 时把「已派给 cleaner 的 cleaning」也当完事——仅供 is_idle 判断能否空闲
@@ -820,7 +1064,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             final_status.append('cleaned')
         # None=未参与；merge_src=被合并的源段(已消费)；cleaned=已清理（即便 auto_clean 关，merger
         # remove_source 删源也会标它）：恒为终态。cleaning 默认不算终态，只有 ignore_cleaning(重启判断)时才放行。
-        terminal = ('merge_src', 'cleaned') + (('cleaning',) if ignore_cleaning else ())
+        terminal = ("merge_src", "cleaned", "stopped") + (
+            ("cleaning",) if ignore_cleaning else ()
+        )
         for video_state in video_states:
             for info in video_state.values():
                 st = info.get('status')
@@ -843,7 +1089,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self.ended_dict.pop(group_id, None)
         self.state_dict.pop(group_id, None)
         self.session_data.pop(group_id, None)
-        self.held_tasks = {h: v for h, v in self.held_tasks.items() if v['group_id'] != group_id}
+        self.held_tasks = {
+            h: v for h, v in self.held_tasks.items() if v["group_id"] != group_id
+        }
 
     def _free_state_memory(self):
         ret_msgs = []

@@ -1,0 +1,62 @@
+# 仅在隔离 worktree 准备；用户确认后自行启用。
+enable: false
+
+common_event_args:
+  auto_render: true
+  auto_transcode: false
+  auto_upload: false
+  auto_merge: true
+  # 首次验收先保留原始录像和成片。
+  auto_clean: false
+
+merge_args:
+  merge_type: [dm_video]
+  remove_source: false
+
+download_args:
+  dltype: live
+  # 地址来自现有配置快照 DMR-月亮3.yml。
+  url: https://live.bilibili.com/24486091
+  output_dir: Tasks文件/月亮3
+  stream_args:
+    stream_option:
+      bili_watch_cookies: .login_info/b站_不可一世冷狗.json
+    advanced_args:
+      default_resolution: [1920, 1080]
+  danmaku_args:
+    stream_option:
+      dm_cookie_path: .login_info/b站_不可一世冷狗.json
+
+render_args:
+  overlay:
+    # 其余渲染参数沿用 default.yml → global.yml。
+    engine: gpu_render
+    r2l:
+      danmaku:
+        vip_users:
+          '3546981263739190': ~
+          '3461572932405848': ~ #磊厉风行
+          '3546389594245606': ~ #小灰辉灰辉3
+          '2622888': ~ #碎霜斜舞
+          '400769478': ~ #豆肉肉和杏皮皮
+
+upload_args:
+  dm_video:
+    target: bilibili
+    account: b站_不可一世冷狗
+    skip_upload: false
+    tid: 65
+    title: 【月亮3】{STIME.MONTH}月{STIME.DAY}日直播回放(弹幕版)
+    dynamic: |
+      月亮3，{STIME.YEAR}年{STIME.MONTH}月{STIME.DAY}日直播回放。
+    tag: 月亮3,红色警戒,怀旧游戏
+    cover:
+      mode: render_template
+      name: 月亮3
+      name_color: '#FFFF00'
+    # 沿用月亮3既有的每日追加与合集设置。
+    add_to_list: true
+    season_id: 6991687
+    auto_append_period: daily
+    space_hidden: 1
+    is_only_self: 1

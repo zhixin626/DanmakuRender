@@ -85,7 +85,7 @@ class FFprobe():
     @classmethod
     def ffprobe(cls) -> str:
         return ToolsList.get('ffprobe')
-    
+
     @classmethod
     def run_ffprobe(cls,fpath):
         out = subprocess.check_output([
@@ -99,7 +99,7 @@ class FFprobe():
         out = out.decode('utf8')
         res = json.loads(out)
         return res
-        
+
     @classmethod
     def get_duration(cls,fpath) -> float:
         try:
@@ -241,7 +241,7 @@ class FFprobe():
     def get_livestream_info(cls,url,header=None) -> dict:
         res = cls.run_ffprobe_livestream(url,header)
         return res['streams'][0]
-        
+
     @classmethod
     def get_resolution(cls, url:str, header=None) -> tuple:
         try:
@@ -270,3 +270,15 @@ class FFprobe():
             return float(num) / den if den else 0.0
         except Exception:
             return 0.0
+
+
+def source_frame_rate(video_path: str) -> float:
+    """Use PyAV's guessed rate, then average rate, like the old renderer."""
+    import av
+
+    container = av.open(video_path)
+    try:
+        stream = container.streams.video[0]
+        return float(stream.guessed_rate or stream.average_rate)
+    finally:
+        container.close()

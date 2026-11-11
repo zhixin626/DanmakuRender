@@ -176,7 +176,9 @@
                 body = '<div>源 flv：' + pathCell(info.flv) + '</div>' +
                        (isDm ? '<div>弹幕文件：' + pathCell(dmFile) + '</div>' : '') +
                        '<div style="color:#c00">错误：' + escHtml(info.error || '') + '</div>';
-                form = mp4Form(tk, hid, (isDm ? '渲染' : '转码') + '好后填入 mp4 路径');
+                form = h.independent_render
+                    ? '<div style="color:#aaa">重试成片独立保留，需要合并或上传时请手动处理。</div>'
+                    : mp4Form(tk, hid, (isDm ? '渲染' : '转码') + '好后填入 mp4 路径');
             } else if (stage === 'merge') {
                 const ins = (info.inputs || []).map(p => '<div>' + pathCell(p) + '</div>').join('');
                 body = '<div>合并类型：' + escHtml(info.merge_type || '') + '</div>' +

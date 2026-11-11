@@ -3,29 +3,33 @@ from __future__ import annotations
 import copy
 import json
 import os
-import tempfile
 from dataclasses import dataclass, field
-
+from typing import Any
+from DMR.utils.utils import atomic_json_dump as _atomic_json_dump
 
 LAYOUT_STATE_SCHEMA_VERSION = 3
 RENDER_PLAN_SCHEMA_VERSION = 1
+TRACK_R2L = "r2l"
+TRACK_SLIDE_LEFT = "slide_left"
+TRACK_SLIDE_RIGHT = "slide_right"
+EVENT_TRACKS = {
+    "danmaku": TRACK_R2L,
+    "superchat": TRACK_SLIDE_LEFT,
+    "gift": TRACK_SLIDE_RIGHT,
+    "member": TRACK_SLIDE_RIGHT,
+}
+TRACK_Z_ORDER = {TRACK_SLIDE_LEFT: 0, TRACK_SLIDE_RIGHT: 0, TRACK_R2L: 1}
 
 
-def _atomic_json_dump(path: str, data: dict) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(prefix=".layout_", suffix=".tmp", dir=directory)
-    os.close(fd)
-    try:
-        with open(temp_path, "w", encoding="utf-8", newline="\n") as fp:
-            json.dump(data, fp, ensure_ascii=False, separators=(",", ":"))
-        os.replace(temp_path, path)
-    finally:
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except OSError:
-            pass
+def event_track(event: dict) -> str:
+    """Resolve old plans at the boundary; new plans always retain their track."""
+    track = event.get("track")
+    if track is None:
+        visual = event["visual"]
+        track = TRACK_R2L if visual["type"] == "line" else EVENT_TRACKS[visual["class"]]
+    if track not in TRACK_Z_ORDER:
+        raise ValueError(f"unknown render track: {track}")
+    return track
 
 
 @dataclass
@@ -102,10 +106,12 @@ class RenderPlan:
 
     duration: float
     events: list[dict] = field(default_factory=list)
+    platform: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "schema": RENDER_PLAN_SCHEMA_VERSION,
+            "platform": self.platform,
             "duration": float(self.duration),
             "events": copy.deepcopy(self.events),
         }
@@ -117,6 +123,7 @@ class RenderPlan:
         return cls(
             duration=float(data.get("duration", 0.0)),
             events=copy.deepcopy(data.get("events") or []),
+            platform=data.get("platform"),
         )
 
     @classmethod
@@ -126,3 +133,69 @@ class RenderPlan:
 
     def save(self, path: str) -> None:
         _atomic_json_dump(path, self.to_dict())
+
+
+@dataclass(frozen=True)
+class RenderEvent:
+    """Fixed-shape event record loaded from the generated GPU atlas."""
+
+    id: str | None
+    offset: int
+    width: int
+    height: int
+    start: float
+    end: float
+    path: tuple[tuple[float, float, float], ...]
+    motion: dict[str, Any]
+    track: str = TRACK_R2L
+
+    @property
+    def z_order(self) -> int:
+        return TRACK_Z_ORDER[self.track]
+
+    @classmethod
+    def from_mapping(cls, value: dict[str, Any]) -> "RenderEvent":
+        required = ("offset", "width", "height", "start", "end", "path", "motion")
+        for key in required:
+            if key not in value:
+                raise KeyError(key)
+        return cls(
+            id=value.get("id"),
+            offset=int(value["offset"]),
+            width=int(value["width"]),
+            height=int(value["height"]),
+            start=float(value["start"]),
+            end=float(value["end"]),
+            path=tuple(tuple(float(part) for part in point) for point in value["path"]),
+            motion=dict(value["motion"]),
+            track=value.get("track", TRACK_R2L),
+        )
+
+
+@dataclass(frozen=True)
+class PanelNode:
+    type: str
+    x: int
+    y: int
+    width: int
+    height: int
+    shape: str | None
+    font: str | None
+    size: float | None
+
+    @classmethod
+    def from_mapping(cls, value: dict[str, Any]) -> "PanelNode":
+        required = ("type", "x", "y", "width", "height")
+        for key in required:
+            if key not in value:
+                raise KeyError(key)
+        return cls(
+            type=str(value["type"]),
+            x=int(value["x"]),
+            y=int(value["y"]),
+            width=int(value["width"]),
+            height=int(value["height"]),
+            shape=value.get("shape"),
+            font=value.get("font"),
+            size=value.get("size"),
+        )

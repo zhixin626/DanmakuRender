@@ -137,6 +137,7 @@ class VideoInfo(FileInfo):
                 group_id:str=None,
                 segment_id:int=None,
                 segment_start_time:datetime=None,
+                resolution_spans=None,
                 taskname:str=None,
                 dm_video_id:str=None,
                 src_video_id:str=None,
@@ -153,6 +154,7 @@ class VideoInfo(FileInfo):
         self.group_id = group_id
         self.segment_id = segment_id
         self.segment_start_time = segment_start_time
+        self.resolution_spans = resolution_spans or []
         super().__init__(
                 file_id=file_id,
                 dtype=dtype,
@@ -170,5 +172,6 @@ class VideoInfo(FileInfo):
                 group_id=group_id,
                 segment_id=segment_id,
                 segment_start_time=segment_start_time,
+                resolution_spans=self.resolution_spans,
                 **kwargs
                 )
