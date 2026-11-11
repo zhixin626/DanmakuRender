@@ -667,7 +667,6 @@ class LayoutCompiler:
                     display_record["gift_count_suffix"] = _quantity_suffix(
                         state_record.get("gift_count")
                     )
-                    display_record["gift_final_count"] = final_count
                     content = self._format_template(
                         gift_render.get("template"),
                         display_record,
@@ -691,7 +690,6 @@ class LayoutCompiler:
                         record=display_record,
                         emoji_measurer=emoji_measurer,
                     )
-                    panel["_gift_final_count"] = final_count
                     panel["_gift_state_index"] = state_index
                     if len(state_records) > 1:
                         panel["gift_state_group"] = event_id
@@ -782,8 +780,8 @@ class LayoutCompiler:
             existing = [event for event in state_events if event.get("track") == track]
             combined, track_order = self._layout_stacked_panels(
                 track=track,
-                existing=existing,
-                newcomers=new_panels[track],
+                existing=self._coalesce_gift_states(existing),
+                newcomers=self._coalesce_gift_states(new_panels[track]),
                 state_at=old_state.at,
                 initial_order=old_state.track_orders.get(track),
                 segment_start=segment_start,
@@ -792,7 +790,8 @@ class LayoutCompiler:
                 height=height,
                 track_cfg=track_render,
             )
-            self._freeze_gift_state_paths(combined)
+            combined = self._expand_gift_states(combined)
+            track_order = [str(event.get("id")) for event in combined]
             next_track_orders[track] = track_order
             state_events = [event for event in state_events if event.get("track") != track]
             state_events.extend(combined)
@@ -858,61 +857,73 @@ class LayoutCompiler:
         )
 
     @staticmethod
-    def _freeze_gift_state_paths(events):
-        """Keep one gift's number states in one slot with half-open timing."""
-        groups = {}
+    def _coalesce_gift_states(events):
+        """Let one gift state group occupy one stacked-panel slot."""
+        grouped = {}
+        result = []
         for event in events:
             group = event.get("gift_state_group")
-            if group:
-                groups.setdefault(group, []).append(event)
-        for group_events in groups.values():
+            if not group:
+                result.append(event)
+                continue
+            grouped.setdefault(group, []).append(event)
+        for group_events in grouped.values():
             ordered = sorted(
                 group_events,
                 key=lambda item: int(item.get("_gift_state_index", 0)),
             )
-            if len(ordered) < 2:
+            representative = copy.deepcopy(ordered[0])
+            representative["_gift_state_panels"] = ordered
+            start = _path_start(ordered[0])
+            end = _path_start(ordered[-1]) + float(
+                ordered[-1].get("_duration", 0.1)
+            )
+            representative["path"] = [[start, 0.0, 0.0]]
+            representative["_duration"] = max(0.1, end - start)
+            result.append(representative)
+        return sorted(result, key=_path_start)
+
+    @staticmethod
+    def _expand_gift_states(events):
+        """Split one laid-out gift slot into contiguous number states."""
+        result = []
+        for event in events:
+            templates = event.pop("_gift_state_panels", None)
+            if not templates:
+                result.append(event)
                 continue
-            first = ordered[0]
-            motion = (first.get("visual") or {}).get("motion") or {}
-            inside_x = float(motion.get("inside_x", 0.0))
-            outside_x = float(motion.get("outside_x", inside_x))
-            for index, event in enumerate(ordered):
-                original = event.get("path") or []
-                start = float(original[0][0])
-                end = _path_end(event)
-                enter = float(motion.get("enter_duration", 0.0)) if index == 0 else 0.0
-                exit_duration = (
-                    float(motion.get("exit_duration", 0.0))
+            base_path = event.get("path") or []
+            base_motion = copy.deepcopy((event.get("visual") or {}).get("motion") or {})
+            ordered = sorted(
+                templates,
+                key=lambda item: int(item.get("_gift_state_index", 0)),
+            )
+            for index, template in enumerate(ordered):
+                state = copy.deepcopy(template)
+                start = _path_start(template)
+                end = start + float(template.get("_duration", 0.1))
+                points = []
+                timestamps = [float(point[0]) for point in base_path]
+                timestamps = [timestamp for timestamp in timestamps if start < timestamp < end]
+                timestamps = [start, *timestamps, end]
+                for timestamp in timestamps:
+                    x, y = _position_at(base_path, timestamp)
+                    points.append([timestamp, x, y])
+                state["path"] = points
+                visual = state.setdefault("visual", {})
+                motion = copy.deepcopy(base_motion)
+                motion["enter_duration"] = (
+                    float(base_motion.get("enter_duration", 0.0)) if index == 0 else 0.0
+                )
+                motion["exit_duration"] = (
+                    float(base_motion.get("exit_duration", 0.0))
                     if index == len(ordered) - 1
                     else 0.0
                 )
-                points = []
-                transition_in = start + enter
-                transition_out = end - exit_duration
-                timestamps = [float(point[0]) for point in original]
-                if enter > 0 and start < transition_in < end:
-                    timestamps.append(transition_in)
-                if exit_duration > 0 and start < transition_out < end:
-                    timestamps.append(transition_out)
-                for timestamp in sorted(set(timestamps)):
-                    _, y = _position_at(original, timestamp)
-                    outside = (
-                        index == 0 and timestamp < transition_in
-                    ) or (
-                        index == len(ordered) - 1
-                        and exit_duration > 0
-                        and timestamp >= transition_out
-                    )
-                    points.append(
-                        [timestamp, outside_x if outside else inside_x, y]
-                    )
-                event["path"] = points
-                event.setdefault("visual", {})["motion"] = {
-                    "inside_x": inside_x,
-                    "outside_x": outside_x,
-                    "enter_duration": enter,
-                    "exit_duration": exit_duration,
-                }
+                visual["motion"] = motion
+                state["_duration"] = max(0.1, end - start)
+                result.append(state)
+        return sorted(result, key=_path_start)
 
     def _prepare_line(
         self,

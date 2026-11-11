@@ -28,7 +28,7 @@ def test_same_user_gift_merges_within_window_and_alternating_user_does_not():
     assert [(item["uid"], item["gift_count"]) for item in records] == [("a", 3), ("b", 1)]
 
 
-def test_boundary_after_ten_seconds_starts_new_group():
+def test_boundary_after_five_seconds_starts_new_group():
     records = merge_gift_records([gift(0, 0, "a"), gift(1, 5, "a")])
     assert len(records) == 1
     records = merge_gift_records([gift(0, 0, "a"), gift(1, 5.001, "a")])
@@ -91,5 +91,38 @@ def test_active_gift_state_moves_up_when_later_panel_arrives(tmp_path):
         ]
         assert len({event["bounds"]["width"] for event in states}) == 1
         assert states[-1]["path"][-1][2] < states[-1]["path"][0][2]
+    finally:
+        compiled.cleanup()
+
+
+def test_interleaved_gift_state_keeps_slot_at_number_change(tmp_path):
+    events = tmp_path / "events.jsonl"
+    rows = [{"type": "meta", "schema": 1, "platform": "bilibili", "segment_start_time": 100}]
+    for line, when, uid in ((2, 100, "a"), (3, 102, "b"), (4, 103, "a")):
+        rows.append(
+            {
+                "type": "gift",
+                "received_at": when,
+                "uid": uid,
+                "uname": uid,
+                "gift_name": "小心心",
+                "gift_count": 1,
+                "price_cny": 1,
+                "_line": line,
+            }
+        )
+    events.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf8")
+    config = yaml.safe_load(Path("DMR/Config/default.yml").read_text(encoding="utf8"))["render_args"]["overlay"]
+    video = VideoInfo(path="source.flv", dm_file_id=str(events), duration=20, resolution=(1080, 1920))
+    compiled = LayoutCompiler(config, engine="gpu_render", engine_config=config).compile(
+        video=video, events_path=str(events), work_dir=str(tmp_path)
+    )
+    try:
+        plan = RenderPlan.load(compiled.render_plan_path)
+        states = [
+            event for event in plan.events if event.get("gift_state_group", "").endswith(":2")
+        ]
+        assert len(states) == 2
+        assert states[0]["path"][-1][2] == states[1]["path"][0][2]
     finally:
         compiled.cleanup()
