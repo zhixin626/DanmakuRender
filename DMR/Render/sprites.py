@@ -7,6 +7,7 @@ import logging
 import os
 import pathlib
 import re
+import unicodedata
 from functools import lru_cache
 from typing import Any
 
@@ -228,6 +229,7 @@ class SpriteFactory:
         self.text_font = ImageFont.truetype(text_font, correction)
         self.text_fonts = [(self.text_font, self._coverage(text_font))]
         self._missing_codepoints = set()
+        self._run_cache: dict[str, list[tuple[Any, str]]] = {}
         fallback_values = []
         if isinstance(fallback_fonts, str):
             fallback_values = [item.strip() for item in fallback_fonts.split(",")]
@@ -282,18 +284,51 @@ class SpriteFactory:
             self._missing_codepoints.add(codepoint)
         return self.text_font
 
-    def _split_text_runs(self, text: str):
-        current_font = None
-        current = []
+    def _font_for_cluster(self, cluster: str):
+        codepoints = [ord(char) for char in cluster]
+        for font, coverage in self.text_fonts:
+            if coverage is None or all(codepoint in coverage for codepoint in codepoints):
+                return font
+        return self._font_for(codepoints[0])
+
+    def _split_text_runs(self, text: str) -> list[tuple[Any, str]]:
+        """Split by grapheme-like clusters so marks never detach from bases."""
+        cached = self._run_cache.get(text)
+        if cached is not None:
+            return cached
+        clusters: list[str] = []
+        current = ""
         for char in text:
-            font = self._font_for(ord(char))
-            if current and font is not current_font:
-                yield current_font, "".join(current)
-                current = []
-            current_font = font
-            current.append(char)
+            category = unicodedata.category(char)
+            follows = (
+                category in {"Mn", "Mc", "Me"}
+                or char in {"\u200c", "\u200d"}
+                or 0xFE00 <= ord(char) <= 0xFE0F
+            )
+            if current and follows:
+                current += char
+            else:
+                if current:
+                    clusters.append(current)
+                current = char
         if current:
-            yield current_font, "".join(current)
+            clusters.append(current)
+        runs: list[tuple[Any, str]] = []
+        current_font = None
+        current_text = []
+        for cluster in clusters:
+            font = self._font_for_cluster(cluster)
+            if current_text and font is not current_font:
+                runs.append((current_font, "".join(current_text)))
+                current_text = []
+            current_font = font
+            current_text.append(cluster)
+        if current_text:
+            runs.append((current_font, "".join(current_text)))
+        if len(self._run_cache) >= 8192:
+            self._run_cache.clear()
+        self._run_cache[text] = runs
+        return runs
 
     @staticmethod
     def _load_emoji_font(path: str, correction: int, text_font: str):

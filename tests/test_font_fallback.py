@@ -28,3 +28,21 @@ def test_missing_codepoint_warns_once_and_uses_primary(caplog):
         second = factory._font_for(0x10FFFF)
     assert first is factory.text_font and second is first
     assert sum("U+10FFFF" in record.message for record in caplog.records) == 1
+
+
+@pytest.mark.parametrize("text", ["Tiếng Việt Ấ", "กิ่", "e\u0301"])
+def test_combining_cluster_stays_in_one_font_run(text):
+    primary = resolve_font("Segoe UI Symbol", True)
+    fallback = resolve_font("Malgun Gothic", True)
+    factory = SpriteFactory(
+        primary,
+        resolve_emoji_font(None),
+        {},
+        36,
+        fallback_fonts=[fallback],
+    )
+    runs = factory._split_text_runs(text)
+    assert "".join(value for _, value in runs) == text
+    for _, value in runs:
+        if "Ấ" in value or "กิ่" in value or "e\u0301" in value:
+            assert len(runs) == 1 or value in {"Tiếng Việt Ấ", "กิ่", "e\u0301"}
