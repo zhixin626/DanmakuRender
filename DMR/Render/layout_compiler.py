@@ -477,6 +477,35 @@ def _clip_path(path: list, start: float, end: float) -> list:
     return result
 
 
+class CompileStats:
+    """Track accepted and dropped events without embedding counters in dispatch."""
+
+    def __init__(self):
+        self.track_stats = {
+            TRACK_R2L: {"accepted": 0, "dropped": 0},
+            TRACK_SLIDE_LEFT: {"accepted": 0, "dropped": 0},
+            TRACK_SLIDE_RIGHT: {"accepted": 0, "dropped": 0},
+        }
+        self.unrouted_dropped = 0
+
+    def accepted(self, track):
+        self.track_stats[track]["accepted"] += 1
+
+    def dropped(self, track):
+        if track in self.track_stats:
+            self.track_stats[track]["dropped"] += 1
+        else:
+            self.unrouted_dropped += 1
+
+    @property
+    def event_count(self):
+        return sum(item["accepted"] for item in self.track_stats.values())
+
+    @property
+    def dropped_count(self):
+        return sum(item["dropped"] for item in self.track_stats.values()) + self.unrouted_dropped
+
+
 class LayoutCompiler:
     """Compile typed JSONL events into a RenderPlan and the next LayoutState."""
 
@@ -503,8 +532,10 @@ class LayoutCompiler:
         context = self._prepare_compile_context(
             video, events_path, previous_state, work_dir
         )
-        new_r2l, new_panels = self._compile_records(context)
-        return self._finalize_compile(context, new_r2l, new_panels)
+        self._compile_records(context)
+        return self._finalize_compile(
+            context, context["new_r2l"], context["new_panels"]
+        )
 
     def _prepare_compile_context(
         self,
@@ -514,39 +545,54 @@ class LayoutCompiler:
         work_dir: str,
     ) -> dict:
         header, records = self._read_events(events_path)
+        context = {
+            "self": self,
+            "video": video,
+            "events_path": events_path,
+            "previous_state": previous_state,
+            "work_dir": work_dir,
+            "header": header,
+            "records": records,
+            "stats": CompileStats(),
+            "new_r2l": [],
+            "new_panels": {
+                TRACK_SLIDE_LEFT: [],
+                TRACK_SLIDE_RIGHT: [],
+            },
+        }
+        context.update(self._resolve_segment(video, header, previous_state))
+        context.update(self._build_render_context(header))
+        ordered_records = sorted(
+            records,
+            key=lambda item: (float(item.get("received_at", 0) or 0), item["_line"]),
+        )
+        gift_cfg = context["event_configs"].get("gift") or {}
+        context["ordered_records"] = merge_gift_records(
+            ordered_records,
+            window_seconds=float(gift_cfg.get("combo_window_seconds", 5) or 5),
+        )
+        return context
+
+    def _resolve_segment(self, video, header, previous_state) -> dict:
         source_resolution = resolve_render_canvas(
             getattr(video, "resolution", None),
             rescale_to_1080p=False,
         )
         raw_segment_start = float(header["segment_start_time"])
         duration = max(0.0, float(getattr(video, "duration", 0) or 0))
-
-        if isinstance(previous_state, LayoutState):
-            old_state = LayoutState.from_dict(
-                previous_state.to_dict(),
-                raw_segment_start,
-            )
-        else:
-            old_state = LayoutState.from_dict(
-                previous_state,
-                raw_segment_start,
-            )
+        old_state = LayoutState.from_dict(
+            previous_state.to_dict() if isinstance(previous_state, LayoutState) else previous_state,
+            raw_segment_start,
+        )
         current_canvas = resolve_render_canvas(
             source_resolution,
-            rescale_to_1080p=bool(
-                self.engine_config.get("rescale_to_1080p", False)
-            ),
-            rescale_orientation=self.engine_config.get(
-                "rescale_orientation", "auto"
-            ),
+            rescale_to_1080p=bool(self.engine_config.get("rescale_to_1080p", False)),
+            rescale_orientation=self.engine_config.get("rescale_orientation", "auto"),
             previous_canvas=old_state.canvas_resolution,
             previous_source_resolution=old_state.source_resolution,
         )
         width, height = current_canvas
-        if (
-            previous_state is not None
-            and old_state.canvas_resolution != current_canvas
-        ):
+        if previous_state is not None and old_state.canvas_resolution != current_canvas:
             logger.info(
                 "布局画布变化 %s → %s，放弃上一段布局状态",
                 old_state.canvas_resolution,
@@ -557,24 +603,11 @@ class LayoutCompiler:
                 canvas_resolution=current_canvas,
                 source_resolution=source_resolution,
             )
-
-        # The downloader records a wall-clock start in each JSONL, while render
-        # uses the video's packet timeline. Some containers report a shorter
-        # format duration than their real packet timeline, so the next JSONL
-        # may start slightly before the previous LayoutState ends. A rendered
-        # live timeline must never run backwards: collapse only this overlap,
-        # but preserve a positive real-world gap between two segments.
         segment_start = raw_segment_start
         if previous_state is not None and old_state.at > segment_start:
             segment_start = float(old_state.at)
         segment_time_shift = segment_start - raw_segment_start
         segment_end = segment_start + duration
-
-        # Stacked panels must be retained from the checkpoint time, including
-        # panels which expire in a recording gap.  Their exits still change the
-        # positions of surviving panels even though no frames are emitted for
-        # that gap.  Other tracks have no persistent stack state and can be
-        # filtered directly at the new segment boundary.
         state_events = [
             copy.deepcopy(event)
             for event in old_state.events
@@ -584,13 +617,12 @@ class LayoutCompiler:
                 else segment_start
             )
         ]
-        # Checkpoints may come from another backend (GPU failure -> fallback).
-        # Geometry/identity persist, but carried panels must use this backend's
-        # drawing capability instead of retaining the previous engine's mode.
         for event in state_events:
             if (event.get("visual") or {}).get("type") == "panel":
                 event["mode"] = "raster" if self.engine_spec.panel_raster else "ass"
+        return locals()
 
+    def _build_render_context(self, header) -> dict:
         r2l_render = self.config.get(TRACK_R2L) or {}
         slide_left_render = self.config.get(TRACK_SLIDE_LEFT) or {}
         slide_right_render = self.config.get(TRACK_SLIDE_RIGHT) or {}
@@ -604,7 +636,6 @@ class LayoutCompiler:
             "superchat": sc_render,
             "member": member_render,
         }
-
         font = dan_render.get("font", "Microsoft YaHei")
         fontsize = int(dan_render.get("fontsize", 36) or 36)
         text_measurer = TextMeasurer(font, fontsize, bold=True)
@@ -626,7 +657,6 @@ class LayoutCompiler:
                 dan_render.get("outline_color", "000000"), "#000000"
             ),
         }
-
         vip_map = _build_vip_map(dan_render.get("vip_users"))
         keyword_patterns = _compile_patterns(dan_render.get("filter_keywords"))
         username_patterns = _compile_patterns(dan_render.get("filter_users"))
@@ -637,292 +667,177 @@ class LayoutCompiler:
             if isinstance(raw_includes, (list, tuple, set))
             else set(EVENT_TRACKS)
         )
-
-        track_stats = {
-            TRACK_R2L: {"accepted": 0, "dropped": 0},
-            TRACK_SLIDE_LEFT: {"accepted": 0, "dropped": 0},
-            TRACK_SLIDE_RIGHT: {"accepted": 0, "dropped": 0},
-        }
-        unrouted_dropped = 0
-
-        def mark_accepted(track):
-            track_stats[track]["accepted"] += 1
-
-        def mark_dropped(track):
-            nonlocal unrouted_dropped
-            if track in track_stats:
-                track_stats[track]["dropped"] += 1
-            else:
-                unrouted_dropped += 1
-
-        new_r2l = []
-        new_panels = {
-            TRACK_SLIDE_LEFT: [],
-            TRACK_SLIDE_RIGHT: [],
-        }
-        ordered_records = sorted(
-            records,
-            key=lambda item: (float(item.get("received_at", 0) or 0), item["_line"]),
-        )
-        gift_cfg = event_configs.get("gift") or {}
-        ordered_records = merge_gift_records(
-            ordered_records,
-            window_seconds=float(gift_cfg.get("combo_window_seconds", 5) or 5),
-        )
-
         return locals()
 
     def _compile_records(self, context: dict):
-        self = context["self"]
-        (
-            video,
-            events_path,
-            duration,
-            segment_end,
-            segment_time_shift,
-            width,
-            height,
-            dan_render,
-            style,
-            vip_map,
-            keyword_patterns,
-            username_patterns,
-            max_length,
-            text_measurer,
-            emoji_measurer,
-            r2l_render,
-            gift_render,
-            slide_left_render,
-            slide_right_render,
-            member_render,
-            sc_render,
-            event_configs,
-            included_events,
-            track_stats,
-            mark_accepted,
-            mark_dropped,
-            ordered_records,
-            new_r2l,
-            new_panels,
-        ) = (
-            context["video"],
-            context["events_path"],
-            context["duration"],
-            context["segment_end"],
-            context["segment_time_shift"],
-            context["width"],
-            context["height"],
-            context["dan_render"],
-            context["style"],
-            context["vip_map"],
-            context["keyword_patterns"],
-            context["username_patterns"],
-            context["max_length"],
-            context["text_measurer"],
-            context["emoji_measurer"],
-            context["r2l_render"],
-            context["gift_render"],
-            context["slide_left_render"],
-            context["slide_right_render"],
-            context["member_render"],
-            context["sc_render"],
-            context["event_configs"],
-            context["included_events"],
-            context["track_stats"],
-            context["mark_accepted"],
-            context["mark_dropped"],
-            context["ordered_records"],
-            context["new_r2l"],
-            context["new_panels"],
-        )
-        for record in ordered_records:
+        stats = context["stats"]
+        for record in context["ordered_records"]:
             event_type = record.get("type")
             event_track = EVENT_TRACKS.get(event_type)
-            if event_type not in included_events or event_track is None:
-                mark_dropped(event_track)
+            if (
+                event_type not in context["included_events"]
+                or event_track is None
+            ):
+                stats.dropped(event_track)
                 continue
-            event_cfg = event_configs.get(event_type) or {}
+            event_cfg = context["event_configs"].get(event_type) or {}
             if not _event_is_enabled(record, event_cfg):
-                mark_dropped(event_track)
+                stats.dropped(event_track)
                 continue
             try:
-                # Keep the event's segment-local time unchanged when an
-                # overlapping segment origin was moved forward.
-                start_at = float(record["received_at"]) + segment_time_shift
+                start_at = (
+                    float(record["received_at"]) + context["segment_time_shift"]
+                )
             except (KeyError, TypeError, ValueError):
-                mark_dropped(event_track)
+                stats.dropped(event_track)
                 continue
-            if duration > 0 and start_at >= segment_end + 1:
-                mark_dropped(event_track)
+            if (
+                context["duration"] > 0
+                and start_at >= context["segment_end"] + 1
+            ):
+                stats.dropped(event_track)
                 continue
+            self._compile_record(context, record, event_type, event_track, start_at)
 
-            event_id = self._event_id(video, events_path, record["_line"])
-            if event_type == "danmaku":
-                prepared = self._compile_danmaku(
-                    record=record,
-                    event_id=event_id,
-                    start_at=start_at,
-                    width=width,
-                    height=height,
-                    dan_render=dan_render,
-                    style=style,
-                    vip_map=vip_map,
-                    keyword_patterns=keyword_patterns,
-                    username_patterns=username_patterns,
-                    max_length=max_length,
-                    text_measurer=text_measurer,
-                    emoji_measurer=emoji_measurer,
-                    scroll_vertical_gap=_pixels(r2l_render.get("vertical_gap"), 6.0),
-                )
-                if prepared is None:
-                    mark_dropped(event_track)
-                    continue
-                new_r2l.append(prepared)
-                continue
-
-            if event_type == "gift":
-                panels = self._compile_gift(
-                    record=record,
-                    event_id=event_id,
-                    event_track=event_track,
-                    segment_time_shift=segment_time_shift,
-                    width=width,
-                    height=height,
-                    gift_render=gift_render,
-                    slide_right_render=slide_right_render,
-                    emoji_measurer=emoji_measurer,
-                )
-                new_panels[event_track].extend(panels)
-                for _ in panels:
-                    mark_accepted(event_track)
-                continue
-
-            if event_type == "member":
-                panel = self._compile_member(
-                    record=record,
-                    event_id=event_id,
-                    event_track=event_track,
-                    start_at=start_at,
-                    width=width,
-                    height=height,
-                    member_render=member_render,
-                    slide_right_render=slide_right_render,
-                    emoji_measurer=emoji_measurer,
-                )
-                if panel is None:
-                    mark_dropped(event_track)
-                    continue
-                new_panels[event_track].append(panel)
-                mark_accepted(event_track)
-                continue
-
-            if event_type == "superchat":
-                panel = self._compile_superchat(
-                    record=record,
-                    event_id=event_id,
-                    event_track=event_track,
-                    start_at=start_at,
-                    width=width,
-                    height=height,
-                    sc_render=sc_render,
-                    slide_left_render=slide_left_render,
-                    emoji_measurer=emoji_measurer,
-                )
-                if panel is None:
-                    mark_dropped(event_track)
-                    continue
-                new_panels[event_track].append(panel)
-                mark_accepted(event_track)
-                continue
-
-            mark_dropped(event_track)
-
-        return new_r2l, new_panels
-
-    def _finalize_compile(
+    def _compile_record(
         self,
         context: dict,
-        new_r2l: list,
-        new_panels: dict,
-    ) -> LayoutCompileResult:
-        self = context["self"]
-        (
-            header,
-            duration,
-            segment_start,
-            segment_end,
-            source_resolution,
-            current_canvas,
-            old_state,
-            width,
-            height,
-            state_events,
-            dan_render,
-            r2l_render,
-            slide_left_render,
-            slide_right_render,
-            track_stats,
-            unrouted_dropped,
-            mark_accepted,
-            mark_dropped,
-            work_dir,
-        ) = (
-            context["header"],
-            context["duration"],
-            context["segment_start"],
-            context["segment_end"],
-            context["source_resolution"],
-            context["current_canvas"],
-            context["old_state"],
-            context["width"],
-            context["height"],
-            context["state_events"],
-            context["dan_render"],
-            context["r2l_render"],
-            context["slide_left_render"],
-            context["slide_right_render"],
-            context["track_stats"],
-            context["unrouted_dropped"],
-            context["mark_accepted"],
-            context["mark_dropped"],
-            context["work_dir"],
+        record: dict,
+        event_type: str,
+        event_track: str,
+        start_at: float,
+    ) -> None:
+        stats = context["stats"]
+        event_id = self._event_id(
+            context["video"], context["events_path"], record["_line"]
         )
+        if event_type == "danmaku":
+            prepared = self._compile_danmaku(
+                record=record,
+                event_id=event_id,
+                start_at=start_at,
+                width=context["width"],
+                height=context["height"],
+                dan_render=context["dan_render"],
+                style=context["style"],
+                vip_map=context["vip_map"],
+                keyword_patterns=context["keyword_patterns"],
+                username_patterns=context["username_patterns"],
+                max_length=context["max_length"],
+                text_measurer=context["text_measurer"],
+                emoji_measurer=context["emoji_measurer"],
+                scroll_vertical_gap=_pixels(
+                    context["r2l_render"].get("vertical_gap"), 6.0
+                ),
+            )
+            if prepared is None:
+                stats.dropped(event_track)
+            else:
+                context["new_r2l"].append(prepared)
+            return
+        if event_type == "gift":
+            panels = self._compile_gift(
+                record=record,
+                event_id=event_id,
+                event_track=event_track,
+                segment_time_shift=context["segment_time_shift"],
+                width=context["width"],
+                height=context["height"],
+                gift_render=context["gift_render"],
+                slide_right_render=context["slide_right_render"],
+                emoji_measurer=context["emoji_measurer"],
+            )
+            context["new_panels"][event_track].extend(panels)
+            for _ in panels:
+                stats.accepted(event_track)
+            return
+        if event_type not in ("member", "superchat"):
+            stats.dropped(event_track)
+            return
+        self._compile_panel_record(context, record, event_type, event_track, start_at)
+
+    def _compile_panel_record(
+        self,
+        context: dict,
+        record: dict,
+        event_type: str,
+        event_track: str,
+        start_at: float,
+    ) -> None:
+        event_id = self._event_id(
+            context["video"], context["events_path"], record["_line"]
+        )
+        if event_type == "member":
+            panel = self._compile_member(
+                record=record,
+                event_id=event_id,
+                event_track=event_track,
+                start_at=start_at,
+                width=context["width"],
+                height=context["height"],
+                member_render=context["member_render"],
+                slide_right_render=context["slide_right_render"],
+                emoji_measurer=context["emoji_measurer"],
+            )
+        else:
+            panel = self._compile_superchat(
+                record=record,
+                event_id=event_id,
+                event_track=event_track,
+                start_at=start_at,
+                width=context["width"],
+                height=context["height"],
+                sc_render=context["sc_render"],
+                slide_left_render=context["slide_left_render"],
+                emoji_measurer=context["emoji_measurer"],
+            )
+        if panel is None:
+            context["stats"].dropped(event_track)
+            return
+        context["new_panels"][event_track].append(panel)
+        context["stats"].accepted(event_track)
+
+    def _layout_tracks(self, context: dict):
+        state_events = context["state_events"]
         active_r2l = [
             event for event in state_events
             if event.get("track") == TRACK_R2L
         ]
-        for event in sorted(new_r2l, key=lambda item: _path_start(item)):
+        for event in sorted(context["new_r2l"], key=lambda item: _path_start(item)):
             if self._place_r2l(
                 event,
                 active_r2l,
-                width,
-                height,
-                dan_render,
-                r2l_render,
+                context["width"],
+                context["height"],
+                context["dan_render"],
+                context["r2l_render"],
             ):
                 active_r2l.append(event)
                 state_events.append(event)
-                mark_accepted(TRACK_R2L)
+                context["stats"].accepted(TRACK_R2L)
             else:
-                mark_dropped(TRACK_R2L)
-
-        track_configs = {
-            TRACK_SLIDE_LEFT: slide_left_render,
-            TRACK_SLIDE_RIGHT: slide_right_render,
-        }
+                context["stats"].dropped(TRACK_R2L)
         next_track_orders = {}
+        track_configs = {
+            TRACK_SLIDE_LEFT: context["slide_left_render"],
+            TRACK_SLIDE_RIGHT: context["slide_right_render"],
+        }
         for track, track_render in track_configs.items():
-            existing = [event for event in state_events if event.get("track") == track]
+            existing = [
+                event for event in state_events if event.get("track") == track
+            ]
             combined, track_order = self._layout_stacked_panels(
                 track=track,
                 existing=existing,
-                newcomers=self._coalesce_gift_states(new_panels[track]),
-                state_at=old_state.at,
-                initial_order=old_state.track_orders.get(track),
-                segment_start=segment_start,
-                segment_end=segment_end,
-                width=width,
-                height=height,
+                newcomers=self._coalesce_gift_states(
+                    context["new_panels"][track]
+                ),
+                state_at=context["old_state"].at,
+                initial_order=context["old_state"].track_orders.get(track),
+                segment_start=context["segment_start"],
+                segment_end=context["segment_end"],
+                width=context["width"],
+                height=context["height"],
                 track_cfg=track_render,
             )
             representative_by_id = {
@@ -943,20 +858,31 @@ class LayoutCompiler:
                     else None
                 )
                 candidates = expanded_by_group.get(group, []) if group else []
-                if candidates:
-                    mapped_order.append(
-                        str(candidates[-1].get("id"))
-                    )
-                else:
-                    mapped_order.append(str(event_id))
-            track_order = mapped_order
-            next_track_orders[track] = track_order
-            state_events = [event for event in state_events if event.get("track") != track]
+                mapped_order.append(
+                    str(candidates[-1].get("id"))
+                    if candidates
+                    else str(event_id)
+                )
+            next_track_orders[track] = mapped_order
+            state_events = [
+                event for event in state_events if event.get("track") != track
+            ]
             state_events.extend(combined)
+        return state_events, next_track_orders
 
+    def _build_result(
+        self,
+        context: dict,
+        state_events: list,
+        next_track_orders: dict,
+    ) -> LayoutCompileResult:
+        segment_start = context["segment_start"]
+        segment_end = context["segment_end"]
         plan_events = []
         for state_event in state_events:
-            local_path = _clip_path(state_event.get("path") or [], segment_start, segment_end)
+            local_path = _clip_path(
+                state_event.get("path") or [], segment_start, segment_end
+            )
             if len(local_path) < 2:
                 continue
             plan_event = {
@@ -966,7 +892,6 @@ class LayoutCompiler:
             }
             plan_event["path"] = local_path
             plan_events.append(plan_event)
-
         next_events = [
             copy.deepcopy(event)
             for event in state_events
@@ -978,41 +903,47 @@ class LayoutCompiler:
             events=next_events,
             track_orders={
                 track: [
-                    event_id
-                    for event_id in order
-                    if event_id in live_ids
+                    event_id for event_id in order if event_id in live_ids
                 ]
                 for track, order in next_track_orders.items()
             },
-            canvas_resolution=current_canvas,
-            source_resolution=source_resolution,
+            canvas_resolution=context["current_canvas"],
+            source_resolution=context["source_resolution"],
         )
         plan = RenderPlan(
-            duration=duration, events=plan_events, platform=header.get("platform")
+            duration=context["duration"],
+            events=plan_events,
+            platform=context["header"].get("platform"),
         )
-        accepted = sum(stats["accepted"] for stats in track_stats.values())
-        dropped = (
-            sum(stats["dropped"] for stats in track_stats.values())
-            + unrouted_dropped
-        )
-
-        os.makedirs(work_dir or tempfile.gettempdir(), exist_ok=True)
+        os.makedirs(context["work_dir"] or tempfile.gettempdir(), exist_ok=True)
         fd, plan_path = tempfile.mkstemp(
             prefix="render_plan_",
             suffix=".json",
-            dir=work_dir or None,
+            dir=context["work_dir"] or None,
         )
         os.close(fd)
         plan.save(plan_path)
+        stats = context["stats"]
         return LayoutCompileResult(
             render_plan_path=plan_path,
             next_state=next_state,
-            event_count=accepted,
-            dropped_count=dropped,
-            track_stats=track_stats,
-            unrouted_dropped_count=unrouted_dropped,
+            event_count=stats.event_count,
+            dropped_count=stats.dropped_count,
+            track_stats=stats.track_stats,
+            unrouted_dropped_count=stats.unrouted_dropped,
             cleanup_paths=[plan_path],
         )
+
+    def _finalize_compile(
+        self,
+        context: dict,
+        new_r2l: list,
+        new_panels: dict,
+    ) -> LayoutCompileResult:
+        context["new_r2l"] = new_r2l
+        context["new_panels"] = new_panels
+        state_events, next_track_orders = self._layout_tracks(context)
+        return self._build_result(context, state_events, next_track_orders)
 
     def _compile_danmaku(
         self,
