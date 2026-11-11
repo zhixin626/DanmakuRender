@@ -943,6 +943,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
             stop_check=lambda: check_stop(stop_event),
             pack_dir=str(pack),
             emoji_font=kwargs.get("emoji_font"),
+            fallback_fonts=kwargs.get("fallback_fonts"),
         )
     check_stop(stop_event)
     config = RenderConfig(

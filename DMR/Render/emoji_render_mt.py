@@ -171,7 +171,7 @@ def render_segment(cfg):
             event.get("emoticon_pack"),
             event.get("outline", OUT),
             event.get("outline_rgb", (0, 0, 0)),
-            scroll_margin=True,
+            scroll_vertical_gap=float(cfg.get("r2l_vertical_gap", 0) or 0),
         )
 
     dec_cmd = [FFMPEG, "-v", "error", "-fflags", "+genpts+discardcorrupt"]

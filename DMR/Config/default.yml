@@ -360,6 +360,8 @@ render_args:
     emoji_pack: ~
     # Pillow 绘制表情弹幕使用的字体；留空时自动选择
     emoji_font: ~
+    # GPU/Pillow 文字回退链；按顺序查找缺失字形，留空时只使用主字体
+    fallback_fonts: [Malgun Gothic, Yu Gothic, Leelawadee UI, Segoe UI, Segoe UI Symbol, Cambria Math]
     # 轨道是第一层，事件类型嵌套在所属轨道中。
     r2l:
       # 固定滚动速度，单位为画布像素/秒；关闭1080p缩放使用其他分辨率时也不自动缩放

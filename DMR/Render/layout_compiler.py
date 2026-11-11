@@ -1223,6 +1223,8 @@ class LayoutCompiler:
                 "ascent": content_ascent,
                 "descent": content_descent,
             }
+            if self.engine_config.get("fallback_fonts"):
+                visual["fallback_fonts"] = self.engine_config["fallback_fonts"]
         if pill:
             visual["pill"] = pill
         return {
@@ -1351,8 +1353,23 @@ class LayoutCompiler:
 
             pack = emoji_measurer.pack if emoji_measurer is not None else {}
             emoji_font = self.engine_config.get("emoji_font")
-            measurer = PillowText(font, fontsize, content_outline, pack, emoji_font)
-            name_measurer = PillowText(font, fontsize, name_outline, pack, emoji_font)
+            fallback_fonts = self.engine_config.get("fallback_fonts")
+            measurer = PillowText(
+                font,
+                fontsize,
+                content_outline,
+                pack,
+                emoji_font,
+                fallback_fonts,
+            )
+            name_measurer = PillowText(
+                font,
+                fontsize,
+                name_outline,
+                pack,
+                emoji_font,
+                fallback_fonts,
+            )
         record = record or {}
         content = str(content or "")
         uname = str(uname or "") or str(record.get("uid", "") or "")
@@ -1490,6 +1507,8 @@ class LayoutCompiler:
                 node["line_height"] = line_height
             if self.engine_config.get("emoji_font"):
                 visual["emoji_font"] = self.engine_config["emoji_font"]
+            if self.engine_config.get("fallback_fonts"):
+                visual["fallback_fonts"] = self.engine_config["fallback_fonts"]
         return {
             "id": event_id,
             "track": track,

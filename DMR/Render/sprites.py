@@ -7,6 +7,7 @@ import logging
 import os
 import pathlib
 import re
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -215,11 +216,34 @@ class SpriteFactory:
     """Build and cache the exact RGBA/YUV sprites used by the old renderer."""
 
     def __init__(
-        self, text_font: str, emoji_font: str, pack: dict[str, str], font_size: float
+        self,
+        text_font: str,
+        emoji_font: str,
+        pack: dict[str, str],
+        font_size: float,
+        fallback_fonts=None,
     ):
         self.font_size = float(font_size)
         correction = max(1, int(round(font_size * SCALE)))
         self.text_font = ImageFont.truetype(text_font, correction)
+        self.text_fonts = [(self.text_font, self._coverage(text_font))]
+        self._missing_codepoints = set()
+        fallback_values = []
+        if isinstance(fallback_fonts, str):
+            fallback_values = [item.strip() for item in fallback_fonts.split(",")]
+        elif fallback_fonts:
+            fallback_values = list(fallback_fonts)
+        for value in fallback_values:
+            try:
+                path = str(value)
+                if not os.path.isfile(path):
+                    path = resolve_font(path, True)
+                if path == text_font:
+                    continue
+                font = ImageFont.truetype(path, correction)
+                self.text_fonts.append((font, self._coverage(path)))
+            except (OSError, ValueError, TypeError) as error:
+                log.warning("字体回退不可用 '%s': %s", value, error)
         self.emoji_font, self.emoji_scale = self._load_emoji_font(
             emoji_font, correction, text_font
         )
@@ -231,6 +255,45 @@ class SpriteFactory:
         self.png_cache: dict[str, Image.Image] = {}
         self.cache: dict[tuple[Any, ...], tuple[Any, ...]] = {}
         self.image_cache: dict[tuple[Any, ...], Image.Image] = {}
+
+    @staticmethod
+    @lru_cache(maxsize=64)
+    def _coverage(path: str):
+        """Cache cmap coverage so fallback lookup never parses a font per glyph."""
+        try:
+            from fontTools.ttLib import TTFont
+
+            font = TTFont(path, fontNumber=0, lazy=True)
+            coverage = set()
+            for table in font["cmap"].tables:
+                coverage.update(table.cmap)
+            font.close()
+            return frozenset(coverage)
+        except Exception as error:
+            log.debug("读取字体 cmap 失败 '%s': %s", path, error)
+            return None
+
+    def _font_for(self, codepoint: int):
+        for font, coverage in self.text_fonts:
+            if coverage is None or codepoint in coverage:
+                return font
+        if codepoint not in self._missing_codepoints:
+            log.warning("字体回退链没有覆盖 U+%04X，使用主字体。", codepoint)
+            self._missing_codepoints.add(codepoint)
+        return self.text_font
+
+    def _split_text_runs(self, text: str):
+        current_font = None
+        current = []
+        for char in text:
+            font = self._font_for(ord(char))
+            if current and font is not current_font:
+                yield current_font, "".join(current)
+                current = []
+            current_font = font
+            current.append(char)
+        if current:
+            yield current_font, "".join(current)
 
     @staticmethod
     def _load_emoji_font(path: str, correction: int, text_font: str):
@@ -277,9 +340,13 @@ class SpriteFactory:
                     1, int(self.emoji_font.getlength(payload) * self.emoji_scale)
                 )
             else:
-                prepared = None
-                token_width = max(0, int(self.text_font.getlength(payload)))
-            prepared_tokens.append((kind, payload, prepared, token_width))
+                for font, run in self._split_text_runs(payload):
+                    prepared = None
+                    token_width = max(0, int(font.getlength(run)))
+                    prepared_tokens.append((kind, run, prepared, token_width, font))
+                    content_width += token_width
+                continue
+            prepared_tokens.append((kind, payload, prepared, token_width, None))
             content_width += token_width
 
         png_top = self.png_center - self.png_height // 2
@@ -376,7 +443,7 @@ class SpriteFactory:
         draw = ImageDraw.Draw(sprite)
         x = content_x
         png_top = self.png_center - self.png_height // 2
-        for kind, payload, prepared, token_width in prepared_tokens:
+        for kind, payload, prepared, token_width, text_font in prepared_tokens:
             if kind == "png":
                 sprite.alpha_composite(prepared, (int(x), baseline + png_top))
             elif kind == "emoji":
@@ -426,7 +493,7 @@ class SpriteFactory:
                 draw.text(
                     (x, baseline),
                     payload,
-                    font=self.text_font,
+                    font=text_font or self.text_font,
                     fill=tuple(rgb) + (255,),
                     stroke_width=outline,
                     stroke_fill=outline_rgb + (255,),
@@ -500,10 +567,20 @@ class PillowText:
     """Measure/wrap with exactly the font, tokens and outline used to draw."""
 
     def __init__(
-        self, font: str, size: float, outline: float = 0, pack=None, emoji_font=None
+        self,
+        font: str,
+        size: float,
+        outline: float = 0,
+        pack=None,
+        emoji_font=None,
+        fallback_fonts=None,
     ):
         self.factory = SpriteFactory(
-            resolve_font(font, True), resolve_emoji_font(emoji_font), pack or {}, size
+            resolve_font(font, True),
+            resolve_emoji_font(emoji_font),
+            pack or {},
+            size,
+            fallback_fonts=fallback_fonts,
         )
         self.outline = outline
 
@@ -709,7 +786,12 @@ def draw_round(size, radius, shape, fill=(0, 0, 0, 0), outline=(0, 0, 0, 0), bor
 
 
 def draw_panel(
-    visual: dict[str, Any], width: int, height: int, pack=None, emoji_font=None
+    visual: dict[str, Any],
+    width: int,
+    height: int,
+    pack=None,
+    emoji_font=None,
+    fallback_fonts=None,
 ) -> Image.Image:
     """Draw a panel from configured nodes; outlines form one outer contour."""
     scale = SUPERSAMPLE
@@ -767,6 +849,7 @@ def draw_panel(
             node["outline"],
             images,
             emoji_font or visual.get("emoji_font"),
+            fallback_fonts=fallback_fonts or visual.get("fallback_fonts"),
         )
         factory = text.factory
         for index, line in enumerate(str(node["text"]).split("\n") or [""]):
@@ -857,6 +940,7 @@ def build_atlas(
     stop_check=None,
     pack_dir=None,
     emoji_font=None,
+    fallback_fonts=None,
 ):
     """Build cached GPU planes from a RenderPlan in the task directory."""
     plan = (
@@ -880,13 +964,21 @@ def build_atlas(
         width = max(1, int(bounds.get("width", 1)))
         height = max(1, int(bounds.get("height", 1)))
         style = visual.get("style") or {}
+        effective_fallback_fonts = fallback_fonts or visual.get("fallback_fonts")
         image_pack = {}
         for token, asset in (visual.get("images") or {}).items():
             key = str(token).strip("[]").lower()
             if asset.get("path"):
                 image_pack[key] = asset["path"]
         if visual.get("type") == "panel":
-            image = draw_panel(visual, width, height, platform_pack, emoji_font)
+            image = draw_panel(
+                visual,
+                width,
+                height,
+                platform_pack,
+                emoji_font,
+                effective_fallback_fonts,
+            )
             arrays = rgba_to_yuv(image)
         else:
             rgb = parse_color(style["color"])
@@ -896,10 +988,15 @@ def build_atlas(
             bold = bool(style.get("bold", False))
             size = float(style["size"])
             font_name = resolve_font(family, bold)
-            factory_key = (font_name, emoji_name, size)
+            fallback_key = tuple(effective_fallback_fonts or ())
+            factory_key = (font_name, emoji_name, size, fallback_key)
             if factory_key not in factories:
                 factories[factory_key] = SpriteFactory(
-                    font_name, emoji_name, platform_pack, size
+                    font_name,
+                    emoji_name,
+                    platform_pack,
+                    size,
+                    fallback_fonts=effective_fallback_fonts,
                 )
             sprite = factories[factory_key].get_sprite(
                 visual.get("text", ""),
