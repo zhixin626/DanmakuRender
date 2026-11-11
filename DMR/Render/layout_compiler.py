@@ -500,6 +500,19 @@ class LayoutCompiler:
         previous_state: LayoutState | dict | None = None,
         work_dir: str = None,
     ) -> LayoutCompileResult:
+        context = self._prepare_compile_context(
+            video, events_path, previous_state, work_dir
+        )
+        new_r2l, new_panels = self._compile_records(context)
+        return self._finalize_compile(context, new_r2l, new_panels)
+
+    def _prepare_compile_context(
+        self,
+        video,
+        events_path: str,
+        previous_state: LayoutState | dict | None,
+        work_dir: str,
+    ) -> dict:
         header, records = self._read_events(events_path)
         source_resolution = resolve_render_canvas(
             getattr(video, "resolution", None),
@@ -657,6 +670,71 @@ class LayoutCompiler:
             window_seconds=float(gift_cfg.get("combo_window_seconds", 5) or 5),
         )
 
+        return locals()
+
+    def _compile_records(self, context: dict):
+        self = context["self"]
+        (
+            video,
+            events_path,
+            duration,
+            segment_end,
+            segment_time_shift,
+            width,
+            height,
+            dan_render,
+            style,
+            vip_map,
+            keyword_patterns,
+            username_patterns,
+            max_length,
+            text_measurer,
+            emoji_measurer,
+            r2l_render,
+            gift_render,
+            slide_left_render,
+            slide_right_render,
+            member_render,
+            sc_render,
+            event_configs,
+            included_events,
+            track_stats,
+            mark_accepted,
+            mark_dropped,
+            ordered_records,
+            new_r2l,
+            new_panels,
+        ) = (
+            context["video"],
+            context["events_path"],
+            context["duration"],
+            context["segment_end"],
+            context["segment_time_shift"],
+            context["width"],
+            context["height"],
+            context["dan_render"],
+            context["style"],
+            context["vip_map"],
+            context["keyword_patterns"],
+            context["username_patterns"],
+            context["max_length"],
+            context["text_measurer"],
+            context["emoji_measurer"],
+            context["r2l_render"],
+            context["gift_render"],
+            context["slide_left_render"],
+            context["slide_right_render"],
+            context["member_render"],
+            context["sc_render"],
+            context["event_configs"],
+            context["included_events"],
+            context["track_stats"],
+            context["mark_accepted"],
+            context["mark_dropped"],
+            context["ordered_records"],
+            context["new_r2l"],
+            context["new_panels"],
+        )
         for record in ordered_records:
             event_type = record.get("type")
             event_track = EVENT_TRACKS.get(event_type)
@@ -759,6 +837,56 @@ class LayoutCompiler:
 
             mark_dropped(event_track)
 
+        return new_r2l, new_panels
+
+    def _finalize_compile(
+        self,
+        context: dict,
+        new_r2l: list,
+        new_panels: dict,
+    ) -> LayoutCompileResult:
+        self = context["self"]
+        (
+            header,
+            duration,
+            segment_start,
+            segment_end,
+            source_resolution,
+            current_canvas,
+            old_state,
+            width,
+            height,
+            state_events,
+            dan_render,
+            r2l_render,
+            slide_left_render,
+            slide_right_render,
+            track_stats,
+            unrouted_dropped,
+            mark_accepted,
+            mark_dropped,
+            work_dir,
+        ) = (
+            context["header"],
+            context["duration"],
+            context["segment_start"],
+            context["segment_end"],
+            context["source_resolution"],
+            context["current_canvas"],
+            context["old_state"],
+            context["width"],
+            context["height"],
+            context["state_events"],
+            context["dan_render"],
+            context["r2l_render"],
+            context["slide_left_render"],
+            context["slide_right_render"],
+            context["track_stats"],
+            context["unrouted_dropped"],
+            context["mark_accepted"],
+            context["mark_dropped"],
+            context["work_dir"],
+        )
         active_r2l = [
             event for event in state_events
             if event.get("track") == TRACK_R2L
