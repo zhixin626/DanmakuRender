@@ -4,9 +4,11 @@ import re
 import time
 from pathlib import Path
 from datetime import datetime
+import copy
+from send2trash import send2trash
 
 from DMR.LiveAPI import LiveAPI
-from DMR.Render import get_engine, DEFAULT_ENGINE, TRANSCODE_ENGINE
+from DMR.Render import ENGINES, get_engine, DEFAULT_ENGINE, TRANSCODE_ENGINE
 from DMR.utils.bark_notifier import bark_notify_url
 from .baseevents import BaseEvents
 from ..utils import *
@@ -325,8 +327,30 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         request_id = message.request_id
         self._dispatched.pop(request_id, None)
         video:VideoInfo = message.data.get('output')
+        config = message.data.get("config", {}) or {}
+        if config.get("_resolution_rerender"):
+            loc = self._locate_by_request(request_id)
+            if loc:
+                group_id, index, vtype = loc
+                slot = self.state_dict[group_id][index][vtype]
+                old_file = slot.pop("_resolution_original_file", None)
+                slot["wait"] = []
+                slot["status"] = "ready"
+                slot["file"] = video
+                slot.pop("_resolution_rerender", None)
+                if old_file and getattr(old_file, "path", None) != video.path:
+                    try:
+                        send2trash(old_file.path)
+                    except Exception as error:
+                        self.logger.warning("少数方向旧产物删除失败：%s", error)
+                state = self.session_data.get(group_id, {})
+                state["_resolution_rerender_ids"].discard(request_id)
+                if not state["_resolution_rerender_ids"]:
+                    state["_resolution_rerender_pending"] = False
+                    state["_resolution_rerender_done"] = True
+                return self.reconcile(group_id, clean_trigger="onRenderEnd")
         if (
-            message.data.get("config", {}).get("_independent_retry")
+            config.get("_independent_retry")
             or video.group_id not in self.state_dict
         ):
             self.logger.info(
@@ -381,7 +405,15 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         target_slot = {'src_video': 'src_video', 'dm_video': 'dm_video'}
 
         ret_msgs = []
-        self._log_resolution_policy(group_id)
+        resolution_decision = self._log_resolution_policy(group_id)
+        rerender_msgs = self._dispatch_resolution_rerender(
+            group_id, resolution_decision
+        )
+        if rerender_msgs:
+            return rerender_msgs
+        resolution_state = self.session_data.get(group_id, {})
+        if resolution_state.get("_resolution_rerender_pending"):
+            return []
         for vt in merge_type:
             # 检查该 vt 所有分段是否都 ready/uploaded（None=未参与，跳过；其余状态=还不能合）
             entries = []
@@ -430,6 +462,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
     def _log_resolution_policy(self, group_id):
         """Record the session canvas decision before Merger groups segments."""
+        session = self.session_data.setdefault(group_id, {})
+        if session.get("_resolution_policy_logged"):
+            return session.get("_resolution_decision")
         spans = []
         offset = 0.0
         for state in self.state_dict.get(group_id, []):
@@ -440,7 +475,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 spans.append((offset + float(start), offset + float(end), width, height))
             offset += float(getattr(video, "duration", 0) or 0)
         if not spans:
-            return
+            session["_resolution_policy_logged"] = True
+            session["_resolution_decision"] = None
+            return None
         overlay = self.config.get("render_args", {}).get("overlay", {})
         try:
             decision = decide_session_parts(
@@ -457,7 +494,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             )
         except ValueError as error:
             self.logger.warning("分辨率时间线无法判定：%s", error)
-            return
+            session["_resolution_policy_logged"] = True
+            session["_resolution_decision"] = None
+            return None
         self.logger.info(
             "分辨率时间线策略: group=%s dominant=%s action=%s minority=%.1fs runs=%s",
             group_id,
@@ -466,6 +505,87 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             decision["minority_seconds"],
             decision["runs"],
         )
+        session["_resolution_policy_logged"] = True
+        session["_resolution_decision"] = decision
+        return decision
+
+    def _dispatch_resolution_rerender(self, group_id, decision):
+        """Queue minority segments through the normal Render plugin."""
+        if not decision or decision.get("action") != "re_render_minority":
+            return []
+        session = self.session_data.setdefault(group_id, {})
+        if session.get("_resolution_rerender_failed"):
+            return []
+        if session.get("_resolution_rerender_done"):
+            return []
+        states = self.state_dict.get(group_id, [])
+        for state in states:
+            slot = state.get("dm_video", {})
+            if slot.get("status") is not None and slot.get("status") not in (
+                "ready",
+                "uploaded",
+            ):
+                return []
+        minority = []
+        for index, state in enumerate(states):
+            slot = state.get("dm_video") or {}
+            video = slot.get("file")
+            spans = getattr(video, "resolution_spans", []) if video else []
+            if not spans:
+                continue
+            totals = {"portrait": 0.0, "landscape": 0.0}
+            for start, end, width, height in spans:
+                orientation = "landscape" if width >= height else "portrait"
+                totals[orientation] += max(0.0, float(end) - float(start))
+            orientation = max(totals, key=totals.get)
+            if orientation != decision["dominant"]:
+                minority.append((index, state, slot, video))
+        if not minority:
+            session["_resolution_rerender_done"] = True
+            return []
+        if session.get("_resolution_rerender_started"):
+            return []
+        gpu_mode = next(
+            name for name, spec in ENGINES.items() if spec.panel_raster
+        )
+        render_args = self.config["render_args"]["overlay"]
+        messages = []
+        session["_resolution_rerender_started"] = True
+        session["_resolution_rerender_pending"] = True
+        session["_resolution_rerender_ids"] = set()
+        for index, state, slot, video in minority:
+            source = (state.get("src_video_pre") or {}).get("file")
+            if source is None:
+                session["_resolution_rerender_failed"] = True
+                session["_resolution_rerender_pending"] = False
+                return []
+            args = copy.deepcopy(render_args)
+            args["rescale_to_1080p"] = True
+            args["rescale_orientation"] = decision["dominant"]
+            stem, suffix = os.path.splitext(video.path)
+            output = f"{stem}（主方向重渲染）{suffix or '.mp4'}"
+            request_id = uuid()
+            message = PipeMessage(
+                source=self.name,
+                target="render",
+                event="newtask",
+                request_id=request_id,
+                data={
+                    "taskname": self.name,
+                    "mode": gpu_mode,
+                    "video": source,
+                    "output": output,
+                    "args": {**args, "_resolution_rerender": True},
+                },
+            )
+            slot["status"] = "rendering"
+            slot["wait"] = [request_id]
+            slot["_resolution_original_file"] = video
+            slot["_resolution_rerender"] = True
+            session["_resolution_rerender_ids"].add(request_id)
+            self._dispatched[request_id] = message
+            messages.append(message)
+        return messages
 
     def onMergeEnd(self, message: PipeMessage):
         """Merger 回报合并完成：把被合并段按 remove_source 标状态、把合并产物按序作为新段追加，
@@ -576,6 +696,15 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 value for value in slot["wait"] if value != message.request_id
             ]
             slot["status"] = "stopped"
+            if slot.get("_resolution_rerender"):
+                slot["status"] = "ready"
+                slot["file"] = slot.pop("_resolution_original_file", slot.get("file"))
+                slot.pop("_resolution_rerender", None)
+                state = self.session_data.get(group_id, {})
+                state["_resolution_rerender_ids"].discard(message.request_id)
+                state["_resolution_rerender_failed"] = True
+                state["_resolution_rerender_pending"] = False
+                self.logger.warning("少数方向重渲染被停止，回退按方向分P：group=%s segment=%s", group_id, index)
             affected.add(group_id)
         return [followup for gid in affected for followup in self.reconcile(gid)]
 
@@ -587,6 +716,18 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             return []
         group_id, seg_idx, vtype = loc
         slot = self.state_dict[group_id][seg_idx][vtype]
+        if slot.get("_resolution_rerender"):
+            slot["wait"] = []
+            slot["status"] = "ready"
+            slot["file"] = slot.pop("_resolution_original_file", slot.get("file"))
+            slot.pop("_resolution_rerender", None)
+            state = self.session_data.get(group_id, {})
+            state["_resolution_rerender_ids"].discard(message.request_id)
+            state["_resolution_rerender_failed"] = True
+            state["_resolution_rerender_pending"] = False
+            self.logger.warning("少数方向重渲染失败，回退按方向分P：group=%s segment=%s error=%s", group_id, seg_idx, message.msg)
+            self._dispatched.pop(message.request_id, None)
+            return self.reconcile(group_id, clean_trigger=None)
         slot['wait'] = [r for r in slot['wait'] if r != message.request_id]
         slot['status'] = 'holding'
         src = (self.state_dict[group_id][seg_idx].get('src_video_pre') or {}).get('file')
