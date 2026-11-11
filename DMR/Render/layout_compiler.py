@@ -716,7 +716,7 @@ class LayoutCompiler:
         event_id = self._event_id(
             context["video"], context["events_path"], record["_line"]
         )
-        if event_type == "danmaku":
+        if event_type in ("danmaku", "entry"):
             prepared = self._compile_danmaku(
                 record=record,
                 event_id=event_id,
