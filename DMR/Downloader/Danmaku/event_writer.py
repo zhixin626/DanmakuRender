@@ -272,6 +272,8 @@ class EventWriter:
     def _write_line(self, data: dict) -> None:
         if not self._fp:
             raise RuntimeError("EventWriter 尚未打开")
-        self._fp.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        encoded = encoded.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+        self._fp.write(encoded)
         self._fp.write("\n")
         self._fp.flush()

@@ -171,6 +171,7 @@ def render_segment(cfg):
             event.get("emoticon_pack"),
             event.get("outline", OUT),
             event.get("outline_rgb", (0, 0, 0)),
+            scroll_margin=True,
         )
 
     dec_cmd = [FFMPEG, "-v", "error", "-fflags", "+genpts+discardcorrupt"]
@@ -694,7 +695,7 @@ def main():
         if resize_str == f"{W}x{H}": resize_str = None
 
     # 解析 ASS：R2L 样式(字体名/字号/粗体) + 拆 textonly / 特殊弹幕
-    txt = open(ass, encoding="utf-8").read().splitlines()
+    txt = open(ass, encoding="utf-8").read().split("\n")
     fontname, fs, bold = "Microsoft YaHei", 60, True
     for l in txt:
         if l.startswith("Style: R2L"):
@@ -870,7 +871,7 @@ def main():
     # 字幕 ass（可选）：解析成 header + dialogue 列表，后面按段切分、与弹幕同遍 libass 烧
     sub_header, sub_dia = [], []
     if subtitle_ass and os.path.exists(subtitle_ass):
-        stx = open(subtitle_ass, encoding="utf-8").read().splitlines()
+        stx = open(subtitle_ass, encoding="utf-8").read().split("\n")
         sub_header = [l for l in stx if not l.startswith("Dialogue")]
         for l in stx:
             if not l.startswith("Dialogue"):

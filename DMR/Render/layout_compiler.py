@@ -28,6 +28,69 @@ from .resolution import resolve_render_canvas
 SUPPORTED_SCHEMA = 1
 logger = logging.getLogger(__name__)
 
+_CONTROL_TO_SPACE = {
+    *"\r\n\t\v\f",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",
+    "\u2028",
+    "\u2029",
+}
+_FORMAT_TO_REMOVE = {
+    "\u180e",
+    "\u200b",
+    "\u00ad",
+    "\u2060",
+    "\ufeff",
+}
+_BIDI_TO_REMOVE = {
+    *map(chr, range(0x202A, 0x202F)),
+    *map(chr, range(0x2066, 0x206A)),
+}
+_VISIBLE_SPACE_CHARS = {
+    "\u00a0",
+    *map(chr, range(0x2000, 0x200B)),
+    "\u202f",
+    "\u205f",
+    "\u3000",
+    "\u3164",
+    "\u115f",
+    "\u1160",
+    "\uffa0",
+    "\u2800",
+}
+
+
+def clean_text(value) -> str:
+    """Normalize display text while preserving emoji and combining sequences."""
+    if value is None:
+        return ""
+    output = []
+    for char in str(value):
+        codepoint = ord(char)
+        if char in _CONTROL_TO_SPACE or char in _VISIBLE_SPACE_CHARS:
+            output.append(" ")
+        elif char in _FORMAT_TO_REMOVE or char in _BIDI_TO_REMOVE:
+            continue
+        elif codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
+            continue
+        else:
+            output.append(char)
+    return re.sub(r" +", " ", "".join(output)).strip()
+
+
+def _clean_event_value(value):
+    if isinstance(value, dict):
+        return {key: _clean_event_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clean_event_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clean_event_value(item) for item in value)
+    if isinstance(value, str):
+        return clean_text(value)
+    return value
+
 PANEL_ENTER_DURATION = 0.5
 PANEL_EXIT_DURATION = 0.5
 PANEL_PUSH_DURATION = 0.3
@@ -668,6 +731,9 @@ class LayoutCompiler:
                     slide_right_render=slide_right_render,
                     emoji_measurer=emoji_measurer,
                 )
+                if panel is None:
+                    mark_dropped(event_track)
+                    continue
                 new_panels[event_track].append(panel)
                 mark_accepted(event_track)
                 continue
@@ -684,6 +750,9 @@ class LayoutCompiler:
                     slide_left_render=slide_left_render,
                     emoji_measurer=emoji_measurer,
                 )
+                if panel is None:
+                    mark_dropped(event_track)
+                    continue
                 new_panels[event_track].append(panel)
                 mark_accepted(event_track)
                 continue
@@ -913,6 +982,8 @@ class LayoutCompiler:
                 record=display_record,
                 emoji_measurer=emoji_measurer,
             )
+            if panel is None:
+                continue
             panel["_gift_state_index"] = state_index
             if len(state_records) > 1:
                 panel["gift_state_group"] = event_id
@@ -931,7 +1002,7 @@ class LayoutCompiler:
         member_render: dict,
         slide_right_render: dict,
         emoji_measurer,
-    ) -> dict:
+    ) -> dict | None:
         """Compile one membership panel using the shared slide-right layout."""
         display_record = dict(record)
         display_record["member_count_suffix"] = _optional_quantity_suffix(
@@ -974,7 +1045,7 @@ class LayoutCompiler:
         sc_render: dict,
         slide_left_render: dict,
         emoji_measurer,
-    ) -> dict:
+    ) -> dict | None:
         """Compile one superchat panel using the slide-left layout."""
         return self._prepare_panel(
             event_id,
@@ -1078,10 +1149,13 @@ class LayoutCompiler:
         text_measurer,
         emoji_measurer,
     ):
-        content = str(record.get("content", "") or "")
-        uname = str(record.get("uname", "") or "")
+        content = clean_text(record.get("content", ""))
+        uid = clean_text(record.get("uid", ""))
+        uname = clean_text(record.get("uname", "")) or uid
         if record.get("type") == "entry":
             content = content or f"{uname} 进入直播间"
+        if not content:
+            return None
         if any(pattern.search(content) for pattern in keyword_patterns):
             return None
         if any(pattern.fullmatch(uname) for pattern in username_patterns):
@@ -1090,7 +1164,6 @@ class LayoutCompiler:
         template = dan_render.get("template")
         text = self._format_template(template, record, content)
         pill = None
-        uid = str(record.get("uid", ""))
         if uid in vip_map:
             text = f"{uname}:{content}"
             pill = {
@@ -1276,14 +1349,18 @@ class LayoutCompiler:
             emoji_font = self.engine_config.get("emoji_font")
             measurer = PillowText(font, fontsize, content_outline, pack, emoji_font)
             name_measurer = PillowText(font, fontsize, name_outline, pack, emoji_font)
-        lines = measurer.wrap(str(content or ""), text_budget) or [""]
+        record = record or {}
+        content = clean_text(content)
+        uname = clean_text(uname) or clean_text(record.get("uid", ""))
+        if not content:
+            return None
+        lines = measurer.wrap(content, text_budget) or [""]
         line_height = fontsize
         if self.engine_spec.panel_raster:
             line_height = max(measurer.height(line, text_budget) for line in lines)
         bottom_height = len(lines) * line_height + padding_top + padding_bottom
         total_height = top_height + bottom_height
         content = "\n".join(lines)
-        record = record or {}
         price_text = _panel_price_text(record)
         price_width = min(text_budget, name_measurer.measure(price_text))
         name_price_gap = (
@@ -1748,14 +1825,14 @@ class LayoutCompiler:
     @staticmethod
     def _format_template(template, record, default):
         if not template:
-            return str(default or "")
+            return clean_text(default)
         try:
-            return str(template).format_map(_SafeFormatDict(record))
+            return clean_text(str(template).format_map(_SafeFormatDict(record)))
         except Exception:
             try:
-                return replace_keywords(template, record)
+                return clean_text(replace_keywords(template, record))
             except Exception:
-                return str(default or "")
+                return clean_text(default)
 
     @staticmethod
     def _event_id(video, events_path, line_number):
@@ -1789,6 +1866,7 @@ class LayoutCompiler:
                     raise ValueError(f"{path} 包含多个 meta")
                 header = data
             else:
+                data = _clean_event_value(data)
                 data["_line"] = index + 1
                 records.append(data)
         if not header:

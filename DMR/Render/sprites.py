@@ -26,6 +26,10 @@ SUPERSAMPLE = 4
 OUTLINE = 1
 OUT = OUTLINE
 SHORTCODE_RE = re.compile(r"\[([^\[\]\r\n]{1,200})\]")
+
+SCROLL_SPRITE_MARGIN_RATIO = 0.2
+SCROLL_SPRITE_MARGIN_MAX = 4
+SCROLL_SPRITE_SIDE_MARGIN = 4
 EMOTICON_PREFIX = "; DMR_EMOTICON:"
 _STRIP = {0x200D: None, 0x20E3: None}
 _STRIP.update({codepoint: None for codepoint in range(0xFE00, 0xFE10)})
@@ -215,6 +219,7 @@ class SpriteFactory:
     def __init__(
         self, text_font: str, emoji_font: str, pack: dict[str, str], font_size: float
     ):
+        self.font_size = float(font_size)
         correction = max(1, int(round(font_size * SCALE)))
         self.text_font = ImageFont.truetype(text_font, correction)
         self.emoji_font, self.emoji_scale = self._load_emoji_font(
@@ -307,6 +312,7 @@ class SpriteFactory:
         event_pack: dict[str, str] | None = None,
         outline: float = OUTLINE,
         outline_rgb: tuple[int, int, int] = (0, 0, 0),
+        scroll_margin: bool = False,
     ) -> tuple[Any, ...]:
         """Return the cached sprite tuple consumed by the NV12 compositor."""
         outline = max(0, int(round(outline)))
@@ -316,7 +322,7 @@ class SpriteFactory:
         )
         active_pack = self.pack if event_pack is None else event_pack
         event_key = None if event_pack is None else tuple(sorted(event_pack.items()))
-        key = (text, tuple(rgb), pill_key, event_key, outline, outline_rgb)
+        key = (text, tuple(rgb), pill_key, event_key, outline, outline_rgb, scroll_margin)
         if key in self.cache:
             self._last_image = self.image_cache[key]
             return self.cache[key]
@@ -336,11 +342,20 @@ class SpriteFactory:
             )
             anchor_x_offset = 0
         else:
-            top_extent = content_ascent + outline
-            bottom_extent = content_descent + outline
-            content_x = outline
-            total_width = content_width + 2 * outline
-            anchor_x_offset = outline
+            vertical_margin = (
+                min(
+                    SCROLL_SPRITE_MARGIN_MAX,
+                    max(0, int(round(self.font_size * SCROLL_SPRITE_MARGIN_RATIO))),
+                )
+                if scroll_margin
+                else 0
+            )
+            side_margin = SCROLL_SPRITE_SIDE_MARGIN if scroll_margin else 0
+            top_extent = content_ascent + outline + vertical_margin
+            bottom_extent = content_descent + outline + vertical_margin
+            content_x = outline + side_margin
+            total_width = content_width + 2 * (outline + side_margin)
+            anchor_x_offset = outline + side_margin
 
         baseline = top_extent
         sprite = Image.new(
@@ -450,6 +465,7 @@ class SpriteFactory:
         outline: float = OUTLINE,
         outline_rgb: tuple[int, int, int] = (0, 0, 0),
         fit_width: int | None = None,
+        scroll_margin: bool = False,
     ) -> Image.Image:
         """Return the same Pillow image used to build the cached YUV sprite."""
         self.get_sprite(
@@ -458,6 +474,7 @@ class SpriteFactory:
             event_pack=event_pack,
             outline=outline,
             outline_rgb=outline_rgb,
+            scroll_margin=scroll_margin,
         )
         image = self._last_image.copy()
         if fit_width is not None and image.width > fit_width:
@@ -742,7 +759,7 @@ def draw_panel(
             emoji_font or visual.get("emoji_font"),
         )
         factory = text.factory
-        for index, line in enumerate(str(node["text"]).splitlines() or [""]):
+        for index, line in enumerate(str(node["text"]).split("\n") or [""]):
             sprite = factory.get_sprite_image(
                 line,
                 parse_color(node["color"]),
@@ -893,6 +910,7 @@ def build_atlas(
                 event_pack=image_pack if visual.get("images") else None,
                 outline=style["outline"],
                 outline_rgb=parse_color(style["outline_color"]),
+                scroll_margin=True,
             )
             opacity = float(style["opacity"])
             arrays = (
