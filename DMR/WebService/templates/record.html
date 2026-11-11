@@ -140,6 +140,16 @@
             : `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
 
+    function formatElapsed(seconds) {
+        const total = Math.max(0, Math.floor(Number(seconds) || 0));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = total % 60;
+        return h > 0
+            ? `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+            : `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
     function taskTimeIsVisible(task) {
         if (taskTimeVisibility.has(task.name)) return taskTimeVisibility.get(task.name);
         return task.status === 1 || task.status === 3;
@@ -157,13 +167,16 @@
     function taskTimeHTML(task) {
         if (!taskTimeIsVisible(task)) return '—';
         if (task.status === 1) {
-            return `分段 ${task.duration}<br>本场 ${task.live_duration || '-'}`;
+            const now = Date.now() / 1000;
+            const segment = task.segment_start_timestamp == null ? task.duration : formatElapsed(now - task.segment_start_timestamp);
+            const live = task.live_start_timestamp == null ? (task.live_duration || '-') : formatElapsed(now - task.live_start_timestamp);
+            return `分段 ${segment}<br>本场 ${live}`;
         }
         if (task.status === 3) {
-            const value = formatCountdown(task.stop_wait_remaining);
+            const value = formatCountdown((task.stop_wait_remaining || 0) - ((Date.now() / 1000) - (task._clientReceivedAt || Date.now() / 1000)));
             return value === null ? '确认下播中…' : `剩余 ${value}`;
         }
-        const value = formatCountdown(task.next_check_remaining);
+        const value = formatCountdown((task.next_check_remaining || 0) - ((Date.now() / 1000) - (task._clientReceivedAt || Date.now() / 1000)));
         if (task.status === 2) {
             return value === null ? '即将检测…' : `下次状态检测 ${value}`;
         }
@@ -500,6 +513,7 @@
                 const recordingDiv = document.getElementById('recording-tasks');
                 latestRecordingTaskMap = {};
                 data.recording_tasks.forEach(task => {
+                    task._clientReceivedAt = Date.now() / 1000;
                     taskInfoMap[task.name] = { force_offline_time: task.force_offline_time };
                     latestRecordingTaskMap[task.name] = task;
                 });
@@ -550,5 +564,11 @@
     });
 
     startPolling(refreshTasks, 3000);
+    startPolling(() => {
+        document.querySelectorAll('#recording-tasks .rec-time').forEach(el => {
+            const task = latestRecordingTaskMap[el.dataset.task];
+            if (task) updateTaskTimeCell(el, task);
+        });
+    }, 1000);
 </script>
 {% endblock %}

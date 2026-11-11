@@ -763,6 +763,8 @@ class WebApi:
                         'status': status,
                         'duration': duration,
                         'live_duration': live_duration,
+                        'segment_start_timestamp': seg_start.timestamp() if seg_start else None,
+                        'live_start_timestamp': live_start.timestamp() if live_start else None,
                         'next_check_remaining': _remaining_seconds(
                             getattr(task, 'next_check_deadline', None)),
                         'stop_wait_remaining': _remaining_seconds(
