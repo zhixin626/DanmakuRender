@@ -1,6 +1,5 @@
 """Stopped renders remain independently retryable without live-group storage."""
 
-import json
 import queue
 from datetime import datetime
 from pathlib import Path
@@ -18,8 +17,7 @@ from DMR.WebService.webapi import WebApi
 from DMR.utils import VideoInfo, FFprobe, PipeMessage
 
 
-@pytest.mark.parametrize("restart", [False, True])
-def test_stop_finishes_group_and_failed_list_can_retry(monkeypatch, tmp_path, restart):
+def test_stop_finishes_group_and_failed_list_can_retry(monkeypatch, tmp_path):
     options = yaml.safe_load(Path("DMR/Config/default.yml").read_text(encoding="utf8"))[
         "render_args"
     ]["overlay"]
@@ -87,15 +85,7 @@ def test_stop_finishes_group_and_failed_list_can_retry(monkeypatch, tmp_path, re
         assert not handler.state_dict and not handler.held_tasks
         assert not (tmp_path / ".dmr").exists()
         (task_id,) = plugin.failed_tasks
-        assert task_id in json.loads(failed_file.read_text(encoding="utf8"))
-        if restart:
-            plugin.stop()
-            plugin.render_executors.shutdown()
-            plugin = Render((send, queue.Queue()), failed_tasks_file=str(failed_file))
-            plugin.stoped = False
-            assert task_id in plugin.failed_tasks and isinstance(
-                plugin.failed_tasks[task_id]["video"].ctime, datetime
-            )
+        assert not failed_file.exists()
         engine = SimpleNamespace(
             plugin_dict={"render": {"class": plugin}}, task_dict={}, notifications=[]
         )
@@ -115,9 +105,7 @@ def test_stop_finishes_group_and_failed_list_can_retry(monkeypatch, tmp_path, re
         assert done.event == "end" and done.request_id != dispatch.request_id
         assert handler.onRenderEnd(done) == []  # no group recreation, merge or upload
         assert Path(done.data["output"].path).is_file()
-        assert not plugin.failed_tasks and not json.loads(
-            failed_file.read_text(encoding="utf8")
-        )
+        assert not plugin.failed_tasks and not failed_file.exists()
     finally:
         plugin.render_executors.shutdown()
 
@@ -148,7 +136,7 @@ def test_failed_retry_is_not_lost_and_can_be_ignored(tmp_path, monkeypatch):
         assert plugin.retry_task("id")
         plugin.render_executors.shutdown()
         assert plugin.failed_tasks["id"]["status"] == "error"
-        assert json.loads((tmp_path / "failed.json").read_text(encoding="utf8"))
+        assert not (tmp_path / "failed.json").exists()
         engine = SimpleNamespace(
             plugin_dict={"render": {"class": plugin}}, task_dict={}, notifications=[]
         )
@@ -165,6 +153,16 @@ def test_failed_retry_is_not_lost_and_can_be_ignored(tmp_path, monkeypatch):
             == 200
         )
         assert not plugin.failed_tasks
+    finally:
+        plugin.render_executors.shutdown()
+
+
+def test_render_does_not_load_failed_tasks_on_startup(tmp_path):
+    failed_file = tmp_path / "failed.json"
+    failed_file.write_text('{"old": {"status": "stopped"}}', encoding="utf8")
+    plugin = Render((queue.Queue(), queue.Queue()), failed_tasks_file=str(failed_file))
+    try:
+        assert plugin.failed_tasks == {}
     finally:
         plugin.render_executors.shutdown()
 

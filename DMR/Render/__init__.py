@@ -93,7 +93,6 @@ class Render():
         self.failed_tasks_file = kwargs.get(
             "failed_tasks_file", ".temp/failed_renders.json"
         )
-        self.load_failed_tasks()
 
         self._render_class = {}
         self.render_executors = ThreadPoolExecutor(max_workers=self.nrenders)
@@ -145,7 +144,6 @@ class Render():
                 task.pop("layout_track_key", None)
                 task.pop("layout_sequence", None)
                 self.render_tasks[task['uuid']] = task
-                self.save_failed_tasks()
                 self.render_executors.submit(self._render_subprocess, task)
                 return True
             return False
@@ -154,7 +152,6 @@ class Render():
         with self._lock:
             if uuid in self.failed_tasks and uuid not in self.render_tasks:
                 self.failed_tasks.pop(uuid)
-                self.save_failed_tasks()
                 return True
             return False
 
@@ -246,7 +243,6 @@ class Render():
                 task["status"] = "stopped"
                 task["error"] = str(desc)
                 self.failed_tasks[task["uuid"]] = task
-                self.save_failed_tasks()
                 self._pipeSend(
                     event="stopped",
                     msg=f"视频{task['output']}渲染已停止",
@@ -259,7 +255,6 @@ class Render():
                     task["status"] = "error"
                     task["error"] = str(desc)
                     self.failed_tasks[task["uuid"]] = task
-                    self.save_failed_tasks()
                 # 渲染失败已交由 liveevents 挂起转人工（见 onRenderError），不再留存 failed_tasks
                 self._pipeSend(
                     event='error',
@@ -271,8 +266,7 @@ class Render():
                 )
             else:
                 # 记录渲染成功的视频（最新在前），只保留最近 200 条避免无限增长
-                if self.failed_tasks.pop(task["uuid"], None) is not None:
-                    self.save_failed_tasks()
+                self.failed_tasks.pop(task["uuid"], None)
                 output_path = getattr(desc, 'path', None) or task.get('output')
                 video = task.get('video')
                 self.completed_tasks.append({
@@ -521,6 +515,5 @@ class Render():
             for uuid, task in self.render_tasks.items():
                 if uuid not in self.failed_tasks:
                     self.failed_tasks[uuid] = task
-            self.save_failed_tasks()
 
         self.logger.info('Render stopped.')
