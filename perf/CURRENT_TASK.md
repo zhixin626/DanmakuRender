@@ -85,6 +85,8 @@
 - **MERGE_CHECKLIST.md**：在排除清单里明确写出 `configs/DMR-月亮3.yml`。这个文件现在已经被 git 跟踪，合并时不要带进去。另加一条合并后的人工步骤：把用户自己 `configs/global.yml` 中的 `rescale_orientation: adaptive` 改为 `auto`。这一步由用户合并时自己处理，Codex 不改这个文件。
 - **`_log_resolution_policy`**：完成第 2 项后，确认只在整场结束、真正派发合并时才执行一次，不在每个分段结束时重复执行。
 
+> 第 16 条及相关旧说明中的 `combo_id`、`combo_mode`、10 秒窗口设计已被 2026-11-11 用户决定取代：当前统一使用 5 秒滑动窗口，不使用平台连击字段，数量逐步上涨，E/G 共用同一组连续事件。
+
 ### 6. 多路并行渲染测试（Claude 决定，第 5 项之后）
 - 用 2 路和 3 路同时运行 GPU 渲染（例如用 `render_only.py` 同时开多个进程，或者在 Render 中设置 `nrenders=2/3`），每路使用 30 分钟的真实素材。
 - 运行时仍然先跑 `dmr_gate`，确保不干扰正在运行的 DMR。

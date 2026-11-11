@@ -28,6 +28,13 @@ render_args:
 
 `vencoder` 及 `vencoder_args` 沿用原配置。GPU 读取其中的 `-b:v`、`-maxrate`、`-bufsize` 等参数，不使用校准倍率。已运行的 DMR 要在空闲时重启才能加载新代码。
 
+## 相关配置
+
+- `r2l.speed` 的单位是画布像素/秒，控制滚动弹幕的移动速度。
+- `slide_right.gift.combo_window_seconds` 固定按 5 秒滑动窗口合并同一用户的同名礼物；连续送礼会在同一药丸上逐步更新数量。
+- `slide_left`、`slide_right` 的 `price_duration_ranges` 支持 4 个价格档位：0–30、30–50、50–100、100 元以上；档位的 `seconds` 决定药丸显示时长。
+- `rescale_orientation: adaptive` 已映射为 `auto`，由整场结束时的少数方向分段重渲染策略统一到主画布；不再按每段即时切换画布。
+
 GPU 初始化或渲染失败时自动回退到 `emoji_dmrender`，并从同一布局检查点重编译 E 计划。用户停止不自动回退或重试；停止任务进入失败列表，可在 WebUI 中重试，成片独立保留，已释放直播组不会自动恢复合并/上传。未知引擎名直接报错。回退沿用原编码器配置：无 NVENC 的机器需要自行配置可用的软件编码器，回退不会自动改编码器。
 
 ## 只渲染已有录像

@@ -57,6 +57,35 @@ def test_tid_deduplicates_only_when_tid_is_present():
     assert records[0]["gift_count"] == 1
 
 
+def test_min_price_is_applied_after_combo_total(tmp_path):
+    config = yaml.safe_load(Path("DMR/Config/default.yml").read_text(encoding="utf8"))["render_args"]["overlay"]
+    config["slide_right"]["gift"]["min_price_cny"] = 5
+    video = VideoInfo(path="source.flv", dm_file_id="events", duration=20, resolution=(1080, 1920))
+
+    def compile_rows(path, count):
+        rows = [{"type": "meta", "schema": 1, "platform": "bilibili", "segment_start_time": 100}]
+        for line in range(count):
+            rows.append(gift(line + 2, 100 + line, "a"))
+        path.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+            encoding="utf8",
+        )
+        return LayoutCompiler(config, engine="gpu_render", engine_config=config).compile(
+            video=video, events_path=str(path), work_dir=str(tmp_path)
+        )
+
+    accepted = compile_rows(tmp_path / "accepted.jsonl", 6)
+    rejected = compile_rows(tmp_path / "rejected.jsonl", 3)
+    try:
+        accepted_plan = RenderPlan.load(accepted.render_plan_path)
+        rejected_plan = RenderPlan.load(rejected.render_plan_path)
+        assert [event for event in accepted_plan.events if event["track"] == "slide_right"]
+        assert not [event for event in rejected_plan.events if event["track"] == "slide_right"]
+    finally:
+        accepted.cleanup()
+        rejected.cleanup()
+
+
 def test_active_gift_state_moves_up_when_later_panel_arrives(tmp_path):
     events = tmp_path / "events.jsonl"
     rows = [{"type": "meta", "schema": 1, "platform": "bilibili", "segment_start_time": 100}]
