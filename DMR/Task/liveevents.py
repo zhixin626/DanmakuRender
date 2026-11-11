@@ -402,12 +402,6 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         # 基础防御：未开启合并 / 没有这个 group / merge_type 为空 → 直接退出
         if (not auto_merge) or (group_id not in self.ended_dict) or (not merge_type):
             return []
-        if any(
-            (state.get("dm_video") or {}).get("status") not in ("ready", "uploaded")
-            for state in self.state_dict.get(group_id, [])
-            if (state.get("dm_video") or {}).get("status") is not None
-        ):
-            return []
 
         stime, _ = read_last_complete_session(self.src_path)   # stime 仅用于合并文件名模板
         target_slot = {'src_video': 'src_video', 'dm_video': 'dm_video'}
@@ -420,9 +414,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         if rerender_msgs:
             return rerender_msgs
         resolution_state = self.session_data.get(group_id, {})
-        if resolution_state.get("_resolution_rerender_pending"):
-            return []
         for vt in merge_type:
+            if vt == "dm_video" and resolution_state.get("_resolution_rerender_pending"):
+                continue
             # 检查该 vt 所有分段是否都 ready/uploaded（None=未参与，跳过；其余状态=还不能合）
             entries = []
             ok = True
@@ -473,6 +467,12 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         session = self.session_data.setdefault(group_id, {})
         if session.get("_resolution_policy_logged"):
             return session.get("_resolution_decision")
+        if any(
+            (state.get("dm_video") or {}).get("status") not in ("ready", "uploaded")
+            for state in self.state_dict.get(group_id, [])
+            if (state.get("dm_video") or {}).get("status") is not None
+        ):
+            return None
         spans = []
         offset = 0.0
         for state in self.state_dict.get(group_id, []):
