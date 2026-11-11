@@ -164,6 +164,11 @@ def _hex_color(value, default="#FFFFFF") -> str:
     raw = str(value or default).lstrip("#")
     if len(raw) != 6:
         raw = str(default).lstrip("#")
+    else:
+        try:
+            int(raw, 16)
+        except ValueError:
+            raw = str(default).lstrip("#")
     return "#" + raw.upper()
 
 

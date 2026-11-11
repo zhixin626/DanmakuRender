@@ -5,7 +5,12 @@ import pytest
 from PIL import features
 
 from DMR.Downloader.Danmaku.event_writer import EventWriter
-from DMR.Render.layout_compiler import LayoutCompiler, clean_text
+from DMR.Render.layout_compiler import LayoutCompiler, clean_text, _hex_color
+
+
+def test_invalid_event_color_falls_back_to_default():
+    assert _hex_color("zzzzzz", "#FFFFFF") == "#FFFFFF"
+    assert _hex_color("123456", "#FFFFFF") == "#123456"
 from DMR.Render.layout_models import RenderPlan
 from DMR.Render.sprites import SpriteFactory
 from DMR.utils import VideoInfo
