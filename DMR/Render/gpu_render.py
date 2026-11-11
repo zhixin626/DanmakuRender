@@ -15,6 +15,7 @@ import time
 import threading
 import warnings
 from collections import defaultdict
+import numpy as np
 from datetime import datetime
 from DMR.utils.ffprobe import FFprobe
 from dataclasses import dataclass
@@ -34,8 +35,7 @@ _dll_handles = []
 PLAN_KERNEL = r"""
 extern "C" __global__
 void blend_plan(unsigned char* y, unsigned char* uv, int width, int height,
-                const int* px, const int* py, const int* offsets,
-const int* widths, const int* heights, const int* event_alpha, int count,
+                const int* metadata, int metadata_stride, int count,
                 const unsigned char* sy, const unsigned char* su,
                 const unsigned char* sv, const unsigned char* sa) {
     int ux = blockIdx.x * blockDim.x + threadIdx.x;
@@ -49,11 +49,12 @@ const int* widths, const int* heights, const int* event_alpha, int count,
             int yy = y0 + dy;
             int value = y[yy * width + x];
             for (int event = 0; event < count; ++event) {
-                int sx = x - px[event];
-                int sy_local = yy - py[event];
-                if (sx < 0 || sy_local < 0 || sx >= widths[event] || sy_local >= heights[event]) continue;
-                int index = offsets[event] + sy_local * widths[event] + sx;
-                int alpha = (sa[index] * event_alpha[event] + 127) / 255;
+                const int* item = metadata + event * metadata_stride;
+                int sx = x - item[0];
+                int sy_local = yy - item[1];
+                if (sx < 0 || sy_local < 0 || sx >= item[3] || sy_local >= item[4]) continue;
+                int index = item[2] + sy_local * item[3] + sx;
+                int alpha = (sa[index] * item[5] + 127) / 255;
                 value = (value * (255 - alpha) + sy[index] * alpha + 127) / 255;
             }
             y[yy * width + x] = (unsigned char)value;
@@ -62,16 +63,17 @@ const int* widths, const int* heights, const int* event_alpha, int count,
     int uvalue = uv[uy * width + ux * 2];
     int vvalue = uv[uy * width + ux * 2 + 1];
     for (int event = 0; event < count; ++event) {
+        const int* item = metadata + event * metadata_stride;
         int alpha_sum = 0;
         int u_sum = 0;
         int v_sum = 0;
         for (int dy = 0; dy < 2; ++dy) {
             for (int dx = 0; dx < 2; ++dx) {
-                int sx = x0 + dx - px[event];
-                int sy_local = y0 + dy - py[event];
-                if (sx < 0 || sy_local < 0 || sx >= widths[event] || sy_local >= heights[event]) continue;
-                int index = offsets[event] + sy_local * widths[event] + sx;
-                int alpha = (sa[index] * event_alpha[event] + 127) / 255;
+                int sx = x0 + dx - item[0];
+                int sy_local = y0 + dy - item[1];
+                if (sx < 0 || sy_local < 0 || sx >= item[3] || sy_local >= item[4]) continue;
+                int index = item[2] + sy_local * item[3] + sx;
+                int alpha = (sa[index] * item[5] + 127) / 255;
                 alpha_sum += alpha;
                 u_sum += su[index] * alpha;
                 v_sum += sv[index] * alpha;
@@ -661,6 +663,23 @@ class SpriteCompositor:
         self.plan_assets = plan_assets
         self.event_scanner = EventScanner(plan_assets["events"])
         self.kernel = cupy.RawKernel(PLAN_KERNEL, "blend_plan")
+        self.metadata_host = None
+        self.metadata_capacity = 0
+
+    def _ensure_metadata(self, count: int):
+        if count <= self.metadata_capacity:
+            return
+        capacity = 1
+        while capacity < count:
+            capacity *= 2
+        try:
+            storage = self.cupy.cuda.alloc_pinned_memory(capacity * 6 * 4)
+            self.metadata_host = np.frombuffer(storage, dtype=np.int32).reshape(
+                capacity, 6
+            )
+        except (AttributeError, TypeError, ValueError):
+            self.metadata_host = np.empty((capacity, 6), dtype=np.int32)
+        self.metadata_capacity = capacity
 
     def apply(self, frame, timestamp):
         return self._apply_plan(frame, timestamp)
@@ -670,20 +689,19 @@ class SpriteCompositor:
         active = self.event_scanner.visible(timestamp)
         if not active:
             return 0
-        px = self.cupy.asarray([item[1] for item in active], dtype=self.cupy.int32)
-        py = self.cupy.asarray([item[2] for item in active], dtype=self.cupy.int32)
-        offsets = self.cupy.asarray(
-            [item[0].offset for item in active], dtype=self.cupy.int32
-        )
-        widths = self.cupy.asarray(
-            [item[0].width for item in active], dtype=self.cupy.int32
-        )
-        heights = self.cupy.asarray(
-            [item[0].height for item in active], dtype=self.cupy.int32
-        )
-        event_alpha = self.cupy.asarray(
-            [item[3] for item in active], dtype=self.cupy.int32
-        )
+        count = len(active)
+        self._ensure_metadata(count)
+        for index, item in enumerate(active):
+            event, x, y, alpha = item
+            self.metadata_host[index] = (
+                x,
+                y,
+                event.offset,
+                event.width,
+                event.height,
+                alpha,
+            )
+        metadata = self.cupy.asarray(self.metadata_host[:count])
         self.kernel(
             ((self.width // 2 + 31) // 32, (self.height // 2 + 7) // 8),
             (32, 8),
@@ -692,13 +710,9 @@ class SpriteCompositor:
                 frame.uv.reshape(-1),
                 self.cupy.int32(self.width),
                 self.cupy.int32(self.height),
-                px,
-                py,
-                offsets,
-                widths,
-                heights,
-                event_alpha,
-                self.cupy.int32(len(active)),
+                metadata,
+                self.cupy.int32(6),
+                self.cupy.int32(count),
                 self.plan_assets["y"],
                 self.plan_assets["u"],
                 self.plan_assets["v"],
