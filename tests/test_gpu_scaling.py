@@ -107,3 +107,30 @@ def test_three_owned_slots_protect_cfr_and_vfr_lookahead(monkeypatch, times, res
 
 def test_production_gpu_module_has_no_test_cli():
     assert not hasattr(gpu, "main")
+
+
+def test_nv12_buffer_canvas_copy_does_not_reimport_cai():
+    class Cupy:
+        class cuda:
+            @staticmethod
+            def get_current_stream():
+                return SimpleNamespace(wait_event=lambda _event: None)
+
+        def asarray(self, *_args, **_kwargs):
+            raise AssertionError("owned NV12 buffers must bypass CAI import")
+
+    source = object.__new__(gpu.NV12Buffer)
+    source.y = np.arange(4, dtype=np.uint8).reshape(2, 2, 1)
+    source.uv = np.array([[[8, 9]]], dtype=np.uint8)
+    source.ready = None
+
+    target = object.__new__(gpu.NV12Buffer)
+    target.cupy = Cupy()
+    target.width = target.height = 2
+    target.y = np.zeros((2, 2, 1), dtype=np.uint8)
+    target.uv = np.zeros((1, 1, 2), dtype=np.uint8)
+
+    target.load_into_canvas(source)
+
+    np.testing.assert_array_equal(target.y, source.y)
+    np.testing.assert_array_equal(target.uv, source.uv)

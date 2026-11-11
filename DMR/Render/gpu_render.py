@@ -583,6 +583,18 @@ class NV12Buffer:
         ready = getattr(decoded, "ready", None)
         if ready is not None:
             self.cupy.cuda.get_current_stream().wait_event(ready)
+        if isinstance(decoded, NV12Buffer):
+            # NV12Buffer already owns CuPy arrays. Re-importing their CAI would
+            # honor the exported stream field and add an implicit synchronize.
+            source_y = decoded.y[..., 0]
+            source_uv = decoded.uv
+            source_height, source_width = source_y.shape
+            if source_width == self.width and source_height == self.height:
+                self.y[..., 0] = source_y
+                self.uv[...] = source_uv
+                return
+            self._scale(source_y, source_uv)
+            return
         views = []
         for source in decoded.cuda():
             cai = source.__cuda_array_interface__
