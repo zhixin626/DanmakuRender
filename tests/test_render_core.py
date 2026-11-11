@@ -48,7 +48,7 @@ def test_scanline_enter_exit_and_source_order():
             2,
             0.5,
             2.0,
-            ((0.5, 5, 6), (2.0, 5, 6)),
+            ((0.5, 5, 6), (1.0, 7, 8), (2.0, 5, 6)),
             {"enter_duration": 0.5, "exit_duration": 0.5},
         ),
         RenderEvent(
@@ -67,6 +67,8 @@ def test_scanline_enter_exit_and_source_order():
     assert [item[0].id for item in visible] == ["b", "a"]
     assert visible[0][3] == 128
     assert scanner.visible(1.75)[0][0].id == "b"
+    assert scanner.path_indices[0] == 1
+    assert scanner.active_order == [(1, 0)]
 
 
 def test_fixed_event_rejects_missing_fields():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import bisect
 import logging
 import math
 import os
@@ -499,7 +500,31 @@ class EventScanner:
         )
         self.next_start = 0
         self.active: set[int] = set()
+        self.active_order: list[tuple[int, int]] = []
+        self.path_indices: dict[int, int] = {}
         self.last_timestamp = float("-inf")
+
+    def _position(self, index: int, timestamp: float):
+        event = self.events[index]
+        path = event.path
+        if not path:
+            return None
+        if timestamp <= path[0][0]:
+            self.path_indices[index] = 0
+            return int(round(path[0][1])), int(round(path[0][2]))
+        segment = min(self.path_indices.get(index, 0), max(0, len(path) - 2))
+        while segment + 1 < len(path) and timestamp > path[segment + 1][0]:
+            segment += 1
+        self.path_indices[index] = segment
+        left = path[segment]
+        if segment + 1 >= len(path):
+            return int(round(left[1])), int(round(left[2]))
+        right = path[segment + 1]
+        span = max(1e-9, float(right[0]) - float(left[0]))
+        ratio = (timestamp - float(left[0])) / span
+        return int(round(left[1] + (right[1] - left[1]) * ratio)), int(
+            round(left[2] + (right[2] - left[2]) * ratio)
+        )
 
     def visible(self, timestamp: float) -> list[tuple[dict[str, Any], int, int, int]]:
         """Advance the scanline, preserving source order within each layer."""
@@ -511,16 +536,23 @@ class EventScanner:
             if self.events[index].start > timestamp:
                 break
             self.active.add(index)
+            bisect.insort(
+                self.active_order,
+                (self.events[index].z_order, index),
+            )
             self.next_start += 1
-        self.active = {
-            index for index in self.active if self.events[index].end > timestamp
+        expired = {
+            index for index in self.active if self.events[index].end <= timestamp
         }
+        if expired:
+            self.active.difference_update(expired)
+            self.active_order = [
+                item for item in self.active_order if item[1] not in expired
+            ]
         visible = []
-        for index in sorted(
-            self.active, key=lambda index: (self.events[index].z_order, index)
-        ):
+        for _, index in self.active_order:
             event = self.events[index]
-            position = event_position(event, timestamp)
+            position = self._position(index, timestamp)
             if position is not None:
                 motion = event.motion
                 enter = max(0.0, float(motion.get("enter_duration", 0.0)))
