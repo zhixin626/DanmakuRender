@@ -7,7 +7,7 @@
 3. **遇到的问题和解决办法**：首次 CUDA event 读取使用了错误的实例方法，已改为 `cupy.cuda.get_elapsed_time`；随后确认 `NV12Buffer.load_into_canvas` 对自有 CuPy CAI 的隐式 stream 同步是主要开销，10b0 已改为直用 `.y/.uv`。
 4. **意见和想法**：profiling 只在环境变量开启时写入，生产默认无计时；10b0 只改变自有 `NV12Buffer` 的导入路径，原生解码器 CAI 仍走带 stride 的包装。
 5. **整体看法**：10b0 后进程 CPU 从 17.08s 降至 3.67s（约 -78.5%），墙钟基本持平；分辨率、帧数、音画时长和 0 闪烁保持不变。
-6. **给 Claude 的建议**：`sync_wait` 墙钟占比仍 67.1%，按你的规则下一步做 10b4；`decode_wait + encode_call` 约 14.7%，暂不做 10b5。
+6. **给 Claude 的建议**：10b4 无同步实验在相同 500ms `nvidia-smi` 采样下 wall 40.75s（保留等待）与 40.77s（去等待），改善 <10%，且 NVENC 平均约 20.6%（采样开销使绝对值偏低）。按规则不采纳 10b4，记为编码器/流水线吞吐瓶颈，继续第三轮结构拆分；10b5 的 14.7% 也不满足阈值。
 
 脚本：`perf/pipeline_profile.py`；验证：`pytest tests -q` 159 passed；媒体 profiling 已完成。
 
@@ -22,3 +22,7 @@
 | 10b0（当前） | 17.85s | 3.67s | 0.34s（1.75%） | 13.13s（67.1%） | 2.88s（14.7%） |
 
 `CUPY_CUDA_ARRAY_INTERFACE_SYNC=0` 的验证跑为 wall 17.92s、copy/scale 0.59s（3.0%），证明隐藏 CAI 同步来源判断正确。基线与 10b0 输出均完成前 1500 帧逐帧检查：0 candidate / 0 flicker；ffprobe 两条流均 182.100s、9105 帧。
+
+## 10b4 实验结论
+
+在隔离 worktree 中只移除 `blend_ready.synchronize()`，不提交实验代码。相同素材、相同 500ms `nvidia-smi` 采样：保留等待 40.7538s，去等待 40.7736s，墙钟改善约 -0.05%。两者均成功输出 9105 帧、182.100s，去等待版本前 1500 帧逐帧检查 0 flicker。采样均值（保留 / 去等待）：NVENC 20.62% / 20.70%，NVDEC 11.47% / 11.52%，GPU 5.41% / 4.92%，显存峰值均 1637 MiB。`nvidia-smi` 每次启动本身会拉长测试，故只比较同一采样方法的相对值。
