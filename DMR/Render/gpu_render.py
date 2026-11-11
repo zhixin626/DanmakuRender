@@ -208,6 +208,14 @@ def load_cuda_modules() -> tuple[Any, Any]:
     return cupy, PyNvVideoCodec
 
 
+def create_wait_event(cupy: Any):
+    """Create a CUDA fence that sleeps the host while waiting for reuse."""
+    try:
+        return cupy.cuda.Event(block=True, disable_timing=True)
+    except TypeError:
+        return cupy.cuda.Event(disable_timing=True)
+
+
 def codec_name(video_encoder: str) -> str:
     """Convert an FFmpeg NVENC name into PyNvVideoCodec's codec name."""
     return video_encoder.removesuffix("_nvenc")
@@ -292,7 +300,7 @@ def decode_frames(
         owned = buffers[slot]
         if owned is None or (owned.width, owned.height) != geometry:
             owned = buffers[slot] = NV12Buffer(cupy, *geometry)
-            owned.ready = cupy.cuda.Event(disable_timing=True)
+            owned.ready = create_wait_event(cupy)
         owned.load(decoded)
         owned.ready.record()
         copied = owned.ready
@@ -723,7 +731,7 @@ class FrameRing:
     def __init__(self, cupy: Any, width: int, height: int, stream: Any):
         self.stream = stream
         self.buffers = [NV12Buffer(cupy, width, height) for _ in range(4)]
-        self.copied = [cupy.cuda.Event(disable_timing=True) for _ in self.buffers]
+        self.copied = [create_wait_event(cupy) for _ in self.buffers]
         self.used = [False] * len(self.buffers)
 
     def acquire(self, index: int) -> NV12Buffer:
