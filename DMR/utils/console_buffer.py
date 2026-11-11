@@ -8,6 +8,9 @@ import sys
 import re
 import queue
 import threading
+import os
+from pathlib import Path
+import time
 from collections import deque
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
@@ -17,6 +20,8 @@ _ERR_RE = re.compile(r'\b(?:ERROR|CRITICAL)\b')
 # 内存里保留的最近日志行：仅用于 SSE 连上时「发一段历史打底」，上限保证内存有界。
 _console_lines = deque(maxlen=20000)
 _error_count = [0]   # 单调递增的报错行计数（用列表避免 global）
+_next_id = [0]
+_log_path = None
 _lock = threading.Lock()
 _installed = False
 _subscribers = set()  # SSE 订阅者的队列集合：每来一行就推给它们（实时流式，不再靠轮询）
@@ -24,7 +29,15 @@ _subscribers = set()  # SSE 订阅者的队列集合：每来一行就推给它�
 
 def _note_line(clean):
     """记录一行（已去 ANSI），命中报错级别则累加计数，并推给所有 SSE 订阅者。调用方需持有 _lock。"""
-    _console_lines.append(clean)
+    _next_id[0] += 1
+    item = {"id": _next_id[0], "text": clean}
+    _console_lines.append(item)
+    if _log_path is not None:
+        try:
+            with _log_path.open("a", encoding="utf-8") as stream:
+                stream.write(f"{item['id']}\t{clean.replace(chr(10), ' ')}\n")
+        except OSError:
+            pass
     if _ERR_RE.search(clean):
         _error_count[0] += 1
     # 推给订阅者；某个队列满了（客户端太慢/已死）就丢这行，绝不阻塞日志写入
@@ -69,12 +82,17 @@ class _ConsoleTee:
         return getattr(self._stream, name)
 
 
-def install_console_tee():
+def install_console_tee(log_dir=None):
     """替换 sys.stdout/sys.stderr 为镜像流，重复调用无效果"""
     global _installed
     if _installed:
         return
     _installed = True
+    global _log_path
+    if log_dir:
+        path = Path(log_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        _log_path = path / f"console-{time.strftime('%Y%m%d-%H%M%S')}.txt"
     if sys.stdout is not None:
         sys.stdout = _ConsoleTee(sys.stdout)
     if sys.stderr is not None:
@@ -85,7 +103,7 @@ def get_console_lines(n=500):
     """返回最近 n 行控制台输出"""
     with _lock:
         lines = list(_console_lines)
-    return lines[-n:]
+    return [item["text"] for item in lines[-n:]]
 
 
 def get_error_count():
@@ -93,13 +111,35 @@ def get_error_count():
     return _error_count[0]
 
 
-def subscribe(history_size=0):
+def subscribe(history_size=0, last_id=0):
     """原子地取得历史快照并订阅新日志，避免两步操作造成遗漏或重复。"""
     q = queue.Queue(maxsize=10000)
     with _lock:
-        history = list(_console_lines)[-history_size:] if history_size else []
+        history = [item for item in _console_lines if item["id"] > last_id]
+        if history_size:
+            history = history[-history_size:]
         _subscribers.add(q)
     return q, history
+
+
+def get_console_history(before_id=0, limit=500):
+    """从内存和落盘文件中取得更早历史，按序号倒序筛选后正序返回。"""
+    with _lock:
+        records = [item for item in _console_lines if item["id"] < before_id]
+        path = _log_path
+    if path and path.exists() and len(records) < limit:
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                raw_id, _, text = line.partition("\t")
+                try:
+                    item = {"id": int(raw_id), "text": text}
+                except ValueError:
+                    continue
+                if item["id"] < before_id and all(old["id"] != item["id"] for old in records):
+                    records.append(item)
+        except OSError:
+            pass
+    return sorted(records, key=lambda item: item["id"])[-limit:]
 
 
 def unsubscribe(q):

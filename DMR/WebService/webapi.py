@@ -8,6 +8,7 @@ import json
 import yaml
 import subprocess
 import math
+import gzip
 
 
 def _abspath(p):
@@ -69,7 +70,12 @@ from functools import wraps
 from datetime import datetime
 
 from DMR.utils import *
-from DMR.utils.console_buffer import get_console_lines, subscribe as console_subscribe, unsubscribe as console_unsubscribe
+from DMR.utils.console_buffer import (
+    get_console_lines,
+    get_console_history,
+    subscribe as console_subscribe,
+    unsubscribe as console_unsubscribe,
+)
 from DMR.utils.session_record import encode_dt, humanize_dt
 from DMR.Login import CookieManager
 from DMR.EmojiPack import bilibili as emoji_bilibili, douyin as emoji_douyin, douyu as emoji_douyu, common as emoji_common
@@ -239,20 +245,43 @@ class WebApi:
         @app.route('/api/console/stream')
         @self.login_required
         def api_console_stream():
-            """SSE 日志：历史一次性发送，之后逐行推送实时日志。"""
+            """带序号的 SSE 日志，断线后从 Last-Event-ID 继续。"""
+            try:
+                last_id = int(request.headers.get('Last-Event-ID', request.args.get('last_id', '0')) or 0)
+            except ValueError:
+                last_id = 0
             def gen():
-                q, history = console_subscribe(5000)
+                q, history = console_subscribe(5000, last_id)
                 try:
-                    yield f'event: history\ndata: {json.dumps(history)}\n\n'
+                    yield f'event: history\ndata: {json.dumps(history, ensure_ascii=False)}\n\n'
                     while True:
                         try:
-                            yield f'data: {json.dumps(q.get(timeout=15))}\n\n'
+                            item = q.get(timeout=15)
+                            yield f'id: {item["id"]}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n'
                         except queue.Empty:
                             yield ': ping\n\n'   # 心跳，防连接被中途判超时断开
                 finally:
                     console_unsubscribe(q)
             return Response(gen(), mimetype='text/event-stream',
                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+        @app.route('/api/console/history')
+        @self.login_required
+        def api_console_history():
+            try:
+                before = int(request.args.get('before', '0') or 0)
+                limit = min(1000, max(1, int(request.args.get('limit', '500') or 500)))
+            except ValueError:
+                return {'error': 'invalid pagination'}, 400
+            payload = json.dumps(
+                {'lines': get_console_history(before, limit)},
+                ensure_ascii=False,
+            ).encode('utf-8')
+            return Response(
+                gzip.compress(payload),
+                mimetype='application/json',
+                headers={'Content-Encoding': 'gzip', 'Cache-Control': 'no-cache'},
+            )
 
         @app.route('/api/notifications')
         @self.login_required

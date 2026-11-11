@@ -102,8 +102,13 @@
         <script>
         // ===== 统一轮询：切到后台标签暂停，切回前台立即刷新一次并恢复轮询 =====
         function startPolling(fn, interval) {
-            var timer = null;
-            function start() { if (timer) return; fn(); timer = setInterval(fn, interval); }
+            var timer = null, running = false;
+            async function run() {
+                if (running) return;
+                running = true;
+                try { await fn(); } finally { running = false; }
+            }
+            function start() { if (timer) return; run(); timer = setInterval(run, interval); }
             function stop()  { if (timer) { clearInterval(timer); timer = null; } }
             document.addEventListener('visibilitychange', function () {
                 if (document.hidden) stop(); else start();

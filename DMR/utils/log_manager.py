@@ -47,7 +47,11 @@ def cleanup_logs(log_dir, current_log, args, logger):
     removed_bytes = 0
     failures = []
 
-    files = [path for path in log_dir.glob("DMR-*.log*") if path.is_file()]
+    files = [
+        path for pattern in ("DMR-*.log*", "console-*.txt")
+        for path in log_dir.glob(pattern)
+        if path.is_file()
+    ]
     if retention_days:
         cutoff = now - retention_days * 86400
         for path in files:
@@ -59,7 +63,11 @@ def cleanup_logs(log_dir, current_log, args, logger):
             except OSError as exc:
                 failures.append((path, exc))
 
-    files = [path for path in log_dir.glob("DMR-*.log*") if path.is_file()]
+    files = [
+        path for pattern in ("DMR-*.log*", "console-*.txt")
+        for path in log_dir.glob(pattern)
+        if path.is_file()
+    ]
     total_bytes = 0
     existing_files = []
     for path in files:

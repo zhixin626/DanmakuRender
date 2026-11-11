@@ -15,10 +15,6 @@ from DMR.Config import Config
 from DMR.utils.console_buffer import install_console_tee
 from DMR.utils.log_manager import configure_logging
 
-# 接管控制台输出，镜像到内存缓冲区供 WebService 日志页读取
-# 必须在下面 logging.StreamHandler(sys.stdout) 创建之前调用
-install_console_tee()
-
 if __name__ == '__main__':    
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='configs/global.yml')
@@ -36,6 +32,9 @@ if __name__ == '__main__':
         check_update(VERSION)
     
     config = Config(args.config)
+
+    # 在 logging handler 创建前接管 stdout，并把带序号的控制台副本落盘。
+    install_console_tee((config.global_config.get('logging_args') or {}).get('directory', './logs'))
 
     logger = configure_logging(
         args.config,
