@@ -13,6 +13,7 @@ import tempfile
 import time
 import threading
 import warnings
+from collections import defaultdict
 from datetime import datetime
 from DMR.utils.ffprobe import FFprobe
 from dataclasses import dataclass
@@ -393,6 +394,45 @@ def check_stop(stop_event):
         raise RenderStopped("GPU render stopped by user")
 
 
+class PipelineProfiler:
+    """Optional stage timer used only by perf profiling runs."""
+
+    def __init__(self):
+        self.enabled = os.environ.get("DMR_PIPELINE_PROFILE") == "1"
+        self.seconds = defaultdict(float)
+        self.counts = defaultdict(int)
+        self.output = os.environ.get("DMR_PIPELINE_PROFILE_OUTPUT")
+
+    def add(self, name: str, seconds: float) -> None:
+        if not self.enabled:
+            return
+        self.seconds[name] += max(0.0, float(seconds))
+        self.counts[name] += 1
+
+    def finish(self, wall_s: float, frames: int) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        total = sum(self.seconds.values())
+        result = {
+            "frames": frames,
+            "wall_s": wall_s,
+            "stages": {
+                name: {
+                    "seconds": value,
+                    "count": self.counts[name],
+                    "avg_ms": value * 1000 / max(1, self.counts[name]),
+                    "wall_fraction": value / max(1e-9, total),
+                }
+                for name, value in sorted(self.seconds.items())
+            },
+        }
+        if self.output:
+            pathlib.Path(self.output).write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf8"
+            )
+        return result
+
+
 def event_position(event: RenderEvent, timestamp: float) -> tuple[int, int] | None:
     """Interpolate one RenderPlan path at a presentation timestamp."""
     path = event.path
@@ -699,6 +739,7 @@ def encode_to_file(
     for buffer in ring.buffers:
         buffer.chroma_location = chroma_location
     plan_assets = upload_atlas(cupy, config.atlas)
+    profiler = PipelineProfiler()
     event_count = len(plan_assets["events"])
     compositor = SpriteCompositor(cupy, width, height, plan_assets)
     active_counts: list[int] = []
@@ -730,6 +771,7 @@ def encode_to_file(
     frame_count = 0
     packet_times = []
     started = time.perf_counter()
+    previous_body_end = started
     last_progress = started
     try:
         with bitstream.open("wb") as stream:
@@ -741,21 +783,35 @@ def encode_to_file(
                 source_fps=source_frame_rate,
                 start_offset=start_offset,
             ):
+                body_start = time.perf_counter()
+                profiler.add("decode_wait", body_start - previous_body_end)
                 check_stop(stop_event)
                 buffer = ring.acquire(frame_count)
+                stage_start = time.perf_counter()
                 with encode_stream:
                     buffer.load_into_canvas(decoded)
+                profiler.add("copy_scale", time.perf_counter() - stage_start)
+                stage_start = time.perf_counter()
+                with encode_stream:
                     active_counts.append(compositor.apply(buffer, frame_time))
+                profiler.add("scanner_kernel_enqueue", time.perf_counter() - stage_start)
+                stage_start = time.perf_counter()
                 encode_stream.synchronize()
+                profiler.add("synchronize_wait", time.perf_counter() - stage_start)
                 picture = nvc.NV_ENC_PIC_PARAMS()
                 picture.frameIdx = frame_count
                 picture.inputTimeStamp = frame_count
+                stage_start = time.perf_counter()
                 packets = encoder.Encode(buffer, picture)
+                profiler.add("encode_call", time.perf_counter() - stage_start)
                 ring.submitted(frame_count)
+                stage_start = time.perf_counter()
                 for packet in packets:
                     stream.write(packet["data"])
                     packet_times.append(int(packet["timestamp"]))
+                profiler.add("write_packet", time.perf_counter() - stage_start)
                 frame_count += 1
+                previous_body_end = time.perf_counter()
                 now = time.perf_counter()
                 if progress_cb and now - last_progress >= 0.5:
                     progress_cb(
@@ -778,6 +834,7 @@ def encode_to_file(
         # Drop input references now, before render_one releases the CUDA pool.
         buffer = decoded = first = frames = None
     elapsed = time.perf_counter() - started
+    pipeline_profile = profiler.finish(elapsed, frame_count)
     return {
         "frames": frame_count,
         "packet_times": packet_times,
@@ -796,6 +853,7 @@ def encode_to_file(
             (frame_count - 1) / frame_rate if frame_count else 0.0
         ),
         "resolution_spans": [tuple(span) for span in resolution_spans],
+        "pipeline_profile": pipeline_profile,
     }
 
 
