@@ -60,6 +60,7 @@ def test_dispatches_minority_to_gpu_and_forces_dominant_canvas(tmp_path):
     assert messages[0].data["mode"] == "gpu_render"
     assert messages[0].data["args"]["rescale_orientation"] == "landscape"
     assert messages[0].data["args"]["rescale_to_1080p"]
+    assert messages[0].data["video"] is second
     assert handler.state_dict["g"][1]["dm_video"]["status"] == "rendering"
 
 

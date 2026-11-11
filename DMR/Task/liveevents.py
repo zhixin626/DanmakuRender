@@ -8,7 +8,7 @@ import copy
 from send2trash import send2trash
 
 from DMR.LiveAPI import LiveAPI
-from DMR.Render import ENGINES, get_engine, DEFAULT_ENGINE, TRANSCODE_ENGINE
+from DMR.Render import ENGINES, get_engine, DEFAULT_ENGINE, RERENDER_ENGINE, TRANSCODE_ENGINE
 from DMR.utils.bark_notifier import bark_notify_url
 from .baseevents import BaseEvents
 from ..utils import *
@@ -178,6 +178,7 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                   'output': output, 'args': render_args})
         slot = self.state_dict[video.group_id][-1]['dm_video']
         slot['status'] = 'rendering'
+        slot['source'] = video
         slot['wait'].append(render_msg.request_id)
         self._dispatched[render_msg.request_id] = render_msg
         ret_msgs.append(render_msg)
@@ -328,7 +329,8 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
         self._dispatched.pop(request_id, None)
         video:VideoInfo = message.data.get('output')
         config = message.data.get("config", {}) or {}
-        if config.get("_resolution_rerender"):
+        rerender_config = config.get("args", {}) or {}
+        if config.get("_resolution_rerender") or rerender_config.get("_resolution_rerender"):
             loc = self._locate_by_request(request_id)
             if loc:
                 group_id, index, vtype = loc
@@ -399,6 +401,12 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
 
         # 基础防御：未开启合并 / 没有这个 group / merge_type 为空 → 直接退出
         if (not auto_merge) or (group_id not in self.ended_dict) or (not merge_type):
+            return []
+        if any(
+            (state.get("dm_video") or {}).get("status") not in ("ready", "uploaded")
+            for state in self.state_dict.get(group_id, [])
+            if (state.get("dm_video") or {}).get("status") is not None
+        ):
             return []
 
         stime, _ = read_last_complete_session(self.src_path)   # stime 仅用于合并文件名模板
@@ -545,16 +553,14 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             return []
         if session.get("_resolution_rerender_started"):
             return []
-        gpu_mode = next(
-            name for name, spec in ENGINES.items() if spec.panel_raster
-        )
+        gpu_mode = RERENDER_ENGINE
         render_args = self.config["render_args"]["overlay"]
         messages = []
         session["_resolution_rerender_started"] = True
         session["_resolution_rerender_pending"] = True
         session["_resolution_rerender_ids"] = set()
         for index, state, slot, video in minority:
-            source = (state.get("src_video_pre") or {}).get("file")
+            source = slot.get("source") or (state.get("src_video_pre") or {}).get("file")
             if source is None:
                 session["_resolution_rerender_failed"] = True
                 session["_resolution_rerender_pending"] = False
@@ -703,8 +709,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 state = self.session_data.get(group_id, {})
                 state["_resolution_rerender_ids"].discard(message.request_id)
                 state["_resolution_rerender_failed"] = True
-                state["_resolution_rerender_pending"] = False
                 self.logger.warning("少数方向重渲染被停止，回退按方向分P：group=%s segment=%s", group_id, index)
+                if not state["_resolution_rerender_ids"]:
+                    state["_resolution_rerender_pending"] = False
             affected.add(group_id)
         return [followup for gid in affected for followup in self.reconcile(gid)]
 
@@ -724,10 +731,12 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
             state = self.session_data.get(group_id, {})
             state["_resolution_rerender_ids"].discard(message.request_id)
             state["_resolution_rerender_failed"] = True
-            state["_resolution_rerender_pending"] = False
             self.logger.warning("少数方向重渲染失败，回退按方向分P：group=%s segment=%s error=%s", group_id, seg_idx, message.msg)
             self._dispatched.pop(message.request_id, None)
-            return self.reconcile(group_id, clean_trigger=None)
+            if not state["_resolution_rerender_ids"]:
+                state["_resolution_rerender_pending"] = False
+                return self.reconcile(group_id, clean_trigger=None)
+            return []
         slot['wait'] = [r for r in slot['wait'] if r != message.request_id]
         slot['status'] = 'holding'
         src = (self.state_dict[group_id][seg_idx].get('src_video_pre') or {}).get('file')

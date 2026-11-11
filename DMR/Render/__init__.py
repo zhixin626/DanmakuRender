@@ -61,6 +61,7 @@ EMOJI_ENGINE = next(
     name for name, spec in ENGINES.items() if spec.raster and not spec.panel_raster
 )
 TRANSCODE_ENGINE = next(name for name, spec in ENGINES.items() if not spec.overlay)
+RERENDER_ENGINE = "gpu_render"
 
 
 def get_engine(name: str) -> RenderEngine:
