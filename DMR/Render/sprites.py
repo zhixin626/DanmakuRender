@@ -7,12 +7,13 @@ import logging
 import os
 import pathlib
 import re
+import sys
 import unicodedata
 from functools import lru_cache
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageFilter, features
 from DMR.EmojiPack.common import EmoticonStore
 
 try:
@@ -30,6 +31,8 @@ OUT = OUTLINE
 SHORTCODE_RE = re.compile(r"\[([^\[\]\r\n]{1,200})\]")
 
 SCROLL_SPRITE_SIDE_MARGIN = 4
+DEFAULT_LAYOUT_ENGINE = "auto"
+_RAQM_DLL_HANDLES = []
 EMOTICON_PREFIX = "; DMR_EMOTICON:"
 _STRIP = {0x200D: None, 0x20E3: None}
 _STRIP.update({codepoint: None for codepoint in range(0xFE00, 0xFE10)})
@@ -197,6 +200,38 @@ def resolve_emoji_font(value: str | None) -> str:
     return DEFAULT_EMOJI_FONT
 
 
+def load_raqm_dependencies() -> None:
+    """Load only DLLs installed beside the active interpreter; never download."""
+    if os.name != "nt" or _RAQM_DLL_HANDLES:
+        return
+    roots = [
+        pathlib.Path(sys.prefix) / "Library" / "bin",
+        pathlib.Path(sys.prefix) / "bin",
+        pathlib.Path(sys.prefix) / "DLLs",
+    ]
+    for root in roots:
+        if root.is_dir():
+            try:
+                _RAQM_DLL_HANDLES.append(os.add_dll_directory(str(root)))
+            except OSError:
+                continue
+
+
+def resolve_layout_engine(value: str | None) -> str:
+    """Select RAQM when explicitly/automatically available, otherwise BASIC."""
+    requested = str(value or DEFAULT_LAYOUT_ENGINE).upper()
+    if requested not in {"AUTO", "RAQM", "BASIC"}:
+        raise ValueError(f"未知 layout_engine: {value}")
+    if requested == "BASIC":
+        return "BASIC"
+    load_raqm_dependencies()
+    if features.check("raqm"):
+        return "RAQM"
+    if requested == "RAQM":
+        log.warning("Pillow raqm 不可用，回退到 BASIC 排版。")
+    return "BASIC"
+
+
 def load_pack(pack_dirs: str | None) -> dict[str, str]:
     """Load image files from comma-separated emoji pack directories."""
     pack: dict[str, str] = {}
@@ -223,10 +258,12 @@ class SpriteFactory:
         pack: dict[str, str],
         font_size: float,
         fallback_fonts=None,
+        layout_engine: str | None = None,
     ):
         self.font_size = float(font_size)
         correction = max(1, int(round(font_size * SCALE)))
-        self.text_font = ImageFont.truetype(text_font, correction)
+        self.layout_engine = resolve_layout_engine(layout_engine)
+        self.text_font = self._load_text_font(text_font, correction)
         self.text_fonts = [(self.text_font, self._coverage(text_font))]
         self._missing_codepoints = set()
         self._run_cache: dict[str, list[tuple[Any, str]]] = {}
@@ -242,7 +279,7 @@ class SpriteFactory:
                     path = resolve_font(path, True)
                 if path == text_font:
                     continue
-                font = ImageFont.truetype(path, correction)
+                font = self._load_text_font(path, correction)
                 self.text_fonts.append((font, self._coverage(path)))
             except (OSError, ValueError, TypeError) as error:
                 log.warning("字体回退不可用 '%s': %s", value, error)
@@ -257,6 +294,13 @@ class SpriteFactory:
         self.png_cache: dict[str, Image.Image] = {}
         self.cache: dict[tuple[Any, ...], tuple[Any, ...]] = {}
         self.image_cache: dict[tuple[Any, ...], Image.Image] = {}
+
+    def _load_text_font(self, path: str, size: int):
+        layout = getattr(ImageFont, "Layout", None)
+        engine = getattr(layout, self.layout_engine, None) if layout else None
+        if engine is None:
+            return ImageFont.truetype(path, size)
+        return ImageFont.truetype(path, size, layout_engine=engine)
 
     @staticmethod
     @lru_cache(maxsize=64)
@@ -609,6 +653,7 @@ class PillowText:
         pack=None,
         emoji_font=None,
         fallback_fonts=None,
+        layout_engine=None,
     ):
         self.factory = SpriteFactory(
             resolve_font(font, True),
@@ -616,6 +661,7 @@ class PillowText:
             pack or {},
             size,
             fallback_fonts=fallback_fonts,
+            layout_engine=layout_engine,
         )
         self.outline = outline
 
@@ -827,6 +873,7 @@ def draw_panel(
     pack=None,
     emoji_font=None,
     fallback_fonts=None,
+    layout_engine=None,
 ) -> Image.Image:
     """Draw a panel from configured nodes; outlines form one outer contour."""
     scale = SUPERSAMPLE
@@ -885,6 +932,7 @@ def draw_panel(
             images,
             emoji_font or visual.get("emoji_font"),
             fallback_fonts=fallback_fonts or visual.get("fallback_fonts"),
+            layout_engine=layout_engine or visual.get("layout_engine"),
         )
         factory = text.factory
         for index, line in enumerate(str(node["text"]).split("\n") or [""]):
@@ -976,6 +1024,7 @@ def build_atlas(
     pack_dir=None,
     emoji_font=None,
     fallback_fonts=None,
+    layout_engine=None,
 ):
     """Build cached GPU planes from a RenderPlan in the task directory."""
     plan = (
@@ -1013,6 +1062,7 @@ def build_atlas(
                 platform_pack,
                 emoji_font,
                 effective_fallback_fonts,
+                layout_engine,
             )
             arrays = rgba_to_yuv(image)
         else:
@@ -1024,7 +1074,16 @@ def build_atlas(
             size = float(style["size"])
             font_name = resolve_font(family, bold)
             fallback_key = tuple(effective_fallback_fonts or ())
-            factory_key = (font_name, emoji_name, size, fallback_key)
+            effective_layout_engine = resolve_layout_engine(
+                layout_engine or visual.get("layout_engine")
+            )
+            factory_key = (
+                font_name,
+                emoji_name,
+                size,
+                fallback_key,
+                effective_layout_engine,
+            )
             if factory_key not in factories:
                 factories[factory_key] = SpriteFactory(
                     font_name,
@@ -1032,6 +1091,7 @@ def build_atlas(
                     platform_pack,
                     size,
                     fallback_fonts=effective_fallback_fonts,
+                    layout_engine=effective_layout_engine,
                 )
             sprite = factories[factory_key].get_sprite(
                 visual.get("text", ""),

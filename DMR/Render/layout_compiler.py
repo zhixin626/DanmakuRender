@@ -1354,6 +1354,7 @@ class LayoutCompiler:
             pack = emoji_measurer.pack if emoji_measurer is not None else {}
             emoji_font = self.engine_config.get("emoji_font")
             fallback_fonts = self.engine_config.get("fallback_fonts")
+            layout_engine = self.engine_config.get("layout_engine")
             measurer = PillowText(
                 font,
                 fontsize,
@@ -1361,6 +1362,7 @@ class LayoutCompiler:
                 pack,
                 emoji_font,
                 fallback_fonts,
+                layout_engine,
             )
             name_measurer = PillowText(
                 font,
@@ -1369,6 +1371,7 @@ class LayoutCompiler:
                 pack,
                 emoji_font,
                 fallback_fonts,
+                layout_engine,
             )
         record = record or {}
         content = str(content or "")

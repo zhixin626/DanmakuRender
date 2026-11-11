@@ -1,6 +1,11 @@
 import pytest
 
-from DMR.Render.sprites import SpriteFactory, resolve_emoji_font, resolve_font
+from DMR.Render.sprites import (
+    SpriteFactory,
+    resolve_emoji_font,
+    resolve_font,
+    resolve_layout_engine,
+)
 
 
 def test_cmap_fallback_splits_missing_script_into_configured_font():
@@ -46,3 +51,9 @@ def test_combining_cluster_stays_in_one_font_run(text):
     for _, value in runs:
         if "Ấ" in value or "กิ่" in value or "e\u0301" in value:
             assert len(runs) == 1 or value in {"Tiếng Việt Ấ", "กิ่", "e\u0301"}
+
+
+def test_layout_engine_falls_back_to_basic_without_raqm():
+    assert resolve_layout_engine("auto") in {"BASIC", "RAQM"}
+    with pytest.raises(ValueError):
+        resolve_layout_engine("unknown")
