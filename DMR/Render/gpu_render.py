@@ -434,7 +434,7 @@ class EventScanner:
             self.active.add(index)
             self.next_start += 1
         self.active = {
-            index for index in self.active if self.events[index].end >= timestamp
+            index for index in self.active if self.events[index].end > timestamp
         }
         visible = []
         for index in sorted(

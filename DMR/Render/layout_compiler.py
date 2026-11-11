@@ -260,8 +260,8 @@ def _quantity_suffix(value, unit="") -> str:
     return f" ×{count}{unit or ''}"
 
 
-def merge_gift_records(records, *, mode="total", window_seconds=10.0):
-    """Merge gifts by user/name, preferring platform combo identity."""
+def merge_gift_records(records, *, window_seconds=5.0):
+    """Merge gifts by user/name while adjacent messages stay within a window."""
     ordered = sorted(
         records,
         key=lambda item: (
@@ -283,33 +283,31 @@ def merge_gift_records(records, *, mode="total", window_seconds=10.0):
             seen_tids.add(tid)
         uid = record.get("uid") or record.get("uname") or ""
         name = record.get("gift_name") or ""
-        combo_id = record.get("combo_id")
-        key = (uid, name, combo_id) if combo_id else (uid, name)
+        key = (uid, name)
         when = float(record.get("received_at", 0) or 0)
         previous = groups.get(key)
-        if previous is None or (
-            not combo_id and when - previous["_last_time"] > float(window_seconds)
-        ):
+        if previous is None or when - previous["_last_time"] > float(window_seconds):
             merged = dict(record)
             merged["gift_count"] = _positive_count(record.get("gift_count"))
-            merged["gift_states"] = [dict(record)]
+            merged["gift_states"] = [
+                (when, merged["gift_count"], float(record.get("price_cny") or 0))
+            ]
             merged["_last_time"] = when
             groups[key] = merged
             result.append(merged)
             continue
+        merged = previous
         count = _positive_count(record.get("gift_count"))
         merged["gift_count"] += count
-        merged["gift_states"].append(dict(record))
+        merged["gift_states"].append(
+            (when, merged["gift_count"], float(record.get("price_cny") or 0))
+        )
         merged["_last_time"] = when
         merged["price_cny"] = float(merged.get("price_cny") or 0) + float(
             record.get("price_cny") or 0
         )
     for record in result:
         record.pop("_last_time", None)
-        if record.get("type") == "gift" and mode == "total":
-            record.pop("gift_states", None)
-        elif record.get("type") == "gift":
-            record["combo_mode"] = "live"
     return result
 
 
@@ -594,8 +592,7 @@ class LayoutCompiler:
         gift_cfg = event_configs.get("gift") or {}
         ordered_records = merge_gift_records(
             ordered_records,
-            mode=str(gift_cfg.get("combo_mode", "total") or "total"),
-            window_seconds=float(gift_cfg.get("combo_window_seconds", 10) or 10),
+            window_seconds=float(gift_cfg.get("combo_window_seconds", 5) or 5),
         )
 
         for record in ordered_records:
@@ -643,35 +640,63 @@ class LayoutCompiler:
                 continue
 
             if event_type == "gift":
-                display_record = dict(record)
-                display_record["gift_count_suffix"] = _quantity_suffix(
-                    record.get("gift_count")
+                states = record.get("gift_states") or []
+                state_records = []
+                cumulative_price = 0.0
+                for state_time, state_count, state_price in states:
+                    cumulative_price += float(state_price or 0)
+                    state_record = dict(record)
+                    state_record["received_at"] = state_time
+                    state_record["gift_count"] = state_count
+                    state_record["price_cny"] = cumulative_price
+                    state_records.append(state_record)
+                if not state_records:
+                    state_records = [record]
+                final_count = _positive_count(record.get("gift_count"))
+                final_duration = _panel_duration(
+                    record, gift_render, slide_right_render
                 )
-                content = self._format_template(
-                    gift_render.get("template"),
-                    display_record,
-                    (
-                        f"送出 {record.get('gift_name', '')}"
-                        f"{display_record['gift_count_suffix']}"
-                    ),
-                )
-                panel = self._prepare_panel(
-                    event_id,
-                    event_track,
-                    start_at,
-                    _panel_duration(record, gift_render, slide_right_render),
-                    record.get("uname", ""),
-                    content,
-                    width,
-                    height,
-                    gift_render,
-                    slide_right_render,
-                    panel_class="gift",
-                    record=record,
-                    emoji_measurer=emoji_measurer,
-                )
-                new_panels[event_track].append(panel)
-                mark_accepted(event_track)
+                for state_index, state_record in enumerate(state_records):
+                    state_start = float(state_record["received_at"]) + segment_time_shift
+                    if state_index + 1 < len(state_records):
+                        state_end = float(state_records[state_index + 1]["received_at"]) + segment_time_shift
+                    else:
+                        state_end = state_start + final_duration
+                    state_duration = max(0.1, state_end - state_start)
+                    display_record = dict(state_record)
+                    display_record["gift_count_suffix"] = _quantity_suffix(
+                        state_record.get("gift_count")
+                    )
+                    display_record["gift_final_count"] = final_count
+                    content = self._format_template(
+                        gift_render.get("template"),
+                        display_record,
+                        (
+                            f"送出 {record.get('gift_name', '')}"
+                            f"{display_record['gift_count_suffix']}"
+                        ),
+                    )
+                    panel = self._prepare_panel(
+                        event_id if len(state_records) == 1 else f"{event_id}:state{state_index}",
+                        event_track,
+                        state_start,
+                        state_duration,
+                        record.get("uname", ""),
+                        content,
+                        width,
+                        height,
+                        gift_render,
+                        slide_right_render,
+                        panel_class="gift",
+                        record=display_record,
+                        emoji_measurer=emoji_measurer,
+                    )
+                    panel["_gift_final_count"] = final_count
+                    panel["_gift_state_index"] = state_index
+                    if len(state_records) > 1:
+                        panel["gift_state_group"] = event_id
+                    new_panels[event_track].append(panel)
+                    mark_accepted(event_track)
                 continue
 
             if event_type == "member":
@@ -767,6 +792,7 @@ class LayoutCompiler:
                 height=height,
                 track_cfg=track_render,
             )
+            self._freeze_gift_state_paths(combined)
             next_track_orders[track] = track_order
             state_events = [event for event in state_events if event.get("track") != track]
             state_events.extend(combined)
@@ -830,6 +856,63 @@ class LayoutCompiler:
             unrouted_dropped_count=unrouted_dropped,
             cleanup_paths=[plan_path],
         )
+
+    @staticmethod
+    def _freeze_gift_state_paths(events):
+        """Keep one gift's number states in one slot with half-open timing."""
+        groups = {}
+        for event in events:
+            group = event.get("gift_state_group")
+            if group:
+                groups.setdefault(group, []).append(event)
+        for group_events in groups.values():
+            ordered = sorted(
+                group_events,
+                key=lambda item: int(item.get("_gift_state_index", 0)),
+            )
+            if len(ordered) < 2:
+                continue
+            first = ordered[0]
+            motion = (first.get("visual") or {}).get("motion") or {}
+            inside_x = float(motion.get("inside_x", 0.0))
+            outside_x = float(motion.get("outside_x", inside_x))
+            for index, event in enumerate(ordered):
+                original = event.get("path") or []
+                start = float(original[0][0])
+                end = _path_end(event)
+                enter = float(motion.get("enter_duration", 0.0)) if index == 0 else 0.0
+                exit_duration = (
+                    float(motion.get("exit_duration", 0.0))
+                    if index == len(ordered) - 1
+                    else 0.0
+                )
+                points = []
+                transition_in = start + enter
+                transition_out = end - exit_duration
+                timestamps = [float(point[0]) for point in original]
+                if enter > 0 and start < transition_in < end:
+                    timestamps.append(transition_in)
+                if exit_duration > 0 and start < transition_out < end:
+                    timestamps.append(transition_out)
+                for timestamp in sorted(set(timestamps)):
+                    _, y = _position_at(original, timestamp)
+                    outside = (
+                        index == 0 and timestamp < transition_in
+                    ) or (
+                        index == len(ordered) - 1
+                        and exit_duration > 0
+                        and timestamp >= transition_out
+                    )
+                    points.append(
+                        [timestamp, outside_x if outside else inside_x, y]
+                    )
+                event["path"] = points
+                event.setdefault("visual", {})["motion"] = {
+                    "inside_x": inside_x,
+                    "outside_x": outside_x,
+                    "enter_duration": enter,
+                    "exit_duration": exit_duration,
+                }
 
     def _prepare_line(
         self,

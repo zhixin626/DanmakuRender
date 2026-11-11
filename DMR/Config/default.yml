@@ -458,9 +458,8 @@ render_args:
 
       gift:
         enable: true
-        # 连续同用户同礼物在窗口内合并；total显示合并总数，live状态切换暂未开放
-        combo_mode: total
-        combo_window_seconds: 10
+        # 相邻同用户同礼物在5秒滑动窗口内合并，数量按状态逐步更新
+        combo_window_seconds: 5
         min_price_cny: 0
         use_event_background_colors: false
         use_event_duration: false
