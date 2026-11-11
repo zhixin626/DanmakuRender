@@ -565,6 +565,9 @@ class LiveEvents(BaseEvents): # 被 class ReplayTask()初始化
                 session["_resolution_rerender_failed"] = True
                 session["_resolution_rerender_pending"] = False
                 return []
+            # Preserve the exact object used for the first render so a
+            # minority rerender cannot silently switch to a different source.
+            slot["source"] = source
             args = copy.deepcopy(render_args)
             args["rescale_to_1080p"] = True
             args["rescale_orientation"] = decision["dominant"]

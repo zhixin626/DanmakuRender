@@ -31,7 +31,7 @@ render_args:
 ## 相关配置
 
 - `r2l.speed` 的单位是画布像素/秒，控制滚动弹幕的移动速度。
-- `slide_right.gift.combo_window_seconds` 固定按 5 秒滑动窗口合并同一用户的同名礼物；连续送礼会在同一药丸上逐步更新数量。
+- `slide_right.gift.combo_window_seconds` 默认是 5 秒的滑动窗口：同一用户、同一礼物，相邻两次间隔不超过这个值就合并；连续送礼会在同一药丸上逐步更新数量，可按任务需要调整。
 - `slide_left`、`slide_right` 的 `price_duration_ranges` 支持 4 个价格档位：0–30、30–50、50–100、100 元以上；档位的 `seconds` 决定药丸显示时长。
 - `rescale_orientation: adaptive` 已映射为 `auto`，由整场结束时的少数方向分段重渲染策略统一到主画布；不再按每段即时切换画布。
 
