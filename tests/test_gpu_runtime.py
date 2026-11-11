@@ -40,6 +40,55 @@ def fake_encoding(monkeypatch):
     return encoder, cp, config, sync
 
 
+def test_sprite_compositor_uses_slot_metadata_without_frame_sync():
+    captured = []
+
+    class Device:
+        def __init__(self, shape):
+            self.data = np.zeros(shape, dtype=np.int32)
+
+        def __getitem__(self, item):
+            parent = self
+
+            class View:
+                def set(self, value):
+                    parent.data[item] = value
+
+            return View()
+
+    class Cupy:
+        int32 = np.int32
+
+        class cuda:
+            @staticmethod
+            def alloc_pinned_memory(size):
+                return bytearray(size)
+
+        @staticmethod
+        def empty(shape, dtype):
+            return Device(shape)
+
+        @staticmethod
+        def RawKernel(*_args):
+            def kernel(_grid, _block, args):
+                captured.append(args[4].data.copy())
+
+            return kernel
+
+    event = SimpleNamespace(offset=4, width=2, height=2)
+    compositor = gpu.SpriteCompositor(Cupy, 4, 4, {"events": [], "y": [], "u": [], "v": [], "a": []})
+    compositor.event_scanner.visible = lambda _timestamp: [(event, 1, 2, 255)]
+    frame = SimpleNamespace(
+        y=np.zeros((4, 4, 1), dtype=np.uint8),
+        uv=np.zeros((2, 2, 2), dtype=np.uint8),
+    )
+    compositor.apply(frame, 0.0, 0)
+    event.offset = 8
+    compositor.apply(frame, 0.1, 0)
+    assert captured[0][0].tolist() == [1, 2, 4, 2, 2, 255]
+    assert captured[1][0].tolist() == [1, 2, 8, 2, 2, 255]
+
+
 def test_progress_and_one_sync_per_frame(monkeypatch, tmp_path):
     encoder, cp, config, sync = fake_encoding(monkeypatch)
     progress = []

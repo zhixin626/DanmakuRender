@@ -30,6 +30,7 @@ from .sprites import build_atlas
 
 logger = logging.getLogger(__name__)
 _dll_handles = []
+METADATA_FIELDS = 6  # x, y, offset, width, height, alpha
 
 
 PLAN_KERNEL = r"""
@@ -663,7 +664,8 @@ class SpriteCompositor:
         self.plan_assets = plan_assets
         self.event_scanner = EventScanner(plan_assets["events"])
         self.kernel = cupy.RawKernel(PLAN_KERNEL, "blend_plan")
-        self.metadata_host = None
+        self.metadata_host = []
+        self.metadata_device = []
         self.metadata_capacity = 0
 
     def _ensure_metadata(self, count: int):
@@ -672,28 +674,39 @@ class SpriteCompositor:
         capacity = 1
         while capacity < count:
             capacity *= 2
-        try:
-            storage = self.cupy.cuda.alloc_pinned_memory(capacity * 6 * 4)
-            self.metadata_host = np.frombuffer(storage, dtype=np.int32).reshape(
-                capacity, 6
+        self.metadata_host = []
+        self.metadata_device = []
+        for _ in range(4):
+            storage = self.cupy.cuda.alloc_pinned_memory(
+                capacity * METADATA_FIELDS * 4
             )
-        except (AttributeError, TypeError, ValueError):
-            self.metadata_host = np.empty((capacity, 6), dtype=np.int32)
+            self.metadata_host.append(
+                np.frombuffer(storage, dtype=np.int32).reshape(
+                    capacity, METADATA_FIELDS
+                )
+            )
+            self.metadata_device.append(
+                self.cupy.empty((capacity, METADATA_FIELDS), dtype=self.cupy.int32)
+            )
         self.metadata_capacity = capacity
 
-    def apply(self, frame, timestamp):
-        return self._apply_plan(frame, timestamp)
+    def apply(self, frame, timestamp, slot_index: int = 0):
+        return self._apply_plan(frame, timestamp, slot_index)
 
-    def _apply_plan(self, frame: NV12Buffer, timestamp: float) -> int:
+    def _apply_plan(
+        self, frame: NV12Buffer, timestamp: float, slot_index: int
+    ) -> int:
         """Upload active event metadata and blend the shared YUV atlas."""
         active = self.event_scanner.visible(timestamp)
         if not active:
             return 0
         count = len(active)
         self._ensure_metadata(count)
+        host_metadata = self.metadata_host[slot_index % 4]
+        device_metadata = self.metadata_device[slot_index % 4]
         for index, item in enumerate(active):
             event, x, y, alpha = item
-            self.metadata_host[index] = (
+            host_metadata[index] = (
                 x,
                 y,
                 event.offset,
@@ -701,7 +714,10 @@ class SpriteCompositor:
                 event.height,
                 alpha,
             )
-        metadata = self.cupy.asarray(self.metadata_host[:count])
+        # FrameRing.acquire has already waited for this slot's previous Encode
+        # copy, so reusing this host/device metadata pair cannot race H2D.
+        device_metadata[:count].set(host_metadata[:count])
+        metadata = device_metadata
         self.kernel(
             ((self.width // 2 + 31) // 32, (self.height // 2 + 7) // 8),
             (32, 8),
@@ -711,7 +727,7 @@ class SpriteCompositor:
                 self.cupy.int32(self.width),
                 self.cupy.int32(self.height),
                 metadata,
-                self.cupy.int32(6),
+                self.cupy.int32(METADATA_FIELDS),
                 self.cupy.int32(count),
                 self.plan_assets["y"],
                 self.plan_assets["u"],
@@ -863,7 +879,9 @@ def encode_to_file(
                         profiler.add("copy_scale", time.perf_counter() - stage_start)
                     stage_start = time.perf_counter() if profiled else 0.0
                     blend_event = profiler.cuda_start(cupy, encode_stream, "blend")
-                    active_counts.append(compositor.apply(buffer, frame_time))
+                    active_counts.append(
+                        compositor.apply(buffer, frame_time, frame_count)
+                    )
                     profiler.cuda_end(blend_event, encode_stream)
                 if profiled:
                     profiler.add("scanner_kernel_enqueue", time.perf_counter() - stage_start)
