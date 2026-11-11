@@ -421,7 +421,7 @@ class PipelineProfiler:
         start = cupy.cuda.Event(disable_timing=False)
         end = cupy.cuda.Event(disable_timing=False)
         start.record(stream)
-        return name, start, end
+        return name, start, end, cupy
 
     def cuda_end(self, token, stream) -> None:
         if token is None:
@@ -432,8 +432,11 @@ class PipelineProfiler:
     def collect_cuda(self) -> None:
         if not self.enabled:
             return
-        for name, start, end in self.cuda_events:
-            self.add(f"gpu_{name}", start.elapsed_time(end) / 1000.0)
+        for name, start, end, cupy in self.cuda_events:
+            self.add(
+                f"gpu_{name}",
+                cupy.cuda.get_elapsed_time(start, end) / 1000.0,
+            )
         self.cuda_events.clear()
 
     def finish(
@@ -680,7 +683,7 @@ class SpriteCompositor:
             capacity * METADATA_FIELDS * 4
         )
         self.metadata_host[slot] = np.frombuffer(
-            storage, dtype=np.int32
+            storage, dtype=np.int32, count=capacity * METADATA_FIELDS
         ).reshape(capacity, METADATA_FIELDS)
         self.metadata_device[slot] = self.cupy.empty(
             (capacity, METADATA_FIELDS), dtype=self.cupy.int32

@@ -17,6 +17,7 @@ EVENTS = WORK / "invisible_demo.jsonl"
 
 
 def run(label: str, root: pathlib.Path, config: pathlib.Path, output: pathlib.Path) -> dict:
+    output.unlink(missing_ok=True)
     command = [
         str(PYTHON),
         str(root / "render_only.py"),
@@ -39,7 +40,11 @@ def run(label: str, root: pathlib.Path, config: pathlib.Path, output: pathlib.Pa
     while process.poll() is None:
         time.sleep(0.5)
         now = 0.0
-        for child in [root_process, *root_process.children(recursive=True)]:
+        try:
+            children = root_process.children(recursive=True)
+        except psutil.NoSuchProcess:
+            children = []
+        for child in [root_process, *children]:
             try:
                 current = sum(child.cpu_times()[:2])
                 before = previous.get(child.pid, current)
@@ -74,6 +79,12 @@ def main() -> int:
             ROOT,
             WORK / "configs/global.yml",
             WORK / "G_font_after.mp4",
+        ),
+        run(
+            "after_no_fallback",
+            ROOT,
+            WORK / "configs/global_no_fallback.yml",
+            WORK / "G_font_after_no_fallback.mp4",
         ),
     ]
     (WORK / "font_fallback_bench.json").write_text(
