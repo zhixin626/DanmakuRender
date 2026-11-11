@@ -30,6 +30,7 @@ from .sprites import build_atlas
 
 logger = logging.getLogger(__name__)
 _dll_handles = []
+RING_SLOTS = 4
 METADATA_FIELDS = 6  # x, y, offset, width, height, alpha
 
 
@@ -664,33 +665,29 @@ class SpriteCompositor:
         self.plan_assets = plan_assets
         self.event_scanner = EventScanner(plan_assets["events"])
         self.kernel = cupy.RawKernel(PLAN_KERNEL, "blend_plan")
-        self.metadata_host = []
-        self.metadata_device = []
-        self.metadata_capacity = 0
+        self.metadata_host = [None] * RING_SLOTS
+        self.metadata_device = [None] * RING_SLOTS
+        self.metadata_capacities = [0] * RING_SLOTS
 
-    def _ensure_metadata(self, count: int):
-        if count <= self.metadata_capacity:
+    def _ensure_metadata(self, count: int, slot_index: int):
+        slot = slot_index % RING_SLOTS
+        if count <= self.metadata_capacities[slot]:
             return
         capacity = 1
         while capacity < count:
             capacity *= 2
-        self.metadata_host = []
-        self.metadata_device = []
-        for _ in range(4):
-            storage = self.cupy.cuda.alloc_pinned_memory(
-                capacity * METADATA_FIELDS * 4
-            )
-            self.metadata_host.append(
-                np.frombuffer(storage, dtype=np.int32).reshape(
-                    capacity, METADATA_FIELDS
-                )
-            )
-            self.metadata_device.append(
-                self.cupy.empty((capacity, METADATA_FIELDS), dtype=self.cupy.int32)
-            )
-        self.metadata_capacity = capacity
+        storage = self.cupy.cuda.alloc_pinned_memory(
+            capacity * METADATA_FIELDS * 4
+        )
+        self.metadata_host[slot] = np.frombuffer(
+            storage, dtype=np.int32
+        ).reshape(capacity, METADATA_FIELDS)
+        self.metadata_device[slot] = self.cupy.empty(
+            (capacity, METADATA_FIELDS), dtype=self.cupy.int32
+        )
+        self.metadata_capacities[slot] = capacity
 
-    def apply(self, frame, timestamp, slot_index: int = 0):
+    def apply(self, frame, timestamp, slot_index: int):
         return self._apply_plan(frame, timestamp, slot_index)
 
     def _apply_plan(
@@ -701,9 +698,9 @@ class SpriteCompositor:
         if not active:
             return 0
         count = len(active)
-        self._ensure_metadata(count)
-        host_metadata = self.metadata_host[slot_index % 4]
-        device_metadata = self.metadata_device[slot_index % 4]
+        self._ensure_metadata(count, slot_index)
+        host_metadata = self.metadata_host[slot_index % RING_SLOTS]
+        device_metadata = self.metadata_device[slot_index % RING_SLOTS]
         for index, item in enumerate(active):
             event, x, y, alpha = item
             host_metadata[index] = (
@@ -769,7 +766,7 @@ class FrameRing:
 
     def __init__(self, cupy: Any, width: int, height: int, stream: Any):
         self.stream = stream
-        self.buffers = [NV12Buffer(cupy, width, height) for _ in range(4)]
+        self.buffers = [NV12Buffer(cupy, width, height) for _ in range(RING_SLOTS)]
         self.copied = [cupy.cuda.Event(block=True, disable_timing=True) for _ in self.buffers]
         self.used = [False] * len(self.buffers)
 
