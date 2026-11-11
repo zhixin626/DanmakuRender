@@ -270,7 +270,7 @@ class WebApi:
         def api_console_history():
             try:
                 before = int(request.args.get('before', '0') or 0)
-                limit = min(1000, max(1, int(request.args.get('limit', '500') or 500)))
+                limit = min(20000, max(1, int(request.args.get('limit', '500') or 500)))
             except ValueError:
                 return {'error': 'invalid pagination'}, 400
             payload = json.dumps(

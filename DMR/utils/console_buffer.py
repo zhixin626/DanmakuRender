@@ -125,7 +125,7 @@ def subscribe(history_size=0, last_id=0):
 def get_console_history(before_id=0, limit=500):
     """从内存和落盘文件中取得更早历史，按序号倒序筛选后正序返回。"""
     with _lock:
-        records = [item for item in _console_lines if item["id"] < before_id]
+        records = [item for item in _console_lines if before_id <= 0 or item["id"] < before_id]
         path = _log_path
     if path and path.exists() and len(records) < limit:
         try:
