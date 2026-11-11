@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 _dll_handles = []
 RING_SLOTS = 4
 METADATA_FIELDS = 6  # x, y, offset, width, height, alpha
+AV_DURATION_TOLERANCE_SECONDS = 0.1
 
 
 PLAN_KERNEL = r"""
@@ -274,13 +275,16 @@ def validate_av_duration(path: pathlib.Path) -> dict[str, float]:
     }
     if "video" not in durations or "audio" not in durations:
         raise ValueError(f"missing audio/video stream: {path}")
-    if abs(durations["video"] - durations["audio"]) > 0.1:
-        raise ValueError(f"audio/video duration difference exceeds 0.1s: {durations}")
+    if abs(durations["video"] - durations["audio"]) > AV_DURATION_TOLERANCE_SECONDS:
+        raise ValueError(
+            "audio/video duration difference exceeds "
+            f"{AV_DURATION_TOLERANCE_SECONDS}s: {durations}"
+        )
     return durations
 
 
 def decode_frames(
-    video: pathlib.Path, nvc: Any, gpu_id: int
+    video: pathlib.Path, nvc: Any, gpu_id: int, cupy: Any
 ) -> Iterator[tuple[Any, float]]:
     """Decode packets and convert PTS to seconds using the stream time base."""
     demuxer = nvc.CreateDemuxer(filename=str(video))
@@ -288,8 +292,6 @@ def decode_frames(
         gpuid=gpu_id, codec=demuxer.GetNvCodecId(), usedevicememory=True
     )
     time_base = demuxer.GetTimebaseNum() / demuxer.GetTimebaseDen()
-    cupy, _ = load_cuda_modules()
-
     def retain(decoded):
         nonlocal next_slot, copied
         slot = next_slot % len(buffers)
@@ -680,7 +682,7 @@ class SpriteCompositor:
         while capacity < count:
             capacity *= 2
         storage = self.cupy.cuda.alloc_pinned_memory(
-            capacity * METADATA_FIELDS * 4
+            capacity * METADATA_FIELDS * np.dtype(np.int32).itemsize
         )
         self.metadata_host[slot] = np.frombuffer(
             storage, dtype=np.int32, count=capacity * METADATA_FIELDS
@@ -690,12 +692,7 @@ class SpriteCompositor:
         )
         self.metadata_capacities[slot] = capacity
 
-    def apply(self, frame, timestamp, slot_index: int):
-        return self._apply_plan(frame, timestamp, slot_index)
-
-    def _apply_plan(
-        self, frame: NV12Buffer, timestamp: float, slot_index: int
-    ) -> int:
+    def apply(self, frame: NV12Buffer, timestamp: float, slot_index: int) -> int:
         """Upload active event metadata and blend the shared YUV atlas."""
         active = self.event_scanner.visible(timestamp)
         if not active:
@@ -1135,7 +1132,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
     expected = int(round(source_duration * frame_rate))
     if config.max_frames is not None:
         expected = min(expected, config.max_frames)
-    decoded = decode_frames(source, nvc, config.gpu_id)
+    decoded = decode_frames(source, nvc, config.gpu_id, cupy)
     first = None
     try:
         first = next(decoded)

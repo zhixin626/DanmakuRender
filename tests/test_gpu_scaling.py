@@ -86,7 +86,7 @@ def test_three_owned_slots_protect_cfr_and_vfr_lookahead(monkeypatch, times, res
         lambda decoded: (4, 4) if resize and decoded.value >= 4 else (2, 2),
     )
     monkeypatch.setattr(gpu, "NV12Buffer", Owned)
-    frames = gpu.decode_frames(Path("sample.flv"), nvc, 0)
+    frames = gpu.decode_frames(Path("sample.flv"), nvc, 0, cp)
     first = next(frames)
     actual = [
         (owned.value, seconds)

@@ -1,14 +1,12 @@
 import logging
 import os
-import re
 import time
 from pathlib import Path
 from datetime import datetime
 import copy
 from send2trash import send2trash
 
-from DMR.LiveAPI import LiveAPI
-from DMR.Render import ENGINES, get_engine, DEFAULT_ENGINE, RERENDER_ENGINE, TRANSCODE_ENGINE
+from DMR.Render import get_engine, DEFAULT_ENGINE, RERENDER_ENGINE, TRANSCODE_ENGINE
 from DMR.utils.bark_notifier import bark_notify_url
 from .baseevents import BaseEvents
 from ..utils import *

@@ -12,6 +12,7 @@ import sys
 import time
 import math
 import hashlib
+import inspect
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,14 @@ VIDEO = next((ROOT / "perf/samples/problem_resolution").glob("*/*_clip.flv"))
 EVENTS = VIDEO.with_suffix(".jsonl")
 DELIVERY = ROOT / "演示视频/2026-11-11_08_缩放与持有缓冲"
 WORK = ROOT / "perf/tmp/scale"
+
+
+def decode_frames(module, video, nvc, cupy):
+    """Call both the pre-cleanup baseline and the current explicit-CuPy API."""
+    decoder = module.decode_frames
+    if len(inspect.signature(decoder).parameters) >= 4:
+        return decoder(video, nvc, 0, cupy)
+    return decoder(video, nvc, 0)
 
 
 def baseline(revision="676aa66"):
@@ -43,7 +52,7 @@ def baseline(revision="676aa66"):
 
 def measure(module, iterations=600, repetitions=3):
     cupy, nvc = module.load_cuda_modules()
-    frames = module.decode_frames(VIDEO, nvc, 0)
+    frames = decode_frames(module, VIDEO, nvc, cupy)
     source = next(frames)[0]
     frames.close()
     canvas = module.NV12Buffer(cupy, 1920, 1080)
@@ -70,7 +79,7 @@ def measure(module, iterations=600, repetitions=3):
         return constructor(*args, **kwargs)
 
     module.NV12Buffer = counted
-    frames = module.decode_frames(VIDEO, nvc, 0)
+    frames = decode_frames(module, VIDEO, nvc, cupy)
     count = 0
     start = time.perf_counter()
     try:
@@ -219,7 +228,7 @@ def check_owned_sequence():
     for source in (VIDEO, bili):
         sequences = []
         for module in (old, gpu):
-            frames = module.decode_frames(source, nvc, 0)
+            frames = decode_frames(module, source, nvc, cupy)
             first = next(frames)
             origin = float(
                 module.FFprobe.run_ffprobe(str(source))["format"].get("start_time", 0)

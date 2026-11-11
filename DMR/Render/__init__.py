@@ -9,7 +9,7 @@ import importlib
 from dataclasses import dataclass
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from os.path import join, exists
+from os.path import exists
 from typing import Tuple
 
 from DMR.utils import (

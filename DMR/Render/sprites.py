@@ -29,6 +29,7 @@ SUPERSAMPLE = 4
 OUTLINE = 1
 OUT = OUTLINE
 SHORTCODE_RE = re.compile(r"\[([^\[\]\r\n]{1,200})\]")
+RUN_CACHE_LIMIT = 8192
 
 SCROLL_SPRITE_SIDE_MARGIN = 4
 DEFAULT_LAYOUT_ENGINE = "auto"
@@ -369,7 +370,7 @@ class SpriteFactory:
             current_text.append(cluster)
         if current_text:
             runs.append((current_font, "".join(current_text)))
-        if len(self._run_cache) >= 8192:
+        if len(self._run_cache) >= RUN_CACHE_LIMIT:
             self._run_cache.clear()
         self._run_cache[text] = runs
         return runs

@@ -204,7 +204,7 @@ def test_decoder_drains_tail_with_empty_packet(monkeypatch):
     monkeypatch.setattr(
         gpu, "NV12Buffer", lambda *_: SimpleNamespace(load=lambda _: None)
     )
-    frames = list(gpu.decode_frames(Path("source.flv"), nvc, 0))
+    frames = list(gpu.decode_frames(Path("source.flv"), nvc, 0, cp))
     assert calls == [packet, eof]
     assert [item[1] for item in frames] == [0, 0.04]
 
