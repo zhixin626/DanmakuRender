@@ -104,31 +104,20 @@ class _ConsoleTee:
         return getattr(self._stream, name)
 
 
-def install_console_tee(log_dir=None):
-    """替换 sys.stdout/sys.stderr 为镜像流，重复调用无效果"""
-    global _installed
+def install_console_tee(log_dir):
+    """替换 sys.stdout/sys.stderr 为镜像流并在 log_dir 下落盘，重复调用无效果"""
+    global _installed, _log_path, _log_file, _file_offset
     if _installed:
         return
     _installed = True
-    global _log_path, _log_file, _file_offset
-    if log_dir:
-        path = Path(log_dir)
-        path.mkdir(parents=True, exist_ok=True)
-        _log_path = path / f"console-{time.strftime('%Y%m%d-%H%M%S')}.txt"
-        _log_file = _log_path.open("ab")
-        _file_offset = _log_path.stat().st_size
-        atexit.register(_close_log_file)
+    _log_path = Path(log_dir) / f"console-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+    _log_file = _log_path.open("ab")
+    _file_offset = _log_path.stat().st_size
+    atexit.register(_close_log_file)
     if sys.stdout is not None:
         sys.stdout = _ConsoleTee(sys.stdout)
     if sys.stderr is not None:
         sys.stderr = _ConsoleTee(sys.stderr)
-
-
-def get_console_lines(n=500):
-    """返回最近 n 行控制台输出"""
-    with _lock:
-        lines = list(_console_lines)
-    return [item["text"] for item in lines[-n:]]
 
 
 def get_error_count():
@@ -137,12 +126,9 @@ def get_error_count():
 
 
 def subscribe(history_size=0, last_id=0):
-    """原子地取得历史快照并订阅新日志，避免两步操作造成遗漏或重复。
-    last_id 超过当前最大序号说明客户端来自上一次启动，按首次连接处理。"""
+    """原子地取得历史快照并订阅新日志，避免两步操作造成遗漏或重复。"""
     q = queue.Queue(maxsize=10000)
     with _lock:
-        if last_id > _next_id[0]:
-            last_id = 0
         history = [item for item in _console_lines if item["id"] > last_id]
         if history_size:
             history = history[-history_size:]

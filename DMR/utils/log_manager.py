@@ -9,6 +9,8 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from DMR.utils.console_buffer import install_console_tee
+
 
 def _logging_level(value, default):
     if isinstance(value, int):
@@ -118,6 +120,8 @@ def configure_logging(config_path, args):
     args = args or {}
     log_dir = Path(args.get("directory") or "./logs")
     log_dir.mkdir(parents=True, exist_ok=True)
+    # 必须在下面 StreamHandler(sys.stdout) 创建前接管 stdout，WebUI 日志页才能看到 logging 输出
+    install_console_tee(log_dir)
 
     instance_name = args.get("instance_name")
     if not instance_name:

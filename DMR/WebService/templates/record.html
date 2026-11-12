@@ -32,15 +32,7 @@
                     <td>{{ task.platform }}</td>
                     <td><a href="{{ task.url }}" target="_blank">链接</a></td>
                     <td><span class="status-badge status-{{ 'running' if task.status == 1 else ('replay' if task.status == 2 else ('stopping' if task.status == 3 else 'stopped')) }}">{{ '录制中' if task.status == 1 else ('回放中' if task.status == 2 else ('等待确认下播' if task.status == 3 else '未开播')) }}</span></td>
-                    <td class="rec-time" data-task="{{ task.name }}" onclick="toggleTaskTime(this)" style="cursor:pointer;">
-                        {% if task.status == 1 %}
-                        分段 {{ task.duration }}<br>本场 {{ task.live_duration or '-' }}
-                        {% elif task.status == 3 %}
-                        剩余 {{ task.stop_wait_remaining if task.stop_wait_remaining is not none else 0 }}秒
-                        {% else %}
-                        —
-                        {% endif %}
-                    </td>
+                    <td class="rec-time" data-task="{{ task.name }}" onclick="toggleTaskTime(this)" style="cursor:pointer;"></td>
                     <td>
                         <div style="display:flex;flex-wrap:nowrap;gap:4px;">
                         {% if task.status == 1 %}
@@ -141,7 +133,7 @@
 
     // 服务器给的是收到那一刻的秒数，本地按经过的时间推算，不依赖两端时钟一致
     function secondsSinceReceived(task) {
-        return Date.now() / 1000 - (task._clientReceivedAt || Date.now() / 1000);
+        return Date.now() / 1000 - task._clientReceivedAt;
     }
 
     function formatCountdown(task, value) {
@@ -171,8 +163,8 @@
     function taskTimeHTML(task) {
         if (!taskTimeIsVisible(task)) return '—';
         if (task.status === 1) {
-            const segment = formatElapsed(task, task.segment_elapsed) || task.duration;
-            const live = formatElapsed(task, task.live_elapsed) || task.live_duration || '-';
+            const segment = formatElapsed(task, task.segment_elapsed) || '-';
+            const live = formatElapsed(task, task.live_elapsed) || '-';
             return `分段 ${segment}<br>本场 ${live}`;
         }
         if (task.status === 3) {
@@ -510,10 +502,9 @@
     }
 
     function refreshTasks() {
-        return fetch('/api/tasks', { headers: { 'If-None-Match': window._tasksEtag || '' }, cache: 'no-store' })
-            .then(response => { if (response.status === 304) return null; window._tasksEtag = response.headers.get('ETag') || ''; return response.json(); })
+        return fetch('/api/tasks')
+            .then(response => response.json())
             .then(data => {
-                if (!data) return;
                 const recordingDiv = document.getElementById('recording-tasks');
                 latestRecordingTaskMap = {};
                 data.recording_tasks.forEach(task => {

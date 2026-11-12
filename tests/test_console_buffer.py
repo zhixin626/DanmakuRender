@@ -140,12 +140,3 @@ def test_history_pages_stay_contiguous_while_writing(tmp_path):
         thread.join()
         _close()
 
-
-def test_stale_last_id_from_previous_run_resends_history(tmp_path):
-    tee = _reset(tmp_path)
-    try:
-        tee.write("a\nb\n")
-        _, history = console.subscribe(10, 99)
-        assert [item["id"] for item in history] == [1, 2]
-    finally:
-        _close()

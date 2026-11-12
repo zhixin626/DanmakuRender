@@ -5,13 +5,12 @@
 - 控制台日志按序号写入 `logs/console-启动时间.txt`（二进制、锁内写、每秒 flush、每 1000 行一个偏移索引）；旧文件清理复用 `log_manager` 的保留天数/容量策略。
 - 首次加载历史走 gzip 的 `/api/console/history`；向上滚动按序号从内存/文件分页，可翻到本次启动第一行。
 - SSE 每行带 `id`，`Last-Event-ID`/`last_id` 续传；页面切后台断开、回前台续上；前端停在底部时最多保留 50000 行。
-- 录制页时长和倒计时由浏览器本地推算；任务状态 3 秒一次、请求不重叠、支持 ETag/304。
+- 录制页时长和倒计时由浏览器本地推算；任务状态 3 秒一次、请求不重叠。
 
 ## 本轮审查修复（云端会话）
 
 - `get_console_history`：flush 挪进 `_lock`；内存够用时不再读文件；文件只读缺的那部分（≤ limit + 1000 行）；关闭日志文件也放进锁里，避免与读取竞争。
 - 控制台镜像：一次写入大段文本时按行切分由平方复杂度改为线性。
-- `subscribe`：`last_id` 大于当前最大序号（来自上一次启动）时按首次连接处理。
 - 日志页（`logs.html`）：
   - **修复**：断线续传的历史原来被插到页面顶部，并把 `firstId` 改错，导致向上翻页重复；现在首尾相接就追加，否则（缺口超出 5000 行、服务重启）整体替换。
   - **修复**：续传时会丢弃已收到但未渲染的行；现在按序号去重，发现缺口（如服务端队列满丢行）自动续传补齐。
@@ -24,13 +23,24 @@
   - 合并重复的时间格式化函数；首屏数据也记录收到时刻。
 - `record.html`/`process.html` 的 `refreshTasks` 返回 Promise，`startPolling` 的防重叠才真正生效。
 
+## 删除的无用代码
+
+原则：不用的代码直接删，不为兼容旧代码保留分支和兜底判断。
+
+- `/api/console` 接口和 `get_console_lines`（前端早已改用 SSE + `/api/console/history`）。
+- `/api/tasks` 的 ETag/304：有任务录制或等待检测时数据每秒都变，基本命中不了，只增加判断。
+- `get_tasks_data` 的 `duration`/`live_duration` 字符串和录制页模板里的首屏时间文本，统一由 JS 根据已录制秒数渲染。
+- `install_console_tee` 不再可选目录，由 `configure_logging` 在创建 StreamHandler 前直接调用，`main.py` 不再重复计算日志目录。
+- 日志页、录制页里接口必定返回的字段的 `|| []`、`|| Date.now()` 兜底。
+- 服务重启后的 `last_id` 兜底：页面通过 `/api/instance` 检测到重启会自动刷新。
+
 ## 验证
 
-- `python -m pytest tests`：9 passed（本地约 15 秒）。
-  - `test_console_buffer.py`：并发序号、跨内存/文件分页、U+2028、10 万行逐页翻到第一行（每页读文件 ≤ limit+1000 行且序号连续）、边写边翻页、上次启动的 `last_id`。
+- `python -m pytest tests`：8 passed（本地约 15 秒）。
+  - `test_console_buffer.py`：并发序号、跨内存/文件分页、U+2028、10 万行逐页翻到第一行（每页读文件 ≤ limit+1000 行且序号连续）、边写边翻页。
   - `test_webui.py`：`get_tasks_data` 回归；Playwright 端到端断网恢复（Flask + 假日志线程，断开 SSE 3 秒，分 network 请求失败和 proxy 502 两种），断言页面行序号连续、无缺失、无重复。端到端测试需要 `node` 和 Node 版 `playwright`，没有时自动跳过。
 - 用旧版 `logs.html` / `webapi.py` 跑新测试会失败，确认测试能抓到上面的问题。
-- Playwright 冒烟：录制页、处理页无 JS 报错，录制时长/倒计时/“即将检测…”显示正确。
+- Playwright 冒烟：录制页、处理页无 JS 报错，录制时长/倒计时/“即将检测…”显示正确；`configure_logging` 会生成 `console-*.txt` 并写入 logging 输出。
 
 ## 需要用户做
 
@@ -40,9 +50,7 @@
 
 ## 留给用户决定 / 已知限制
 
-- `/api/tasks` 的 ETag：只要有任务在录制或等待检测，数据每秒都变，304 基本命中不了；要有效需改成下发截止时间戳 + 时钟偏移校正，收益不大，暂不做。
 - 单次运行的 `console-*.txt` 不限大小，只在启动时按保留策略清理旧文件。
-- `/api/console` 和 `get_console_lines` 是主分支就有的旧接口，前端已不再使用，是否删除由用户决定（可能有外部脚本在用）。
 - 安全加固、Vue 重写按要求未做。
 
 ## Vue 方案对比（未开始）

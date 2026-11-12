@@ -12,7 +12,6 @@ VERSION = '2026.05.01'
 
 from DMR import DanmakuRender
 from DMR.Config import Config
-from DMR.utils.console_buffer import install_console_tee
 from DMR.utils.log_manager import configure_logging
 
 if __name__ == '__main__':    
@@ -32,9 +31,6 @@ if __name__ == '__main__':
         check_update(VERSION)
     
     config = Config(args.config)
-
-    # 在 logging handler 创建前接管 stdout，并把带序号的控制台副本落盘。
-    install_console_tee((config.global_config.get('logging_args') or {}).get('directory', './logs'))
 
     logger = configure_logging(
         args.config,

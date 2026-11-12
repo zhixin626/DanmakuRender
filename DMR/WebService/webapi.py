@@ -9,7 +9,6 @@ import yaml
 import subprocess
 import math
 import gzip
-import hashlib
 
 
 def _abspath(p):
@@ -73,7 +72,6 @@ from datetime import datetime
 from DMR.utils import *
 from DMR.utils.console_buffer import (
     MEMORY_LINES as CONSOLE_MEMORY_LINES,
-    get_console_lines,
     get_console_history,
     subscribe as console_subscribe,
     unsubscribe as console_unsubscribe,
@@ -183,13 +181,7 @@ class WebApi:
         @app.route('/api/tasks')
         @self.login_required
         def tasks_api():
-            data = self.get_tasks_data()
-            etag = hashlib.sha256(
-                json.dumps(data, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')
-            ).hexdigest()
-            if request.headers.get('If-None-Match') == etag:
-                return Response(status=304, headers={'ETag': etag})
-            return data, 200, {'ETag': etag, 'Cache-Control': 'no-cache'}
+            return self.get_tasks_data()
 
         # 人工处理完挂起任务后回传结果：render/merge 传 mp4 路径，upload 传 'done'
         @app.route('/api/resume', methods=['POST'])
@@ -240,15 +232,6 @@ class WebApi:
         @self.login_required
         def logs_page():
             return render_template('logs.html')
-
-        @app.route('/api/console')
-        @self.login_required
-        def api_console():
-            try:
-                lines = min(2000, int(request.args.get('lines', 500)))
-            except ValueError:
-                lines = 500
-            return {'lines': get_console_lines(lines), 'notifications': self.get_notifications()}
 
         @app.route('/api/console/stream')
         @self.login_required
@@ -753,20 +736,15 @@ class WebApi:
                         status = 1   # 录制中
                     else:
                         status = 0   # 未开播/离线
-                    duration = "未开播"
-                    live_duration = ""   # 从本场开播到现在的录制时长
                     # 已录制秒数交给浏览器按收到时刻继续累加，不依赖客户端时钟与服务器一致
                     segment_elapsed = live_elapsed = None
-
                     if status == 1:
                         now = datetime.now()
                         seg_start = getattr(task, 'segment_start_time', None)
                         live_start = getattr(task, 'live_start_time', None)
                         if seg_start:
-                            duration = str(now - seg_start).split('.')[0]
                             segment_elapsed = int((now - seg_start).total_seconds())
                         if live_start:
-                            live_duration = str(now - live_start).split('.')[0]
                             live_elapsed = int((now - live_start).total_seconds())
 
                     recording_tasks.append({
@@ -774,8 +752,6 @@ class WebApi:
                         'platform': task.plat,
                         'url': task.url,
                         'status': status,
-                        'duration': duration,
-                        'live_duration': live_duration,
                         'segment_elapsed': segment_elapsed,
                         'live_elapsed': live_elapsed,
                         'next_check_remaining': _remaining_seconds(
