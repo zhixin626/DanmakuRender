@@ -117,14 +117,14 @@ render_args:
 
   overlay:
     # 弹幕渲染与输出
-    engine: emoji_dmrender
+    engine: gpu_render
     output_dir: ~
     output_name: ~
     format: mp4
     retry: 3
     hwaccel: auto
     vencoder: hevc_nvenc
-    vencoder_args: [-b:v, 4M]
+    vencoder_args: [-b:v, 6M]
     aencoder: aac
     aencoder_args: [-b:a, 128K]
     output_resize: ~
@@ -134,7 +134,7 @@ render_args:
     # 所有横/竖屏源等比缩放并补黑边到对应的1080p画布
     rescale_to_1080p: true
     # 明显横/竖屏相信当前源；接近方形且方向突变时参考上一段
-    rescale_orientation: adaptive
+    rescale_orientation: auto
     # 留空时按 JSONL 中的平台自动选择表情包和字体
     emoji_pack: ~
     emoji_font: ~

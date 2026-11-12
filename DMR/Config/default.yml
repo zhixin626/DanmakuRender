@@ -332,7 +332,7 @@ render_args:
     #   libx265/libx264：CPU 编码，通常更慢
     vencoder: h264_nvenc
     # 传给视频编码器的附加参数；例如 [-b:v, 6M] 表示目标视频码率 6 Mbps
-    vencoder_args: [-b:v, 15M]
+    vencoder_args: [-b:v, 6M]
     # GPU 引擎读取 vencoder_args 中 -b:v、-maxrate、-bufsize；未配置的项使用编码器默认值。
     # 音频无需叠加弹幕，可选择 aac 重新编码或 copy 直接复制
     aencoder: aac
@@ -355,7 +355,7 @@ render_args:
 
     # 以下参数适用于 emoji_dmrender 和 gpu_render
     # 输出帧率取源帧率的最小整数倍，使其不低于此值（25→50、30→60）；~ 跟随源帧率
-    min_fps: 50
+    min_fps: 30
     # 表情包目录；留空时按 JSONL 平台使用 ./emoji_pack/<platform>
     emoji_pack: ~
     # Pillow 绘制表情弹幕使用的字体；留空时自动选择
