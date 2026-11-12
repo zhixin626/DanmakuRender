@@ -379,15 +379,15 @@ class Render():
                     slide_right_stats = track_stats.get('slide_right', {})
                     other_dropped = layout_result.unrouted_dropped_count
                     other_summary = (
-                        f'；其他丢弃 {other_dropped} 条'
+                        f'；其他类型未渲染 {other_dropped} 条'
                         if other_dropped
                         else ''
                     )
                     self.logger.info(
-                        '布局编译完成: 共布局 %s 条，丢弃 %s 条'
-                        '（R2L: 布局 %s/丢弃 %s；'
-                        'Slide L: 布局 %s/丢弃 %s；'
-                        'Slide R: 布局 %s/丢弃 %s%s）',
+                        '弹幕排版完成：显示 %s 条，未显示 %s 条'
+                        '（滚动弹幕 显示 %s/未显示 %s；SC 显示 %s/未显示 %s；'
+                        '礼物和会员 显示 %s/未显示 %s%s）。'
+                        '未显示的原因可能是屏幕已满、被过滤、低于价格门槛、该类型已关闭或内容为空',
                         layout_result.event_count,
                         layout_result.dropped_count,
                         r2l_stats.get('accepted', 0),
