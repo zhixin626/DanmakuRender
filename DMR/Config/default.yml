@@ -344,25 +344,34 @@ render_args:
     # 所有渲染后端统一使用1080p横屏/竖屏画布；等比缩放并补黑边
     # 宽 >= 高使用1920x1080，高 > 宽使用1080x1920；default关闭，由global/任务按需开启
     rescale_to_1080p: false
-    # auto按当前源判断；旧配置的 adaptive 会兼容映射为 auto
-    # 也可用portrait或landscape强制固定方向
+    # 画布方向：auto 按每段源视频判断（横屏源用横屏画布、竖屏源用竖屏画布）；
+    # landscape/portrait 强制固定横屏或竖屏，另一方向补黑边；旧配置的 adaptive 按 auto 处理
     rescale_orientation: auto
-    # 直播分辨率时间线：忽略开头不稳定区间和过短切换；整场少数方向满足任一阈值时重渲染到主方向
+    # 整场横竖屏策略（仅 gpu_render 记录分辨率时间线；建议配合 rescale_to_1080p: true 使用）
+    # 整场结束后统计横屏/竖屏各占多久：只有一个方向就直接合并；少数方向很短时，
+    # 把少数方向的分段用 GPU 重渲染到主方向画布（补黑边）再合成一个视频；否则按方向分 P
+    # 统计时忽略整场开头的秒数（开播时分辨率常不稳定）
     resolution_ignore_head_seconds: 30
+    # 短于此秒数的方向切换视为抖动，不参与统计
     resolution_min_span_seconds: 60
+    # 少数方向占整场比例低于此值（0.15 = 15%）时重渲染合成一个视频
     resolution_minority_ratio: 0.15
+    # 或少数方向总时长低于此分钟数时也重渲染；两个条件满足任一即可，都不满足则分 P
     resolution_minority_minutes: 10
 
     # 以下参数适用于 emoji_dmrender 和 gpu_render
-    # 输出帧率取源帧率的最小整数倍，使其不低于此值（25→50、30→60）；~ 跟随源帧率
+    # 输出帧率取源帧率的最小整数倍，使其不低于此值；~ 跟随源帧率
+    # 例如设为 30 时：源 25 帧→50、源 30 帧→30；设为 50 时：源 25 帧→50、源 30 帧→60
     min_fps: 30
     # 表情包目录；留空时按 JSONL 平台使用 ./emoji_pack/<platform>
     emoji_pack: ~
     # Pillow 绘制表情弹幕使用的字体；留空时自动选择
     emoji_font: ~
-    # GPU/Pillow 文字回退链；按顺序查找缺失字形，留空时只使用主字体
+    # GPU/Pillow 文字回退链：主字体缺字（韩文、泰文、符号等）时按顺序在这些字体里查找；
+    # 写系统字体名或字体文件路径，找不到的字体会警告并跳过；留空时只用主字体
     fallback_fonts: [Malgun Gothic, Yu Gothic, Leelawadee UI, Segoe UI, Segoe UI Symbol, Cambria Math]
-    # Pillow 复杂文字排版：默认 BASIC；安装并验证 fribidi 后才改为 auto/raqm
+    # Pillow 文字排版引擎：basic 基础排版（中英日韩足够）；auto/raqm 用于阿拉伯文、泰文等复杂文字，
+    # 需要 Pillow 支持 raqm 并安装 fribidi，且确认中英文显示不变后再开启
     layout_engine: basic
     # 轨道是第一层，事件类型嵌套在所属轨道中。
     r2l:
@@ -460,7 +469,8 @@ render_args:
 
       gift:
         enable: true
-        # 相邻同用户同礼物在5秒滑动窗口内合并，数量按状态逐步更新
+        # 连击合并：同一用户、同一礼物，相邻两次间隔不超过此秒数就合并为一条，
+        # 数字 ×1 → ×2 → … 在同一药丸上逐步更新
         combo_window_seconds: 5
         min_price_cny: 0
         use_event_background_colors: false
