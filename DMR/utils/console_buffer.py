@@ -1,6 +1,7 @@
 """
 控制台输出镜像：接管 sys.stdout/sys.stderr，原样转发到真实终端的同时，
-把每一行复制进内存环形缓冲区，供 WebService 的日志页面读取。
+把每一行编上序号复制进内存环形缓冲区，并落盘到 logs/console-启动时间.txt，
+供 WebService 日志页实时推送、断线续传和向上翻页读取。
 必须在 logging 的 StreamHandler(sys.stdout) 创建之前调用 install_console_tee()，
 否则 logging 输出会绕过镜像直接写到原始 stdout。
 """
@@ -8,10 +9,9 @@ import sys
 import re
 import queue
 import threading
-import os
-from pathlib import Path
 import time
 import atexit
+from pathlib import Path
 from collections import deque
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
@@ -19,12 +19,14 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 _ERR_RE = re.compile(r'\b(?:ERROR|CRITICAL)\b')
 
 # 内存里保留的最近日志行：仅用于 SSE 连上时「发一段历史打底」，上限保证内存有界。
-_console_lines = deque(maxlen=20000)
+MEMORY_LINES = 20000
+_console_lines = deque(maxlen=MEMORY_LINES)
 _error_count = [0]   # 单调递增的报错行计数（用列表避免 global）
 _next_id = [0]
 _log_path = None
 _log_file = None
-_file_index = []
+_file_index = []      # 每 INDEX_INTERVAL 行记录一次 (序号, 文件偏移)，分页时据此 seek
+INDEX_INTERVAL = 1000
 _file_offset = 0
 _last_flush = 0.0
 _lock = threading.Lock()
@@ -58,7 +60,7 @@ def _persist_item(item):
         offset = _file_offset
         _log_file.write(encoded)
         _file_offset += len(encoded)
-        if item["id"] % 1000 == 0:
+        if item["id"] % INDEX_INTERVAL == 0:
             _file_index.append((item["id"], offset))
         now = time.monotonic()
         if now - _last_flush >= 1.0:
@@ -80,14 +82,14 @@ class _ConsoleTee:
             pass
         try:
             with _lock:
-                self._partial += text
+                lines = (self._partial + text).split('\n')
+                self._partial = lines.pop()
+                for line in lines:
+                    _note_line(_ANSI_RE.sub('', line).rstrip('\r'))
                 # 防止只有 \r 刷新（如进度条）导致缓存无限增长
-                if '\n' not in self._partial and len(self._partial) > 8192:
+                if len(self._partial) > 8192:
                     _note_line(_ANSI_RE.sub('', self._partial))
                     self._partial = ''
-                while '\n' in self._partial:
-                    line, self._partial = self._partial.split('\n', 1)
-                    _note_line(_ANSI_RE.sub('', line).rstrip('\r'))
         except Exception:
             pass
         return len(text)
@@ -135,9 +137,12 @@ def get_error_count():
 
 
 def subscribe(history_size=0, last_id=0):
-    """原子地取得历史快照并订阅新日志，避免两步操作造成遗漏或重复。"""
+    """原子地取得历史快照并订阅新日志，避免两步操作造成遗漏或重复。
+    last_id 超过当前最大序号说明客户端来自上一次启动，按首次连接处理。"""
     q = queue.Queue(maxsize=10000)
     with _lock:
+        if last_id > _next_id[0]:
+            last_id = 0
         history = [item for item in _console_lines if item["id"] > last_id]
         if history_size:
             history = history[-history_size:]
@@ -146,57 +151,51 @@ def subscribe(history_size=0, last_id=0):
 
 
 def get_console_history(before_id=0, limit=500):
-    """从内存和落盘文件中取得更早历史，按序号倒序筛选后正序返回。"""
+    """返回序号小于 before_id 的最近 limit 行（before_id<=0 表示最新），正序。
+    内存里不够的部分按偏移索引从落盘文件读取，读取量不超过 limit+索引间隔。"""
     with _lock:
-        records = [item for item in _console_lines if before_id <= 0 or item["id"] < before_id]
-        path = _log_path
-        memory_min = min((item["id"] for item in _console_lines), default=before_id)
-        index = list(_file_index)
-    if _log_file is not None:
+        records = [item for item in _console_lines if before_id <= 0 or item["id"] < before_id][-limit:]
+        target = records[0]["id"] if records else before_id
+        need = limit - len(records)
+        if before_id <= 0 or need <= 0 or target <= 1 or _log_file is None:
+            return records
+        # 写入在锁内完成，flush 也必须在锁内，否则可能读到半行
         _log_file.flush()
-    if path and path.exists() and before_id > 0 and (not records or memory_min > 1):
-        try:
-            target = min(before_id, memory_min or before_id)
-            start_id = max(1, target - limit)
-            offset = 0
-            for item_id, item_offset in index:
-                if item_id <= start_id:
-                    offset = item_offset
-                else:
+        path = _log_path
+        start_id = max(1, target - need)
+        offset = 0
+        for item_id, item_offset in _file_index:
+            if item_id > start_id:
+                break
+            offset = item_offset
+    older = []
+    try:
+        with path.open("rb") as stream:
+            stream.seek(offset)
+            for line in stream:
+                raw_id, _, raw_text = line.rstrip(b"\n").partition(b"\t")
+                try:
+                    item_id = int(raw_id)
+                except ValueError:
+                    continue
+                if item_id >= target:
                     break
-            with path.open("rb") as stream:
-                stream.seek(offset)
-                read_limit = max(1, limit)
-                while True:
-                    line = stream.readline()
-                    if not line:
-                        break
-                    raw_id, _, raw_text = line.rstrip(b"\n").partition(b"\t")
-                    try:
-                        item_id = int(raw_id.decode("ascii"))
-                    except ValueError:
-                        continue
-                    text = raw_text.decode("utf-8", errors="replace")
-                    if start_id <= item_id < target:
-                        records.append({"id": item_id, "text": text})
-                    if item_id >= target:
-                        break
-                    if len(records) >= read_limit:
-                        break
-        except OSError:
-            pass
-    return sorted(records, key=lambda item: item["id"])[-limit:]
+                if item_id >= start_id:
+                    older.append({"id": item_id, "text": raw_text.decode("utf-8", errors="replace")})
+    except OSError:
+        pass
+    return older + records
 
 
 def _close_log_file():
     global _log_file
-    if _log_file is not None:
-        try:
-            _log_file.flush()
-            _log_file.close()
-        except OSError:
-            pass
-        _log_file = None
+    with _lock:
+        if _log_file is not None:
+            try:
+                _log_file.close()
+            except OSError:
+                pass
+            _log_file = None
 
 
 def unsubscribe(q):

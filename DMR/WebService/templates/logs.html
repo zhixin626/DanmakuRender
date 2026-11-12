@@ -10,8 +10,11 @@
     const box = document.getElementById('console-box');
     const statusEl = document.getElementById('log-status');
 
-    const MAX_LINES = 50000;
-    let logLines = [];        // 当前显示的所有行
+    const MAX_LINES = 50000;   // 停在底部时最多保留的行数；往上翻历史时不裁剪
+    const TRIM_SLACK = 2000;   // 超出这么多行才整体重绘一次，平时只追加文本节点
+    const PAGE_SIZE = 500;
+    const RECONNECT_MS = 3000;
+    let logLines = [];        // 当前显示的所有行，对应序号 firstId..lastId 连续
     let pending = [];         // 本帧待追加的记录
     let flushScheduled = false;
     let firstId = null;
@@ -19,15 +22,25 @@
     let es = null;
     let loadingOlder = false;
 
+    function render() { box.textContent = logLines.join('\n'); }
+
     function flush() {
         flushScheduled = false;
         if (!pending.length) return;
         // 追加前先判断是否停在底部：在底部才自动跟随，往上翻历史时不打扰
         const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-        logLines.push(...pending.map(item => item.text));
+        const texts = pending.map(item => item.text);
         pending = [];
-        if (atBottom && logLines.length > MAX_LINES) logLines.splice(0, logLines.length - MAX_LINES);
-        box.textContent = logLines.join('\n');
+        const hadLines = logLines.length > 0;
+        for (const text of texts) logLines.push(text);
+        if (atBottom && logLines.length > MAX_LINES + TRIM_SLACK) {
+            const removed = logLines.length - MAX_LINES;
+            logLines.splice(0, removed);
+            firstId += removed;
+            render();
+        } else {
+            box.append((hadLines ? '\n' : '') + texts.join('\n'));
+        }
         if (atBottom) box.scrollTop = box.scrollHeight;
     }
     function scheduleFlush() {
@@ -36,55 +49,68 @@
         requestAnimationFrame(flush);
     }
 
-    function applyHistory(records, replace) {
-        if (!records.length) return;
-        if (replace) {
-            logLines = records.slice(-MAX_LINES).map(item => item.text);
-        } else {
-            logLines = records.map(item => item.text).concat(logLines);
+    function replaceAll(records) {
+        records = records.slice(-MAX_LINES);
+        pending = [];
+        logLines = records.map(item => item.text);
+        firstId = records.length ? records[0].id : null;
+        lastId = records.length ? records[records.length - 1].id : 0;
+        render();
+        box.scrollTop = box.scrollHeight;
+    }
+
+    // 追加新行：只接受 lastId 之后连续的序号，重复的丢弃；出现缺口说明漏了行，重新续传补齐。
+    function appendRecords(records) {
+        for (const item of records) {
+            if (item.id <= lastId) continue;
+            if (lastId && item.id !== lastId + 1) { connectLog(); return; }
+            if (firstId === null) firstId = item.id;
+            lastId = item.id;
+            pending.push(item);
         }
-        firstId = records[0].id;
-        lastId = Math.max(lastId, records[records.length - 1].id);
-        box.textContent = logLines.join('\n');
+        scheduleFlush();
     }
 
     async function loadOlder() {
         if (loadingOlder || firstId === null || firstId <= 1) return;
         loadingOlder = true;
         try {
-            const r = await fetch(`/api/console/history?before=${firstId}&limit=500`);
-            const data = await r.json();
+            const r = await fetch(`/api/console/history?before=${firstId}&limit=${PAGE_SIZE}`);
+            if (!r.ok) return;
+            const records = ((await r.json()).lines || []).filter(item => item.id < firstId);
+            if (!records.length) return;
             const oldHeight = box.scrollHeight;
-            applyHistory(data.lines || [], false);
+            logLines = records.map(item => item.text).concat(logLines);
+            firstId = records[0].id;
+            render();
             box.scrollTop += box.scrollHeight - oldHeight;
+        } catch (_) {
+            // 网络失败时下次滚动到顶部再试
         } finally { loadingOlder = false; }
     }
 
-    // SSE 实时日志：序号随每行发送，浏览器重连时带 Last-Event-ID。
+    // SSE 实时日志：序号随每行发送，从 lastId 之后续传。
     function connectLog() {
         if (es) es.close();
         es = new EventSource('/api/console/stream?last_id=' + encodeURIComponent(lastId));
         es.onopen  = () => { statusEl.textContent = '（实时）'; };
         es.addEventListener('history', (e) => {
-            pending = [];
             const records = JSON.parse(e.data);
-            applyHistory(records, lastId === 0);
-            box.scrollTop = box.scrollHeight;
+            // 续传历史和已有内容首尾相接就追加；否则（缺口太大或服务重启）整体替换
+            if (!records.length || records[0].id === lastId + 1) appendRecords(records);
+            else replaceAll(records);
         });
-        es.onmessage = (e) => {
-            const item = JSON.parse(e.data);
-            lastId = Math.max(lastId, item.id || 0);
-            if (firstId === null) firstId = item.id;
-            pending.push(item); scheduleFlush();
+        es.onmessage = (e) => appendRecords([JSON.parse(e.data)]);
+        es.onerror = () => {
+            statusEl.textContent = '（连接断开，自动重连…）';
+            // 收到非 200 响应（如反向代理 502、登录过期）时 EventSource 不会自己重连
+            if (es.readyState === EventSource.CLOSED) setTimeout(() => { if (!document.hidden) connectLog(); }, RECONNECT_MS);
         };
-        es.onerror = () => { statusEl.textContent = '（连接断开，自动重连…）'; };
     }
     async function loadInitialHistory() {
         try {
             const r = await fetch('/api/console/history?before=0&limit=20000');
-            const data = await r.json();
-            applyHistory(data.lines || [], true);
-            box.scrollTop = box.scrollHeight;
+            if (r.ok) replaceAll((await r.json()).lines || []);
         } catch (_) {
             // SSE 仍会补齐实时日志；失败时不阻塞日志页。
         }

@@ -72,6 +72,7 @@ from datetime import datetime
 
 from DMR.utils import *
 from DMR.utils.console_buffer import (
+    MEMORY_LINES as CONSOLE_MEMORY_LINES,
     get_console_lines,
     get_console_history,
     subscribe as console_subscribe,
@@ -278,7 +279,7 @@ class WebApi:
         def api_console_history():
             try:
                 before = int(request.args.get('before', '0') or 0)
-                limit = min(20000, max(1, int(request.args.get('limit', '500') or 500)))
+                limit = min(CONSOLE_MEMORY_LINES, max(1, int(request.args.get('limit', '500') or 500)))
             except ValueError:
                 return {'error': 'invalid pagination'}, 400
             payload = json.dumps(
@@ -754,6 +755,8 @@ class WebApi:
                         status = 0   # 未开播/离线
                     duration = "未开播"
                     live_duration = ""   # 从本场开播到现在的录制时长
+                    # 已录制秒数交给浏览器按收到时刻继续累加，不依赖客户端时钟与服务器一致
+                    segment_elapsed = live_elapsed = None
 
                     if status == 1:
                         now = datetime.now()
@@ -761,8 +764,10 @@ class WebApi:
                         live_start = getattr(task, 'live_start_time', None)
                         if seg_start:
                             duration = str(now - seg_start).split('.')[0]
+                            segment_elapsed = int((now - seg_start).total_seconds())
                         if live_start:
                             live_duration = str(now - live_start).split('.')[0]
+                            live_elapsed = int((now - live_start).total_seconds())
 
                     recording_tasks.append({
                         'name': taskname,
@@ -771,8 +776,8 @@ class WebApi:
                         'status': status,
                         'duration': duration,
                         'live_duration': live_duration,
-                        'segment_start_timestamp': seg_start.timestamp() if seg_start else None,
-                        'live_start_timestamp': live_start.timestamp() if live_start else None,
+                        'segment_elapsed': segment_elapsed,
+                        'live_elapsed': live_elapsed,
                         'next_check_remaining': _remaining_seconds(
                             getattr(task, 'next_check_deadline', None)),
                         'stop_wait_remaining': _remaining_seconds(
