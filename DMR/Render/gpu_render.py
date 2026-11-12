@@ -919,15 +919,8 @@ def encode_to_file(
                 if profiled:
                     previous_body_end = time.perf_counter()
                 now = time.perf_counter()
-                if progress_cb and now - last_progress >= 0.5:
-                    progress_cb(
-                        min(
-                            99.0,
-                            frame_count
-                            * 100.0
-                            / max(1, expected_frames or frame_count),
-                        )
-                    )
+                if progress_cb and expected_frames and now - last_progress >= 0.5:
+                    progress_cb(min(99.0, frame_count * 100.0 / expected_frames))
                     last_progress = now
             for packet in encoder.EndEncode():
                 stream.write(packet["data"])
@@ -1138,12 +1131,18 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
         chroma_location = "left"
     if chroma_location not in CHROMA_PHASES:
         raise ValueError(f"unsupported source chroma location: {chroma_location}")
-    source_duration, source_start = float(timing["duration"]), float(
-        timing.get("start_time", 0)
+    source_start = float(timing.get("start_time", 0))
+    # Live FLV containers often carry cumulative timestamps, so format.duration
+    # is unreliable. Prefer the recorder's timeline duration, then probe the
+    # packet timeline; progress is only reported when a length is known.
+    source_duration = float(getattr(video, "duration", 0) or 0)
+    if source_duration <= 0:
+        source_duration = FFprobe.get_timeline_duration(str(source))
+    expected = (
+        int(round(source_duration * frame_rate)) if source_duration > 0 else None
     )
-    expected = int(round(source_duration * frame_rate))
     if config.max_frames is not None:
-        expected = min(expected, config.max_frames)
+        expected = min(expected or config.max_frames, config.max_frames)
     decoded = decode_frames(source, nvc, config.gpu_id, cupy)
     first = None
     try:
