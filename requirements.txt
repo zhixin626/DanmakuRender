@@ -53,6 +53,7 @@ pywin32; sys_platform == "win32"
 
 # ════════════════════════════════════════════════════════════════════
 # 可选功能，按需单独安装：
+#   NVIDIA GPU 渲染及测试：pip install -r requirements-gpu.txt
 #
 #   字幕编辑器 (editor/qt.py)
 #       pip install -r requirements-editor.txt

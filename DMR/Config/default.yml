@@ -273,7 +273,7 @@ download_args:
 # 渲染器核心参数
 render_kernel_args:
   # 同时执行的渲染/转码任务数。emoji_dmrender 单个任务内部固定整段单路渲染；
-  # 多个任务同时执行时，显存和CPU占用仍会叠加
+  # 多个任务同时执行时，显存和CPU占用仍会叠加。gpu_render 实测：2 路并发吞吐约为单路的 1.8 倍，CPU 平均约 1.5 核；3 路时 NVDEC 饱和，收益很小。建议不超过 2。
   nrenders: 1
 
 # 渲染器默认参数
@@ -312,7 +312,7 @@ render_args:
 
   # 弹幕叠加：先由 LayoutCompiler 把 JSONL 编译成渲染计划，再交给渲染引擎
   overlay:
-    # dmrender：纯 libass，适合纯文字；emoji_dmrender：支持 Unicode/内联/平台表情
+    # dmrender：纯 libass；emoji_dmrender：彩色表情；gpu_render：GPU 解码、叠加和编码
     engine: dmrender
     # 留空时在原视频目录生成“弹幕版”文件
     output_dir: ~
@@ -333,6 +333,7 @@ render_args:
     vencoder: h264_nvenc
     # 传给视频编码器的附加参数；例如 [-b:v, 6M] 表示目标视频码率 6 Mbps
     vencoder_args: [-b:v, 15M]
+    # GPU 引擎读取 vencoder_args 中 -b:v、-maxrate、-bufsize；未配置的项使用编码器默认值。
     # 音频无需叠加弹幕，可选择 aac 重新编码或 copy 直接复制
     aencoder: aac
     # 例如 [-b:a, 160K]；aencoder 为 copy 时应写 []
@@ -343,20 +344,32 @@ render_args:
     # 所有渲染后端统一使用1080p横屏/竖屏画布；等比缩放并补黑边
     # 宽 >= 高使用1920x1080，高 > 宽使用1080x1920；default关闭，由global/任务按需开启
     rescale_to_1080p: false
-    # auto按当前源判断；adaptive在当前比例接近方形时参考上一段
+    # auto按当前源判断；旧配置的 adaptive 会兼容映射为 auto
     # 也可用portrait或landscape强制固定方向
     rescale_orientation: auto
+    # 直播分辨率时间线：忽略开头不稳定区间和过短切换；整场少数方向满足任一阈值时重渲染到主方向
+    resolution_ignore_head_seconds: 30
+    resolution_min_span_seconds: 60
+    resolution_minority_ratio: 0.15
+    resolution_minority_minutes: 10
 
-    # 以下参数只供 emoji_dmrender 使用
-    # 最低输出帧率；低于该值时补帧后逐帧渲染弹幕，高于该值时保持源帧率；~ 表示完全跟随源
-    min_fps: 30
+    # 以下参数适用于 emoji_dmrender 和 gpu_render
+    # 输出帧率取源帧率的最小整数倍，使其不低于此值（25→50、30→60）；~ 跟随源帧率
+    min_fps: 50
     # 表情包目录；留空时按 JSONL 平台使用 ./emoji_pack/<platform>
     emoji_pack: ~
     # Pillow 绘制表情弹幕使用的字体；留空时自动选择
     emoji_font: ~
+    # GPU/Pillow 文字回退链；按顺序查找缺失字形，留空时只使用主字体
+    fallback_fonts: [Malgun Gothic, Yu Gothic, Leelawadee UI, Segoe UI, Segoe UI Symbol, Cambria Math]
+    # Pillow 复杂文字排版：默认 BASIC；安装并验证 fribidi 后才改为 auto/raqm
+    layout_engine: basic
     # 轨道是第一层，事件类型嵌套在所属轨道中。
     r2l:
-      # 弹幕移动一个屏幕宽度所需秒数
+      # 固定滚动速度，单位为画布像素/秒；关闭1080p缩放使用其他分辨率时也不自动缩放
+      # 留空时用1920 / screen_duration换算，保留旧配置的横屏效果
+      speed: ~
+      # 兼容旧配置：移动横屏1920像素所需秒数；设置speed后此项不生效
       screen_duration: 8
       # 从 margin_top 以下可供 R2L 使用的垂直比例，范围 0~1
       vertical_ratio: 0.3
@@ -389,7 +402,7 @@ render_args:
       fontsize: 30
       top_opacity: 0.7
       bottom_opacity: 0.3
-      corner_radius: 40px
+      corner_radius: 20px
       box_border_width: 1px
       box_border_opacity: 0.45
       name_border_width: 0px
@@ -427,7 +440,7 @@ render_args:
       fontsize: 30
       top_opacity: 0.7
       bottom_opacity: 0.3
-      corner_radius: 40px
+      corner_radius: 20px
       box_border_width: 1px
       box_border_opacity: 0.45
       name_border_width: 0px
@@ -449,6 +462,8 @@ render_args:
 
       gift:
         enable: true
+        # 相邻同用户同礼物在5秒滑动窗口内合并，数量按状态逐步更新
+        combo_window_seconds: 5
         min_price_cny: 0
         use_event_background_colors: false
         use_event_duration: false

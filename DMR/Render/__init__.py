@@ -5,19 +5,72 @@ import os
 import time
 import threading
 import queue
+import importlib
+from dataclasses import dataclass
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from os.path import join, exists
+from os.path import exists
 from typing import Tuple
 
 from DMR.utils import (
     VideoInfo,
-    DateTimeEncoder,
     DateTimeDecoder,
     FFprobe,
     uuid,
     PipeMessage,
+    StreamerInfo,
+    atomic_json_dump,
 )
+from .baserender import RenderStopped
+
+
+@dataclass(frozen=True)
+class RenderEngine:
+    module: str
+    class_name: str
+    label: str
+    overlay: bool = True
+    raster: bool = False
+    panel_raster: bool = False
+    fallback: str | None = None
+
+    def load(self):
+        """Import optional dependencies only when this backend is selected."""
+        return getattr(
+            importlib.import_module(self.module, __package__), self.class_name
+        )
+
+
+ENGINES = {
+    "dmrender": RenderEngine(".dmrender", "DmRender", "弹幕渲染"),
+    "emoji_dmrender": RenderEngine(
+        ".emoji_dmrender", "EmojiDmRender", "彩色表情渲染", raster=True
+    ),
+    "gpu_render": RenderEngine(
+        ".gpu_render",
+        "GpuRender",
+        "GPU 弹幕渲染",
+        raster=True,
+        panel_raster=True,
+        fallback="emoji_dmrender",
+    ),
+    "transcode": RenderEngine(".transcode", "Transcoder", "转码", overlay=False),
+}
+DEFAULT_ENGINE = next(iter(ENGINES))
+EMOJI_ENGINE = next(
+    name for name, spec in ENGINES.items() if spec.raster and not spec.panel_raster
+)
+TRANSCODE_ENGINE = next(name for name, spec in ENGINES.items() if not spec.overlay)
+RERENDER_ENGINE = "gpu_render"
+
+
+def get_engine(name: str) -> RenderEngine:
+    try:
+        return ENGINES[name]
+    except (KeyError, TypeError):
+        raise ValueError(f'未知渲染引擎：{name}；可用：{", ".join(ENGINES)}') from None
+
+
 from .layout_track import LayoutTrackManager
 
 
@@ -27,7 +80,7 @@ class Render():
                  nrenders:int=1,
                  **kwargs,
                  ) -> None:
-        
+
         self.nrenders = int(nrenders)
         self.send_queue, self.recv_queue = pipe
         self.logger = logging.getLogger(__name__)
@@ -38,8 +91,9 @@ class Render():
         self.render_tasks = {}
         self.failed_tasks = {}
         self.completed_tasks = []   # 渲染成功的视频记录（最近若干条）
-        self.failed_tasks_file = '.temp/failed_renders.json'
-        # self.load_failed_tasks()
+        self.failed_tasks_file = kwargs.get(
+            "failed_tasks_file", ".temp/failed_renders.json"
+        )
 
         self._render_class = {}
         self.render_executors = ThreadPoolExecutor(max_workers=self.nrenders)
@@ -54,10 +108,20 @@ class Render():
                     data = json.load(f, cls=DateTimeDecoder)
                     for uuid, task in data.items():
                         if task.get('video'):
+                            for key in ("ctime", "segment_start_time"):
+                                if isinstance(task["video"].get(key), str):
+                                    task["video"][key] = datetime.fromisoformat(
+                                        task["video"][key]
+                                    )
+                            if isinstance(task["video"].get("streamer"), dict):
+                                task["video"]["streamer"] = StreamerInfo(
+                                    **task["video"]["streamer"]
+                                )
                             task['video'] = VideoInfo(**task['video'])
-                            # Update config as well
-                            # if 'config' in task and 'video' in task['config']:
-                            #     task['config']['video'] = task['video']
+                            task["config"]["video"] = task["video"]
+                        if task.get("status") not in ("stopped", "error"):
+                            task["status"] = "stopped"
+                            task["error"] = "程序退出时尚未完成，可独立重试"
                         self.failed_tasks[uuid] = task
                 self.logger.info(f'Loaded {len(self.failed_tasks)} failed render tasks.')
             except Exception as e:
@@ -65,19 +129,21 @@ class Render():
 
     def save_failed_tasks(self):
         try:
-            with open(self.failed_tasks_file, 'w', encoding='utf-8') as f:
-                json.dump(self.failed_tasks, f, cls=DateTimeEncoder, ensure_ascii=False, indent=4)
+            atomic_json_dump(self.failed_tasks_file, self.failed_tasks)
         except Exception as e:
             self.logger.error(f'Failed to save failed tasks: {e}')
 
-    def retry_task(self, uuid):
+    def retry_task(self, task_id):
         with self._lock:
-            if uuid in self.failed_tasks:
-                task = self.failed_tasks.pop(uuid)
-                # self.save_failed_tasks()
-                
+            if task_id in self.failed_tasks and task_id not in self.render_tasks:
+                task = self.failed_tasks[task_id]
+
                 # Re-submit
                 task['status'] = 'waiting'
+                task["request_id"] = uuid()
+                task["config"]["_independent_retry"] = True
+                task.pop("layout_track_key", None)
+                task.pop("layout_sequence", None)
                 self.render_tasks[task['uuid']] = task
                 self.render_executors.submit(self._render_subprocess, task)
                 return True
@@ -85,9 +151,8 @@ class Render():
 
     def delete_failed_task(self, uuid):
         with self._lock:
-            if uuid in self.failed_tasks:
+            if uuid in self.failed_tasks and uuid not in self.render_tasks:
                 self.failed_tasks.pop(uuid)
-                # self.save_failed_tasks()
                 return True
             return False
 
@@ -109,9 +174,9 @@ class Render():
             message:PipeMessage = self.recv_queue.get()
             try:
                 if message.target == 'render':
-                   if message.event == 'newtask':
+                    if message.event == "newtask":
                         self.add_task(message)
-                   elif message.event == 'layout_end':
+                    elif message.event == "layout_end":
                         track_key = (message.data or {}).get('track_key')
                         if track_key:
                             self.layout_tracks.reset(track_key)
@@ -120,7 +185,7 @@ class Render():
             except Exception as e:
                 self.logger.error(f'Message:{message} raise an error.')
                 self.logger.exception(e)
-    
+
     def start(self):
         self.stoped = False
         self._piperecvprocess = threading.Thread(target=self._pipeRecvMonitor, daemon=True)
@@ -132,18 +197,18 @@ class Render():
             source = msg.source
             request_id = msg.request_id
             task = {
-                'uuid': uuid(),
-                'source': source,
-                'request_id': request_id,
-                'mode': config.get('mode', 'dmrender'),
-                'args': config.get('args', {}),
-                'video': config.get('video'),
-                'output': config.get('output'),
-                'config': config,
-                'status': 'waiting',
-                'progress': None,   # 渲染百分比（'45%'），由渲染引擎回调更新，供 WebUI 展示
+                "uuid": uuid(),
+                "source": source,
+                "request_id": request_id,
+                "mode": config.get("mode", DEFAULT_ENGINE),
+                "args": config.get("args", {}),
+                "video": config.get("video"),
+                "output": config.get("output"),
+                "config": config,
+                "status": "waiting",
+                "progress": None,  # 渲染百分比（'45%'），由渲染引擎回调更新，供 WebUI 展示
             }
-            if task['mode'] in ('dmrender', 'emoji_dmrender'):
+            if get_engine(task["mode"]).overlay:
                 video = task.get('video')
                 events_path = getattr(video, 'dm_file_id', None)
                 if not events_path or not str(events_path).lower().endswith('.jsonl'):
@@ -175,7 +240,22 @@ class Render():
     def _gather(self, task, status, desc=''):
         with self._lock:
             self.render_tasks.pop(task['uuid'], None)
-            if status == 'error':
+            if status == "stopped":
+                task["status"] = "stopped"
+                task["error"] = str(desc)
+                self.failed_tasks[task["uuid"]] = task
+                self._pipeSend(
+                    event="stopped",
+                    msg=f"视频{task['output']}渲染已停止",
+                    target=task["source"],
+                    request_id=task["request_id"],
+                    data=desc,
+                )
+            elif status == "error":
+                if task["config"].get("_independent_retry"):
+                    task["status"] = "error"
+                    task["error"] = str(desc)
+                    self.failed_tasks[task["uuid"]] = task
                 # 渲染失败已交由 liveevents 挂起转人工（见 onRenderError），不再留存 failed_tasks
                 self._pipeSend(
                     event='error',
@@ -187,6 +267,7 @@ class Render():
                 )
             else:
                 # 记录渲染成功的视频（最新在前），只保留最近 200 条避免无限增长
+                self.failed_tasks.pop(task["uuid"], None)
                 output_path = getattr(desc, 'path', None) or task.get('output')
                 video = task.get('video')
                 self.completed_tasks.append({
@@ -211,28 +292,48 @@ class Render():
                     },
                 )
 
+    def _compile_layout(self, task, mode):
+        """Use the same historical checkpoint when changing fallback backend."""
+        if task["config"].get("_independent_retry"):
+            from .layout_compiler import LayoutCompiler
+
+            return LayoutCompiler(
+                task["args"], engine=mode, engine_config=task["args"]
+            ).compile(
+                video=task["video"],
+                events_path=task["video"].dm_file_id,
+                work_dir=os.path.dirname(task["output"]) or None,
+            )
+        return self.layout_tracks.compile_segment(
+            track_key=task.get("layout_track_key"),
+            sequence=task.get("layout_sequence"),
+            video=task["video"],
+            events_path=task["video"].dm_file_id,
+            layout_config=task["args"],
+            engine=mode,
+            engine_config=task["args"],
+            work_dir=os.path.dirname(task["output"]) or None,
+        )
+
     def _render_subprocess(self, task):
         task['status'] = 'rendering'
         layout_result = None
         target_render = None
         try:
+            if self.stoped:
+                self._gather(task, "stopped", desc=RenderStopped("用户已停止渲染"))
+                return
             render_args = task['args']
             mode:str = task['mode']
             video:VideoInfo = task.get('video')
             output:str = task.get('output')
 
-            if mode == 'dmrender':
-                from .dmrender import DmRender as TargetRender
-            elif mode == 'emoji_dmrender':
-                from .emoji_dmrender import EmojiDmRender as TargetRender
-            elif mode == 'transcode':
-                from .transcode import Transcoder as TargetRender
-            else:
-                raise ValueError(f'未知渲染模式: {mode}')
+            engine = get_engine(mode)
+            TargetRender = engine.load()
 
             target_args = render_args
             render_kwargs = {}
-            if mode in ('dmrender', 'emoji_dmrender'):
+            if engine.overlay:
                 output_dir = os.path.dirname(output)
                 if output_dir:
                     os.makedirs(output_dir, exist_ok=True)
@@ -245,7 +346,7 @@ class Render():
                     key: value for key, value in render_args.items()
                     if key != 'engine' and key not in layout_keys
                 }
-                if mode == 'dmrender':
+                if not engine.raster:
                     for key in (
                         'emoji_pack', 'emoji_font', 'min_fps',
                     ):
@@ -267,16 +368,7 @@ class Render():
                                 declared_duration,
                                 timeline_duration,
                             )
-                    layout_result = self.layout_tracks.compile_segment(
-                        track_key=task.get('layout_track_key'),
-                        sequence=task.get('layout_sequence'),
-                        video=video,
-                        events_path=events_path,
-                        layout_config=render_args,
-                        engine=mode,
-                        engine_config=render_args,
-                        work_dir=output_dir or None,
-                    )
+                    layout_result = self._compile_layout(task, mode)
                     render_kwargs['render_plan'] = layout_result.render_plan_path
                     render_kwargs['canvas_resolution'] = (
                         layout_result.next_state.canvas_resolution
@@ -308,8 +400,8 @@ class Render():
                     )
 
             target_render = TargetRender(**target_args)
-            verb = {'dmrender': '渲染', 'emoji_dmrender': '彩色emoji渲染', 'transcode': '转码'}.get(mode, '处理')
-            log_task_start = self.logger.debug if mode == 'emoji_dmrender' else self.logger.info
+            verb = engine.label
+            log_task_start = self.logger.debug if engine.raster else self.logger.info
             log_task_start(f'准备{verb}任务: {video.path}')
             output_dir = os.path.dirname(output)
             if output_dir:
@@ -336,38 +428,93 @@ class Render():
                 except Exception as e:
                     status, info = False, e
                     self.logger.exception(e)
-                if status or self.stoped:
+                if (
+                    status
+                    or self.stoped
+                    or target_render.is_stopped()
+                    or isinstance(info, RenderStopped)
+                ):
                     break
                 if attempt < retry:
                     self.logger.warning(f'{verb}失败，重试 {attempt + 1}/{retry}: {video.path}')
                     time.sleep(5)
             self._render_class.pop(task['uuid'], None)
 
-            if status:
+            cancelled = (
+                self.stoped
+                or target_render.is_stopped()
+                or isinstance(info, RenderStopped)
+            )
+            if cancelled:
+                self._gather(task, "stopped", desc=RenderStopped("用户已停止渲染"))
+            elif status:
                 self._gather(task, 'info', desc=info)
+            elif engine.fallback:
+                self.logger.warning(
+                    "%s失败，回退到 %s: %s", mode, engine.fallback, info
+                )
+                if layout_result is not None:
+                    original_layout = layout_result
+                    layout_result = self._compile_layout(task, engine.fallback)
+                    original_layout.cleanup()
+                    render_kwargs["render_plan"] = layout_result.render_plan_path
+                    render_kwargs["canvas_resolution"] = (
+                        layout_result.next_state.canvas_resolution
+                    )
+                fallback = get_engine(engine.fallback).load()(**target_args)
+                self._render_class[task["uuid"]] = fallback
+                try:
+                    fallback_status, fallback_info = fallback.render_one(
+                        video=video,
+                        output=output,
+                        progress_cb=on_progress,
+                        **render_kwargs,
+                    )
+                    if (
+                        self.stoped
+                        or fallback.is_stopped()
+                        or isinstance(fallback_info, RenderStopped)
+                    ):
+                        self._gather(
+                            task, "stopped", desc=RenderStopped("用户已停止渲染")
+                        )
+                    else:
+                        self._gather(
+                            task,
+                            "info" if fallback_status else "error",
+                            desc=fallback_info,
+                        )
+                finally:
+                    self._render_class.pop(task["uuid"], None)
             else:
                 self._gather(task, 'error', desc=info)
         except KeyboardInterrupt:
             if target_render:
                 target_render.stop()
+            self._gather(task, "stopped", desc=RenderStopped("用户已停止渲染"))
         except Exception as e:
-            self.logger.exception(e)
-            self._gather(task, 'error', desc=e)
+            if self.stoped or (
+                target_render is not None and target_render.is_stopped()
+            ):
+                self._gather(task, "stopped", desc=RenderStopped("用户已停止渲染"))
+            else:
+                self.logger.exception(e)
+                self._gather(task, "error", desc=e)
         finally:
+            self._render_class.pop(task["uuid"], None)
             if layout_result:
                 layout_result.cleanup()
 
     def stop(self):
         self.stoped = True
-        for uuid, render in self._render_class.items():
+        for render in list(self._render_class.values()):
             render.stop()
         self.render_executors.shutdown(wait=False)
         self.layout_tracks.reset()
-        
+
         with self._lock:
             for uuid, task in self.render_tasks.items():
                 if uuid not in self.failed_tasks:
                     self.failed_tasks[uuid] = task
-            # self.save_failed_tasks()
 
         self.logger.info('Render stopped.')

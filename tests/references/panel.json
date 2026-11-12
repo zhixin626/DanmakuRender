@@ -1,0 +1,62 @@
+{
+  "nodes": [
+    {
+      "type": "rect",
+      "x": 0,
+      "width": 250,
+      "radius": 30,
+      "outline": 2,
+      "outline_color": "#000000",
+      "outline_opacity": 1.0,
+      "layer": 0,
+      "y": 0,
+      "height": 40,
+      "shape": "round_top",
+      "color": "#EDF5FF",
+      "opacity": 0.7
+    },
+    {
+      "type": "rect",
+      "x": 0,
+      "width": 250,
+      "radius": 30,
+      "outline": 2,
+      "outline_color": "#000000",
+      "outline_opacity": 1.0,
+      "layer": 0,
+      "y": 40,
+      "height": 110,
+      "shape": "round_bottom",
+      "color": "#2A60B2",
+      "opacity": 0.5
+    },
+    {
+      "type": "text",
+      "anchor": "top_left",
+      "x": 8,
+      "font": "Microsoft YaHei",
+      "size": 30,
+      "opacity": 1.0,
+      "outline": 0,
+      "outline_color": "#000000",
+      "layer": 1,
+      "y": 5,
+      "text": "SC panel 30",
+      "color": "#666666"
+    },
+    {
+      "type": "text",
+      "anchor": "top_left",
+      "x": 8,
+      "font": "Microsoft YaHei",
+      "size": 30,
+      "opacity": 1.0,
+      "outline": 1,
+      "outline_color": "#000000",
+      "layer": 1,
+      "y": 49,
+      "text": "Line one\nLine two\nLine three",
+      "color": "#FFFFFF"
+    }
+  ]
+}

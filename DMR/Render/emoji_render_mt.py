@@ -21,19 +21,51 @@
     - --resize: 输出缩放,"宽x高" 或缩放系数(如 0.5);合成在渲染画布完成,仅最终编码缩放。
 """
 import os, re, sys, json, time, shutil, logging, subprocess, threading, queue, atexit, collections
-import hashlib
-import io
-import urllib.parse
-import urllib.request
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 try:
+    from ..EmojiPack.common import EmoticonStore
     from .plan_ass import render_plan_to_ass
     from .resolution import resolve_render_canvas
+    from .resolution import resolve_output_fps
+    from ..utils.ffprobe import source_frame_rate
+    from .sprites import (
+        DEFAULT_EMOJI_FONT,
+        EMOTICON_PREFIX,
+        OUT,
+        SCALE,
+        _STRIP,
+        SpriteFactory,
+        has_special,
+        is_emoji,
+        load_pack,
+        parse_pill,
+        resolve_emoji_font,
+        resolve_font,
+    )
 except ImportError:
+    sys.path.insert(0, os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..")))
+    from DMR.EmojiPack.common import EmoticonStore
     from plan_ass import render_plan_to_ass
     from resolution import resolve_render_canvas
+    from resolution import resolve_output_fps
+    from DMR.utils.ffprobe import source_frame_rate
+    from sprites import (
+        DEFAULT_EMOJI_FONT,
+        EMOTICON_PREFIX,
+        OUT,
+        SCALE,
+        _STRIP,
+        SpriteFactory,
+        has_special,
+        is_emoji,
+        load_pack,
+        parse_pill,
+        resolve_emoji_font,
+        resolve_font,
+    )
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -55,19 +87,6 @@ def setup_log():
     log.addHandler(h)
     log.setLevel(logging.DEBUG)
     log.propagate = False
-
-
-def resolve_output_fps(source_fps, minimum_fps=None):
-    """Keep the source rate unless it is below the configured floor."""
-    source_fps = float(source_fps)
-    if not np.isfinite(source_fps) or source_fps <= 0:
-        raise ValueError("source fps must be a positive number")
-    if minimum_fps is None:
-        return source_fps
-    minimum_fps = float(minimum_fps)
-    if not np.isfinite(minimum_fps) or minimum_fps <= 0:
-        raise ValueError("minimum fps must be a positive number")
-    return max(source_fps, minimum_fps)
 
 
 def kill_tree(pid):
@@ -107,98 +126,33 @@ def rmtree_retry(path, tries=5, wait=1.0):
                 return False
             time.sleep(wait)
 
-def _default_emoji_font():
-    """系统自带彩色 emoji 字体(跨平台兜底)"""
-    if os.name == "nt":
-        return r"C:\Windows\Fonts\seguiemj.ttf"
-    for p in ("/System/Library/Fonts/Apple Color Emoji.ttc",
-              "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-              "/usr/share/fonts/noto-cjk/NotoColorEmoji.ttf",
-              "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf"):
-        if os.path.isfile(p):
-            return p
-    return "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
+# ============================ 单段渲染（worker） ============================
 
-DEFAULT_EMOJI_FONT = _default_emoji_font()
-# ASS 字号按 96 DPI 的 point 语义换算到 Pillow 像素。使用 3/4 后，
-# Microsoft YaHei 等字体的 Pillow ascent 正好对应 libass ``\an7`` 行顶到
-# 基线的距离；不要再为药丸单独改变这条文字基线。
-SCALE = 0.75
-OUT = 1
+
+def ass_time(value):
+    """Convert an ASS timestamp to seconds."""
+    hours, minutes, rest = value.split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + float(rest)
+
+
+def sec_to_ass(seconds):
+    """Convert seconds to an ASS timestamp."""
+    seconds = max(0.0, seconds)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    remainder = seconds % 60
+    return f"{hours}:{minutes:02d}:{remainder:05.2f}"
+
+
+def fmt(seconds):
+    """Format seconds for renderer logs."""
+    whole = int(seconds)
+    return f"{whole // 60}分{whole % 60:02d}秒"
+
+
 QDEPTH = 8
 
-# 无字形整形(shaping)时,这些"组合/修饰"码点会渲成多余方块,渲染前一律去掉:
-#   FE00-FE0F 变体选择符、200D 零宽连接(ZWJ)、20E3 keycap 封闭符、1F3FB-1F3FF 肤色修饰符
-# 注意:_STRIP 和下面的 is_emoji 在 DMR/utils/text_width.py(弹幕测宽)有同款拷贝,改动必须两边同步
-_STRIP = {0x200D: None, 0x20E3: None}
-_STRIP.update({c: None for c in range(0xFE00, 0xFE10)})     # 变体选择符
-_STRIP.update({c: None for c in range(0x1F3FB, 0x1F400)})   # 肤色修饰符
 
-
-def is_emoji(c):
-    o = ord(c)
-    return (0x1F300 <= o <= 0x1FAFF) or (0x1F000 <= o <= 0x1F0FF) \
-        or (0x2600 <= o <= 0x27BF) or (0x2300 <= o <= 0x23FF) or (0x2B00 <= o <= 0x2BFF) \
-        or (0x1F1E6 <= o <= 0x1F1FF) \
-        or (0xFE00 <= o <= 0xFE0F) or (0x1F3FB <= o <= 0x1F3FF) or o == 0x200D or o == 0x20E3
-def ass_time(s):
-    h, m, rest = s.split(":"); return int(h)*3600 + int(m)*60 + float(rest)
-def sec_to_ass(t):
-    if t < 0: t = 0.0
-    h = int(t // 3600); m = int((t % 3600) // 60); s = t % 60
-    return f"{h}:{m:02d}:{s:05.2f}"
-def fmt(sec):
-    sec = int(sec); return f"{sec//60}分{sec%60:02d}秒"
-
-SHORTCODE_RE = re.compile(r"\[([^\[\]\r\n]{1,200})\]")
-EMOTICON_PREFIX = "; DMR_EMOTICON:"
-
-def has_special(body, pack):
-    """该弹幕是否需要走精灵路径(含unicode emoji 或 已知方括号表情)"""
-    clean = re.sub(r"\{[^}]*\}", "", body)
-    if any(is_emoji(c) for c in clean):
-        return True
-    if pack:
-        for m in SHORTCODE_RE.finditer(clean):
-            if m.group(1).lower() in pack:
-                return True
-    return False
-
-
-def tokenize(text, pack):
-    """切成 [(kind, payload)]，kind: 'text' / 'emoji' / 'png'(payload=png路径)"""
-    tokens = []
-    parts = SHORTCODE_RE.split(text)   # 偶数位是普通文本,奇数位是 [] 里的内容
-    for i, part in enumerate(parts):
-        if i % 2 == 1:  # 方括号内容
-            if pack and part.lower() in pack:   # 大小写不敏感:[ok]/[OK] 都命中同一张图
-                tokens.append(("png", pack[part.lower()])); continue
-            part = f"[{part}]"  # 不在表情包里 → 当普通文字
-        cur = ""; ce = None
-        for ch in part:
-            e = is_emoji(ch)
-            if cur and e != ce:
-                tokens.append(("emoji" if ce else "text", cur)); cur = ""
-            cur += ch; ce = e
-        if cur:
-            tokens.append(("emoji" if ce else "text", cur))
-    return tokens
-
-
-def parse_pill(name):
-    """ASS Name 字段的药丸标记 'pill#RRGGBB#pad#border' -> dict 或 None。"""
-    if not name or not name.startswith("pill"):
-        return None
-    p = name.split("#")
-    col = p[1] if len(p) > 1 and len(p[1]) == 6 else "FFC0CB"
-    try: pad = int(p[2]) if len(p) > 2 else 6
-    except ValueError: pad = 6
-    try: bor = int(p[3]) if len(p) > 3 else 3
-    except ValueError: bor = 3
-    return dict(color=[int(col[0:2], 16), int(col[2:4], 16), int(col[4:6], 16)], pad=pad, border=max(1, bor))
-
-
-# ============================ 单段渲染（worker） ============================
 def render_segment(cfg):
     seg_file = cfg["seg"]; textonly_ass = cfg["textonly"]; out_ts = cfg["out"]; prog_file = cfg["prog"]
     W, H, fps, vb = cfg["W"], cfg["H"], cfg["fps"], cfg["vb"]
@@ -206,148 +160,18 @@ def render_segment(cfg):
     pack = cfg.get("pack", {})
     segdir = os.path.dirname(os.path.abspath(out_ts)) or "."
 
-    fs_ass = cfg["fs"]                # ASS 字号；按 72/96 换算为 Pillow 像素
-    corr = max(1, int(round(fs_ass * SCALE)))
-    tf = ImageFont.truetype(cfg["textfont"], corr)
-    # emoji 字体:矢量(COLR,如 Segoe)可任意尺寸直接用;位图(CBDT,如 Noto)只有固定 strike,需缩放
-    try:
-        ef = ImageFont.truetype(cfg["emojifont"], corr); ef_scale = 1.0
-    except OSError:
-        ef = None
-        for _sz in (109, 128, 136, 96, 160, 64, 32):
-            try: ef = ImageFont.truetype(cfg["emojifont"], _sz); break
-            except OSError: continue
-        if ef is None:
-            # 既不是矢量也读不到任何 strike(文件损坏/不是字体)→ 回退系统 emoji 字体,再不行用文字字体,绝不崩
-            for fb in (DEFAULT_EMOJI_FONT, cfg["textfont"]):
-                try: ef = ImageFont.truetype(fb, corr); break
-                except OSError: continue
-            if ef is None: ef = ImageFont.load_default()
-        ef_scale = corr / ef.size if getattr(ef, "size", 0) else 1.0
-    e_asc, e_desc = ef.getmetrics()
-    asc, desc = tf.getmetrics()
-    png_h = int(round(corr * 1.25))   # 方括号表情显示高度(可调,不影响"不裁切")
-    png_center = -int(round(asc * 0.38))  # 表情垂直中心相对基线(负=上),约文字主体中心
-
-    png_cache = {}
-    def load_png(path):
-        """按高度等比缩放,保持宽高比,不裁切;保留透明通道"""
-        if path in png_cache: return png_cache[path]
-        im = Image.open(path).convert("RGBA")
-        w = max(1, int(round(im.width * png_h / im.height)))
-        im = im.resize((w, png_h), Image.LANCZOS)
-        png_cache[path] = im
-        return im
-
-    cache = {}
-    def get_sprite(
-        text, rgb, pill=None, event_pack=None, outline=OUT,
-        outline_rgb=(0, 0, 0),
-    ):
-        outline = max(0, int(round(outline)))
-        outline_rgb = tuple(int(value) for value in outline_rgb)
-        pkey = (tuple(pill["color"]), pill["pad"], pill["border"]) if pill else None
-        # None=普通弹幕用默认 pack；dict=纯 emoticon 只用该条事件的精确图片。
-        active_pack = pack if event_pack is None else event_pack
-        event_key = None if event_pack is None else tuple(sorted(event_pack.items()))
-        key = (text, tuple(rgb), pkey, event_key, outline, outline_rgb)
-        if key in cache: return cache[key]
-        toks = tokenize(text, active_pack)
-        has_png = any(k == "png" for k, _ in toks)
-        has_emoji = any(k == "emoji" for k, _ in toks)
-        # 每个 token 只测量/加载一次，排版与实际绘制复用同一个宽度。
-        prepared_tokens = []
-        content_w = 0
-        for kind, pl in toks:
-            if kind == "png":
-                prepared = load_png(pl)
-                token_w = prepared.width
-            elif kind == "emoji":
-                prepared = None
-                token_w = max(1, int(ef.getlength(pl) * ef_scale))
-            else:
-                prepared = None
-                token_w = max(0, int(tf.getlength(pl)))
-            prepared_tokens.append((kind, pl, prepared, token_w))
-            content_w += token_w
-        # 内容相对基线的上下范围。文字行的规范基线始终是 lane_y + asc；
-        # Emoji、图片和 VIP 药丸只能向这条基线的上下扩展，不能推动文字。
-        ptop = png_center - png_h // 2; pbot = png_center + (png_h - png_h // 2)
-        emoji_ascent = int(round(e_asc * ef_scale)) if has_emoji else 0
-        emoji_descent = int(round(e_desc * ef_scale)) if has_emoji else 0
-        content_ascent = max(asc, (-ptop if has_png else 0), emoji_ascent)
-        content_descent = max(desc, (pbot if has_png else 0), emoji_descent)
-        if pill:
-            pv = pill["pad"]; pb = pill["border"]
-            # 先确定文字/Emoji 内容盒，再由药丸从内容盒向上下各扩 pv。
-            # stadium 两端半圆的水平留白取药丸半高，文字位置不受描边影响。
-            pill_height = content_ascent + content_descent + 2 * pv
-            pad_x = pill_height / 2.0
-            top_ext = int(round(content_ascent + pv))
-            bot_ext = int(round(content_descent + pv))
-            content_x = int(round(pad_x))
-            total_w = max(int(round(content_w + 2 * pad_x)), int(round(pill_height)))
-            anchor_x_offset = 0
-        else:
-            # 非药丸精灵只为文字描边预留透明安全边。合成时会把这段安全边
-            # 扣回，因此内容左缘仍与 ASS 的 x 完全相同。
-            top_ext = content_ascent + outline
-            bot_ext = content_descent + outline
-            content_x = outline
-            total_w = content_w + 2 * outline
-            anchor_x_offset = outline
-        baseline = top_ext
-        Hs = top_ext + bot_ext
-        spr = Image.new("RGBA", (max(int(total_w), 1), int(Hs)), (0, 0, 0, 0))
-        d = ImageDraw.Draw(spr); x = content_x
-        for kind, pl, prepared, token_w in prepared_tokens:
-            if kind == "png":
-                im = prepared
-                spr.alpha_composite(im, (int(x), baseline + ptop))   # 完整贴入,绝不越界裁切
-                x += token_w
-            elif kind == "emoji":
-                if ef_scale == 1.0:
-                    d.text((x, baseline), pl, font=ef, embedded_color=True, anchor="ls")
-                    x += token_w
-                else:   # 位图字体:按原生 strike 渲染后缩放贴入
-                    ew = max(1, int(ef.getlength(pl)))
-                    tmp = Image.new("RGBA", (ew, e_asc + e_desc), (0, 0, 0, 0))
-                    ImageDraw.Draw(tmp).text((0, e_asc), pl, font=ef, embedded_color=True, anchor="ls")
-                    tmp = tmp.resize((token_w, max(1, int((e_asc + e_desc) * ef_scale))), Image.LANCZOS)
-                    spr.alpha_composite(tmp, (int(x), baseline - int(round(e_asc * ef_scale))))
-                    x += token_w
-            else:
-                d.text((x, baseline), pl, font=tf, fill=tuple(rgb) + (255,),
-                       stroke_width=outline, stroke_fill=outline_rgb + (255,), anchor="ls")
-                x += token_w
-        tbo = baseline + desc   # 文字底(\an1锚点)距精灵顶的偏移,定位用
-        if pill:
-            # 药丸描边画在已经确定的内容盒外侧，描边向内落在画布中。
-            pb = pill["border"]; col = tuple(pill["color"]) + (255,)
-            x0p = pb / 2.0; x1p = total_w - 1 - pb / 2.0
-            y0p = pb / 2.0; y1p = top_ext + bot_ext - 1 - pb / 2.0
-            r = (y1p - y0p) / 2.0            # = (fs+2pv)/2,两端半圆
-            d.rounded_rectangle([x0p, y0p, x1p, y1p], radius=r, outline=col, width=pb)
-        a = np.asarray(spr).astype(np.float32)
-        R, G, B = a[:, :, 0], a[:, :, 1], a[:, :, 2]; A = a[:, :, 3] / 255.0
-        sY = 16 + 0.1826 * R + 0.6142 * G + 0.0620 * B
-        sU = 128 - 0.1006 * R - 0.3386 * G + 0.4392 * B
-        sV = 128 + 0.4392 * R - 0.3989 * G - 0.0403 * B
-        lbo = content_x         # 旧 ASS 兼容路径使用的内容左缘偏移
-        # RenderPlan 的 y 是 ASS \an7 的文字行顶。Pillow 精灵无论是否带
-        # Emoji/药丸，都用同一文字基线 lane_y + asc；两项 offset 是精灵
-        # 左上角相对 RenderPlan 锚点需要扣除的距离。
-        anchor_y_offset = baseline - asc
-        cache[key] = (
-            sY, sU, sV, A, spr.width, spr.height, tbo, lbo,
-            anchor_x_offset, anchor_y_offset,
-        )
-        return cache[key]
-    for ev in emoji_events:
-        ev["_spr"] = get_sprite(
-            ev["text"], ev["rgb"], ev.get("pill"),
-            ev.get("emoticon_pack"), ev.get("outline", OUT),
-            ev.get("outline_rgb", (0, 0, 0)),
+    fs_ass = cfg["fs"]
+    sprite_factory = SpriteFactory(
+        cfg["textfont"], cfg["emojifont"], pack, fs_ass)
+    for event in emoji_events:
+        event["_spr"] = sprite_factory.get_sprite(
+            event["text"],
+            event["rgb"],
+            event.get("pill"),
+            event.get("emoticon_pack"),
+            event.get("outline", OUT),
+            event.get("outline_rgb", (0, 0, 0)),
+            scroll_vertical_gap=float(cfg.get("r2l_vertical_gap", 0) or 0),
         )
 
     dec_cmd = [FFMPEG, "-v", "error", "-fflags", "+genpts+discardcorrupt"]
@@ -507,6 +331,15 @@ def render_segment(cfg):
     rt.start(); wt.start(); dec_err_thread.start(); enc_err_thread.start()
 
     n = 0; last = 0.0
+    bypass_emoji = os.environ.get("DMR_EMOJI_BYPASS") == "1"
+    stats_path = os.environ.get("DMR_EMOJI_STATS")
+    stats = {
+        "frames": 0,
+        "raster_events": len(emoji_events),
+        "active_event_samples": 0,
+        "max_active_events": 0,
+        "bypass": bypass_emoji,
+    }
     dec_rc = enc_rc = None
     try:
         while not pipeline_stop.is_set():
@@ -524,7 +357,12 @@ def render_segment(cfg):
                 break
             i, buf = item
             t = i / fps
-            active = [ev for ev in emoji_events if ev["s"] <= t <= ev["e"]]
+            active = [] if bypass_emoji else [
+                ev for ev in emoji_events if ev["s"] <= t <= ev["e"]
+            ]
+            stats["active_event_samples"] += len(active)
+            stats["max_active_events"] = max(
+                stats["max_active_events"], len(active))
             if active:
                 arr = np.frombuffer(buf, np.uint8).copy()
                 Y = arr[:W * H].reshape(H, W)
@@ -559,6 +397,7 @@ def render_segment(cfg):
             if not put_queue(write_q, output_frame, encoder_side=True):
                 break
             n += 1
+            stats["frames"] = n
             now = time.time()
             if now - last >= 0.4:
                 last = now
@@ -574,6 +413,12 @@ def render_segment(cfg):
                         f"编码线程超过 {pipeline_stall_seconds:.0f} 秒未结束"
                     )
     finally:
+        if stats_path:
+            try:
+                with open(stats_path, "w", encoding="utf-8") as fp:
+                    json.dump(stats, fp, ensure_ascii=False)
+            except OSError:
+                pass
         if pipeline_stop.is_set():
             for proc in (dec, enc):
                 if proc.poll() is None:
@@ -615,44 +460,8 @@ def render_segment(cfg):
 
 
 # ============================ 主流程 ============================
-def resolve_font(family, bold):
-    """字体名 -> 文件路径(用 matplotlib)"""
-    try:
-        import matplotlib.font_manager as fm
-        return fm.findfont(fm.FontProperties(family=family, weight="bold" if bold else "normal"),
-                           fallback_to_default=True)
-    except Exception:
-        return r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc"
-
-
-def resolve_emoji_font(val):
-    """--emoji-font 的值 -> 可用的字体文件路径。
-    支持:绝对/相对路径、省略扩展名、裸字体名(在常见目录和系统字体里找)、matplotlib 按字体族查找。"""
-    if not val:
-        return DEFAULT_EMOJI_FONT
-    here = os.path.dirname(os.path.abspath(__file__))
-    exts = ["", ".ttf", ".ttc", ".otf"]
-    # 1) 直接当路径(含省略扩展名);2) 在 脚本目录 / 脚本/test / 当前目录 / Windows字体 里找
-    dirs = ["", os.getcwd(), here, os.path.join(here, "test"), r"C:\Windows\Fonts"]
-    for d in dirs:
-        for ext in exts:
-            cand = os.path.join(d, val + ext) if d else (val + ext)
-            if os.path.isfile(cand):
-                return os.path.abspath(cand)
-    # 3) 当作字体族名,用 matplotlib 查
-    try:
-        import matplotlib.font_manager as fm
-        p = fm.findfont(fm.FontProperties(family=val), fallback_to_default=False)
-        if p and os.path.isfile(p):
-            return os.path.abspath(p)
-    except Exception:
-        pass
-    log.warning("找不到 emoji 字体 '%s',回退到系统 Segoe UI Emoji。(可改用完整路径,如 test\\NotoColorEmoji.ttf)", val)
-    return DEFAULT_EMOJI_FONT
-
-
 def check_tool(name):
-    """工具是否可用(在 PATH 或当前目录)"""
+    """Return whether an executable is available on PATH."""
     try:
         subprocess.run([name, "-version"], capture_output=True)
         return True
@@ -661,180 +470,17 @@ def check_tool(name):
 
 
 def audio_codec(path):
-    """探测第一条音轨编码名(用于决定能否 -c:a copy);失败返回空串"""
+    """Return the first audio stream codec, or an empty string on failure."""
     try:
-        r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "a:0",
-                            "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
-                           capture_output=True, text=True)
-        return r.stdout.strip()
+        result = subprocess.run(
+            [FFPROBE, "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
     except Exception:
         return ""
-
-
-def load_pack(pack_dirs):
-    """目录里的 png -> {名字: 路径}。支持逗号分隔多个目录,靠后的覆盖靠前的(房间专属覆盖通用)。
-    key 统一小写:匹配大小写不敏感(弹幕里 [ok]/[OK] 都能命中 OK.png),也对齐 Windows 文件系统行为。"""
-    pack = {}
-    if not pack_dirs:
-        return pack
-    for d in str(pack_dirs).split(","):
-        d = d.strip()
-        if not d or not os.path.isdir(d):
-            continue
-        for fn in os.listdir(d):
-            name, ext = os.path.splitext(fn)
-            if ext.lower() in (".png", ".webp", ".gif"):
-                pack[name.lower()] = os.path.abspath(os.path.join(d, fn))
-    return pack
-
-
-class EmoticonStore:
-    """纯 emoticon 的本地表情库：按 unique 记账，图片按 URL 哈希落盘。"""
-    MAX_BYTES = 10 * 1024 * 1024
-    FORMAT_EXT = {"PNG": ".png", "WEBP": ".webp", "GIF": ".gif", "JPEG": ".jpg"}
-
-    def __init__(self, directory):
-        self.directory = os.path.abspath(directory) if directory else None
-        self.registry_path = os.path.join(self.directory, "emoticon.json") if self.directory else None
-        self.registry = {}
-        self.dirty = False
-        self._resolved = {}
-        if not self.directory:
-            return
-        os.makedirs(self.directory, exist_ok=True)
-        try:
-            with open(self.registry_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                self.registry = data
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            log.warning("读取 emoticon.json 失败，将按空表情库处理: %s", e)
-
-    @staticmethod
-    def _normalized_url(url):
-        url = str(url or "").strip()
-        if not url:
-            return ""
-        p = urllib.parse.urlsplit(url)
-        if p.scheme not in ("http", "https"):
-            return ""
-        # B站同一资源会混用 http/https，统一成 https 避免重复缓存。
-        scheme = "https" if (p.hostname or "").lower().endswith("hdslb.com") else p.scheme
-        return urllib.parse.urlunsplit((scheme, p.netloc, p.path, p.query, ""))
-
-    @staticmethod
-    def _key(meta, url):
-        unique = str(meta.get("emoticon_unique") or "").strip()
-        return unique or ("url_" + hashlib.sha256(url.encode("utf-8")).hexdigest())
-
-    def _entry_path(self, entry):
-        filename = os.path.basename(str(entry.get("file") or ""))
-        return os.path.join(self.directory, filename) if filename else None
-
-    def _download(self, url):
-        host = (urllib.parse.urlsplit(url).hostname or "").lower()
-        if host != "hdslb.com" and not host.endswith(".hdslb.com"):
-            raise ValueError(f"拒绝非 B站图片域名: {host or url}")
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            declared = int(resp.headers.get("Content-Length") or 0)
-            if declared > self.MAX_BYTES:
-                raise ValueError(f"图片过大: {declared} bytes")
-            data = resp.read(self.MAX_BYTES + 1)
-        if len(data) > self.MAX_BYTES:
-            raise ValueError(f"图片超过 {self.MAX_BYTES} bytes")
-
-        with Image.open(io.BytesIO(data)) as im:
-            image_format = (im.format or "").upper()
-            im.verify()
-        ext = self.FORMAT_EXT.get(image_format)
-        if not ext:
-            raise ValueError(f"不支持的图片格式: {image_format or 'unknown'}")
-
-        filename = hashlib.sha256(url.encode("utf-8")).hexdigest() + ext
-        target = os.path.join(self.directory, filename)
-        temp = target + f".{os.getpid()}.part"
-        try:
-            with open(temp, "wb") as f:
-                f.write(data)
-            os.replace(temp, target)
-        finally:
-            try:
-                if os.path.exists(temp):
-                    os.remove(temp)
-            except OSError:
-                pass
-        return filename, target
-
-    def resolve(self, meta):
-        """返回该条纯 emoticon 的精确本地图片；无法补齐时返回 None。"""
-        if not self.directory or not isinstance(meta, dict):
-            return None
-        url = self._normalized_url(meta.get("url"))
-        key = self._key(meta, url)
-        memo_key = (key, url)
-        if memo_key in self._resolved:
-            return self._resolved[memo_key]
-
-        entry = self.registry.get(key)
-        if isinstance(entry, dict):
-            path = self._entry_path(entry)
-            entry_url = self._normalized_url(entry.get("url"))
-            if path and os.path.isfile(path) and (not url or entry_url == url):
-                self._resolved[memo_key] = path
-                return path
-
-        if not url:
-            log.warning("emoticon 缺少可用 URL 且本地未命中: %s", meta.get("name") or key)
-            self._resolved[memo_key] = None
-            return None
-
-        try:
-            filename, path = self._download(url)
-        except Exception as e:
-            log.warning("emoticon 下载失败 %s: %s", meta.get("name") or key, e)
-            self._resolved[memo_key] = None
-            return None
-
-        self.registry[key] = {
-            "name": meta.get("name"),
-            "url": url,
-            "width": meta.get("width"),
-            "height": meta.get("height"),
-            "is_dynamic": meta.get("is_dynamic", 0),
-            "file": filename,
-        }
-        self.dirty = True
-        self._resolved[memo_key] = path
-        log.info("已补齐 emoticon: %s", meta.get("name") or key)
-        return path
-
-    def save(self):
-        if not self.directory or not self.dirty:
-            return
-        # 写入前重新合并磁盘内容，降低多个渲染任务同时补表情时互相覆盖的概率。
-        merged = {}
-        try:
-            with open(self.registry_path, encoding="utf-8") as f:
-                old = json.load(f)
-            if isinstance(old, dict):
-                merged.update(old)
-        except Exception:
-            pass
-        merged.update(self.registry)
-        temp = self.registry_path + f".{os.getpid()}.tmp"
-        try:
-            with open(temp, "w", encoding="utf-8") as f:
-                json.dump(merged, f, ensure_ascii=False, indent=2)
-            os.replace(temp, self.registry_path)
-        finally:
-            try:
-                if os.path.exists(temp):
-                    os.remove(temp)
-            except OSError:
-                pass
 
 
 def main():
@@ -974,14 +620,8 @@ def main():
             height=H,
         )
         ass = generated_ass
-    # 输出帧率：取源的标称帧率(guessed_rate，干净的 60)而非 average_rate；
-    # --min-fps 表示最低帧率，只补低帧率源，不会把 60fps 源降成 30fps。
-    # (直播是可变帧率，average 会算成 62 这种)。配合解码滤镜里 fps 放在 subtitles 之前，
-    # 让 libass 在均匀的 CFR 时间轴上逐帧画弹幕 → 滚动弹幕顺滑，且几乎不增加耗时。
-    try:
-        source_fps = float(v.guessed_rate or v.average_rate)
-    except Exception:
-        source_fps = float(v.average_rate)
+    # Keep frame-rate selection identical between the old and GPU renderers.
+    source_fps = source_frame_rate(flv)
     minimum_fps = None
     if opt("--min-fps"):
         try:
@@ -1055,7 +695,7 @@ def main():
         if resize_str == f"{W}x{H}": resize_str = None
 
     # 解析 ASS：R2L 样式(字体名/字号/粗体) + 拆 textonly / 特殊弹幕
-    txt = open(ass, encoding="utf-8").read().splitlines()
+    txt = open(ass, encoding="utf-8").read().split("\n")
     fontname, fs, bold = "Microsoft YaHei", 60, True
     for l in txt:
         if l.startswith("Style: R2L"):
@@ -1231,7 +871,7 @@ def main():
     # 字幕 ass（可选）：解析成 header + dialogue 列表，后面按段切分、与弹幕同遍 libass 烧
     sub_header, sub_dia = [], []
     if subtitle_ass and os.path.exists(subtitle_ass):
-        stx = open(subtitle_ass, encoding="utf-8").read().splitlines()
+        stx = open(subtitle_ass, encoding="utf-8").read().split("\n")
         sub_header = [l for l in stx if not l.startswith("Dialogue")]
         for l in stx:
             if not l.startswith("Dialogue"):
@@ -1336,7 +976,8 @@ def main():
             FFMPEG, "-v", "error", "-y", "-nostdin",
             "-fflags", "+discardcorrupt+genpts",
             "-i", flv, "-map", "0:a:0", "-vn",
-            "-af", "aresample=async=1000:first_pts=0",
+            "-af", "aresample=async=1000:first_pts=0" +
+            (f",apad=whole_dur={dur:.6f}" if dur > 0 else ""),
             "-c:a", audio_encoder, *audio_encode_args,
             "-ar", "48000", fixed_audio,
         ]
@@ -1472,7 +1113,7 @@ def main():
             FFMPEG, "-v", "error", "-y",
             "-i", full, "-i", fixed_audio,
             "-map", "0:v", "-map", "1:a:0",
-            "-c", "copy", "-shortest",
+            "-c", "copy",
         ]
     else:
         mux_cmd = [
