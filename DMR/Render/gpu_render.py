@@ -756,7 +756,7 @@ def create_encoder(
         "fps": str(frame_rate),
         **configured_options,
     }
-    logger.info(
+    logger.debug(
         "CreateEncoder args: %s",
         json.dumps({"width": width, "height": height, **options}, sort_keys=True),
     )
@@ -1239,8 +1239,17 @@ class GpuRender(BaseRender):
                 stop_event=self.stop_event,
                 **{**self.options, **kwargs},
             )
-            self.logger.info(
+            self.logger.debug(
                 "GPU render statistics: %s", json.dumps(result, ensure_ascii=False)
+            )
+            video_seconds = result["frames"] / result["frame_rate"]
+            self.logger.info(
+                "GPU 渲染完成：视频 %.0f 秒，用时 %.1f 秒（%.1f 倍速），同屏弹幕平均 %.0f 条、最多 %d 条",
+                video_seconds,
+                result["wall_s"],
+                video_seconds / max(result["wall_s"], 1e-9),
+                result["active_events_avg"],
+                result["active_events_peak"],
             )
             output_info = self.output_info(
                 video,

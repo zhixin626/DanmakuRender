@@ -46,7 +46,7 @@ def test_gpu_result_runs_through_render_end_and_live_state(monkeypatch, tmp_path
 
     def rendered(video, output, **_):
         destination.write_bytes(b"encoded")
-        return {"width": 1920, "height": 1080, "frames": 60, "frame_rate": 60}
+        return {"width": 1920, "height": 1080, "frames": 60, "frame_rate": 60, "wall_s": 0.5, "active_events_avg": 1.0, "active_events_peak": 1}
 
     monkeypatch.setattr(gpu, "render_one", rendered)
     send = queue.Queue()

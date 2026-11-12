@@ -140,6 +140,9 @@ def resolve_font(family: str, bold: bool) -> str:
         properties = font_manager.FontProperties(
             family=family, weight="bold" if bold else "normal"
         )
+        # Symbol/math fonts have no bold face; matplotlib then warns and uses
+        # the regular face, which is exactly what we want, so keep it quiet.
+        logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
         return font_manager.findfont(properties, fallback_to_default=False)
     except (ImportError, ValueError, OSError) as error:
         log.warning("找不到字体 '%s'（%s），回退到支持中文的系统字体。", family, error)
