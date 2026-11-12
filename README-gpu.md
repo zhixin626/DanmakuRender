@@ -6,15 +6,15 @@
 
 需要支持所选编码和解码格式的 NVIDIA 显卡、匹配的 NVIDIA 驱动、可运行的 FFmpeg/ffprobe。参考 [NVIDIA 系统要求](https://docs.nvidia.com/video-technologies/pynvvideocodec/read-me/latest/system-requirements-common.html)及[编解码支持矩阵](https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new)。本分支实测环境为 Windows x64、Python 3.12、RTX 4070 Ti SUPER、驱动 610.88；其他组合需验证。
 
-在正式 DMR 维护窗口、使用它自己的 venv 安装（不要复制开发 worktree 的 venv）：
+在正式 DMR 维护窗口、使用它自己的 Python 3.12 venv 安装（不要复制开发 worktree 的 venv）。GPU 依赖已合并进 `requirements.txt`：
 
 ```powershell
-.\venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
 nvidia-smi
 ffmpeg -version
 ```
 
-依赖文件包含基础运行依赖、PyNvVideoCodec、CuPy CUDA12 和配套 CUDA runtime/NVRTC wheel。代码从当前解释器查找 DLL，不需要写死开发机路径。请配置已安装且支持中文的字体，平台表情放在 `emoji_pack/<平台>/`，纯 emoticon 缓存统一在其 `emoticon/` 子目录。
+`requirements.txt` 包含基础运行依赖、PyNvVideoCodec、CuPy CUDA12 和配套 CUDA runtime/NVRTC wheel；文件保持纯 ASCII，避免中文 Windows 上 pip 按 GBK 读取失败。代码从当前解释器查找 DLL，不需要写死开发机路径。请配置已安装且支持中文的字体，平台表情放在 `emoji_pack/<平台>/`，纯 emoticon 缓存统一在其 `emoticon/` 子目录。
 
 ## 启用与回退
 
