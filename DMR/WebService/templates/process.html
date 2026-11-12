@@ -219,9 +219,10 @@
     }
 
     function refreshTasks() {
-        fetch('/api/tasks')
-            .then(response => response.json())
+        fetch('/api/tasks', { headers: { 'If-None-Match': window._tasksEtag || '' }, cache: 'no-store' })
+            .then(response => { if (response.status === 304) return null; window._tasksEtag = response.headers.get('ETag') || ''; return response.json(); })
             .then(data => {
+                if (!data) return;
                 setSection('render-queue', 'render', data.render_queue, renderQueueHtml);
                 setSection('merge-queue',  'merge',  data.merge_queue,  mergeQueueHtml);
                 setSection('upload-queue', 'upload', data.upload_queue, uploadQueueHtml);

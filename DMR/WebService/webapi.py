@@ -9,6 +9,7 @@ import yaml
 import subprocess
 import math
 import gzip
+import hashlib
 
 
 def _abspath(p):
@@ -181,7 +182,13 @@ class WebApi:
         @app.route('/api/tasks')
         @self.login_required
         def tasks_api():
-            return self.get_tasks_data()
+            data = self.get_tasks_data()
+            etag = hashlib.sha256(
+                json.dumps(data, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')
+            ).hexdigest()
+            if request.headers.get('If-None-Match') == etag:
+                return Response(status=304, headers={'ETag': etag})
+            return data, 200, {'ETag': etag, 'Cache-Control': 'no-cache'}
 
         # 人工处理完挂起任务后回传结果：render/merge 传 mp4 路径，upload 传 'done'
         @app.route('/api/resume', methods=['POST'])
@@ -253,7 +260,8 @@ class WebApi:
             def gen():
                 q, history = console_subscribe(5000, last_id)
                 try:
-                    yield f'event: history\ndata: {json.dumps(history, ensure_ascii=False)}\n\n'
+                    final_id = history[-1]['id'] if history else last_id
+                    yield f'id: {final_id}\nevent: history\ndata: {json.dumps(history, ensure_ascii=False)}\n\n'
                     while True:
                         try:
                             item = q.get(timeout=15)

@@ -11,6 +11,7 @@ import threading
 import os
 from pathlib import Path
 import time
+import atexit
 from collections import deque
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
@@ -22,7 +23,10 @@ _console_lines = deque(maxlen=20000)
 _error_count = [0]   # 单调递增的报错行计数（用列表避免 global）
 _next_id = [0]
 _log_path = None
+_log_file = None
+_file_index = []
 _lock = threading.Lock()
+_file_lock = threading.Lock()
 _installed = False
 _subscribers = set()  # SSE 订阅者的队列集合：每来一行就推给它们（实时流式，不再靠轮询）
 
@@ -32,20 +36,28 @@ def _note_line(clean):
     _next_id[0] += 1
     item = {"id": _next_id[0], "text": clean}
     _console_lines.append(item)
-    if _log_path is not None:
-        try:
-            with _log_path.open("a", encoding="utf-8") as stream:
-                stream.write(f"{item['id']}\t{clean.replace(chr(10), ' ')}\n")
-        except OSError:
-            pass
     if _ERR_RE.search(clean):
         _error_count[0] += 1
     # 推给订阅者；某个队列满了（客户端太慢/已死）就丢这行，绝不阻塞日志写入
     for q in list(_subscribers):
         try:
-            q.put_nowait(clean)
+            q.put_nowait(item)
         except queue.Full:
             pass
+    return item
+
+
+def _persist_item(item):
+    if _log_file is None:
+        return
+    try:
+        with _file_lock:
+            offset = _log_file.tell()
+            _log_file.write(f"{item['id']}\t{item['text'].replace(chr(10), ' ')}\n")
+            if item["id"] % 1000 == 0:
+                _file_index.append((item["id"], offset))
+    except OSError:
+        pass
 
 
 class _ConsoleTee:
@@ -58,18 +70,21 @@ class _ConsoleTee:
             self._stream.write(text)
         except Exception:
             pass
+        items = []
         try:
             with _lock:
                 self._partial += text
                 # 防止只有 \r 刷新（如进度条）导致缓存无限增长
                 if '\n' not in self._partial and len(self._partial) > 8192:
-                    _note_line(_ANSI_RE.sub('', self._partial))
+                    items.append(_note_line(_ANSI_RE.sub('', self._partial)))
                     self._partial = ''
                 while '\n' in self._partial:
                     line, self._partial = self._partial.split('\n', 1)
-                    _note_line(_ANSI_RE.sub('', line).rstrip('\r'))
+                    items.append(_note_line(_ANSI_RE.sub('', line).rstrip('\r')))
         except Exception:
             pass
+        for item in items:
+            _persist_item(item)
         return len(text)
 
     def flush(self):
@@ -88,11 +103,13 @@ def install_console_tee(log_dir=None):
     if _installed:
         return
     _installed = True
-    global _log_path
+    global _log_path, _log_file
     if log_dir:
         path = Path(log_dir)
         path.mkdir(parents=True, exist_ok=True)
         _log_path = path / f"console-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+        _log_file = _log_path.open("a", encoding="utf-8", buffering=1)
+        atexit.register(_close_log_file)
     if sys.stdout is not None:
         sys.stdout = _ConsoleTee(sys.stdout)
     if sys.stderr is not None:
@@ -127,19 +144,47 @@ def get_console_history(before_id=0, limit=500):
     with _lock:
         records = [item for item in _console_lines if before_id <= 0 or item["id"] < before_id]
         path = _log_path
-    if path and path.exists() and len(records) < limit:
+        memory_min = min((item["id"] for item in _console_lines), default=before_id)
+        index = list(_file_index)
+    if _log_file is not None:
+        with _file_lock:
+            _log_file.flush()
+    if path and path.exists() and before_id > 0 and (not records or memory_min > 1):
         try:
-            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-                raw_id, _, text = line.partition("\t")
-                try:
-                    item = {"id": int(raw_id), "text": text}
-                except ValueError:
-                    continue
-                if item["id"] < before_id and all(old["id"] != item["id"] for old in records):
-                    records.append(item)
+            target = min(before_id, memory_min or before_id)
+            offset = 0
+            for item_id, item_offset in index:
+                if item_id < target:
+                    offset = item_offset
+                else:
+                    break
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                stream.seek(offset)
+                while True:
+                    line = stream.readline()
+                    if not line:
+                        break
+                    raw_id, _, text = line.rstrip("\n").partition("\t")
+                    try:
+                        item_id = int(raw_id)
+                    except ValueError:
+                        continue
+                    if item_id < target:
+                        records.append({"id": item_id, "text": text})
         except OSError:
             pass
     return sorted(records, key=lambda item: item["id"])[-limit:]
+
+
+def _close_log_file():
+    global _log_file
+    if _log_file is not None:
+        with _file_lock:
+            try:
+                _log_file.close()
+            except OSError:
+                pass
+            _log_file = None
 
 
 def unsubscribe(q):

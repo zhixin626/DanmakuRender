@@ -10,7 +10,7 @@
     const box = document.getElementById('console-box');
     const statusEl = document.getElementById('log-status');
 
-    const MAX_LINES = 8000;   // 浏览器侧最多保留的行数（防 DOM 过大卡顿）；超出丢最老的
+    const MAX_LINES = 50000;
     let logLines = [];        // 当前显示的所有行
     let pending = [];         // 本帧待追加的记录
     let flushScheduled = false;
@@ -26,7 +26,7 @@
         const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
         logLines.push(...pending.map(item => item.text));
         pending = [];
-        if (logLines.length > MAX_LINES) logLines.splice(0, logLines.length - MAX_LINES);
+        if (atBottom && logLines.length > MAX_LINES) logLines.splice(0, logLines.length - MAX_LINES);
         box.textContent = logLines.join('\n');
         if (atBottom) box.scrollTop = box.scrollHeight;
     }
@@ -42,7 +42,6 @@
             logLines = records.slice(-MAX_LINES).map(item => item.text);
         } else {
             logLines = records.map(item => item.text).concat(logLines);
-            if (logLines.length > MAX_LINES) logLines.splice(MAX_LINES);
         }
         firstId = records[0].id;
         lastId = Math.max(lastId, records[records.length - 1].id);
@@ -68,7 +67,8 @@
         es.onopen  = () => { statusEl.textContent = '（实时）'; };
         es.addEventListener('history', (e) => {
             pending = [];
-            applyHistory(JSON.parse(e.data), true);
+            const records = JSON.parse(e.data);
+            applyHistory(records, lastId === 0);
             box.scrollTop = box.scrollHeight;
         });
         es.onmessage = (e) => {

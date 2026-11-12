@@ -10,4 +10,6 @@
 
 验证：`python -m compileall -q DMR main.py`；Flask smoke test 验证 gzip 历史返回、SSE `id`/续传；分支提交 `8ede4b2`、`8625b62`、`89ecb76`。
 
+后续修正：SSE history 事件带最终 id，重连只追加断点后的行；日志文件句柄常驻并每 1000 行建立偏移索引，分页读取不再整文件扫描；日志页上限 50000 行且向上翻不裁掉最新内容；`/api/tasks` 支持 ETag/304。最新修复待提交。
+
 未做：真实浏览器手工回归、SSE 断网重连的端到端测试；Vue 重写按要求未做。需要继续时从本 worktree 接着验证。
