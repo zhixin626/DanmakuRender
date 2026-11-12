@@ -100,7 +100,11 @@ const base = process.env.BASE_URL;
   await page.waitForFunction(n => lastId > n, cutAt + Number(process.env.EXPECT_AFTER), { timeout: 20000 });
   const result = await page.evaluate(() => {
     flush();   // 把本帧尚未渲染的行刷到页面上，再与序号范围比对
-    return { firstId, lastId, lines: document.getElementById('console-box').textContent.split('\n') };
+    const texts = selector => [...document.querySelectorAll('#console-box ' + selector)].map(el => el.textContent);
+    return {
+      firstId, lastId, lines: texts('.log-text'), numbers: texts('.log-no').map(Number),
+      range: document.getElementById('log-range').textContent,
+    };
   });
   console.log(JSON.stringify({ ...result, cutAt, duringOutage, statusDuringOutage }));
   await browser.close();
@@ -149,8 +153,10 @@ def test_logs_page_resumes_without_gaps_after_outage(tmp_path, mode):
     assert result["duringOutage"] == result["cutAt"]       # 断网期间确实没收到新行
     assert "断开" in result["statusDuringOutage"]
     assert result["lastId"] > result["cutAt"] + 300
-    expected = [f"tick-{i}" for i in range(result["firstId"], result["lastId"] + 1)]
-    assert result["lines"] == expected
+    ids = range(result["firstId"], result["lastId"] + 1)
+    assert result["lines"] == [f"tick-{i}" for i in ids]
+    assert result["numbers"] == list(ids)
+    assert result["range"] == f"第 {result['firstId']}–{result['lastId']} 行 / 共 {result['lastId']} 行"
 
 
 # 打开录制页，在几次任务刷新之间高频采样“分段”“本场”时长，记录每次显示变化的时刻和秒数

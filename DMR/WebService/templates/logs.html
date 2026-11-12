@@ -1,20 +1,30 @@
 {% extends "base.html" %}
 
 {% block content %}
+<style>
+    #console-box { background:#111; color:#ddd; padding:12px; border-radius:6px; height:70vh; overflow-y:auto; overflow-x:hidden;
+                   font-family:Consolas,monospace; font-size:0.85rem; line-height:1.5; }
+    .log-line { display:flex; }
+    .log-no { flex:none; min-width:7ch; padding-right:1ch; text-align:right; color:#666; user-select:none; }
+    .log-text { min-width:0; white-space:pre-wrap; overflow-wrap:anywhere; }
+</style>
 <div class="card">
-    <h2>控制台日志 <span id="log-status" style="font-size:0.8rem;font-weight:normal;color:#888;"></span></h2>
-    <pre id="console-box" style="background:#111;color:#ddd;padding:12px;border-radius:6px;height:70vh;overflow-y:auto;overflow-x:hidden;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;margin:0;"></pre>
+    <h2>控制台日志
+        <span id="log-status" style="font-size:0.8rem;font-weight:normal;color:#888;"></span>
+        <span id="log-range" style="font-size:0.8rem;font-weight:normal;color:#888;"></span>
+    </h2>
+    <div id="console-box"></div>
 </div>
 
 <script>
     const box = document.getElementById('console-box');
     const statusEl = document.getElementById('log-status');
+    const rangeEl = document.getElementById('log-range');
 
     const MAX_LINES = 50000;   // 停在底部时最多保留的行数；往上翻历史时不裁剪
-    const TRIM_SLACK = 2000;   // 超出这么多行才整体重绘一次，平时只追加文本节点
     const PAGE_SIZE = 500;
     const RECONNECT_MS = 3000;
-    let logLines = [];        // 当前显示的所有行，对应序号 firstId..lastId 连续
+    // 页面上的行与序号 firstId..lastId 一一对应且连续
     let pending = [];         // 本帧待追加的记录
     let flushScheduled = false;
     let firstId = null;
@@ -22,26 +32,42 @@
     let es = null;
     let loadingOlder = false;
 
-    function render() { box.textContent = logLines.join('\n'); }
+    function linesFragment(records) {
+        const fragment = document.createDocumentFragment();
+        for (const item of records) {
+            const line = document.createElement('div');
+            const no = document.createElement('span');
+            const text = document.createElement('span');
+            line.className = 'log-line';
+            no.className = 'log-no';
+            text.className = 'log-text';
+            no.textContent = item.id;
+            text.textContent = item.text;
+            line.append(no, text);
+            fragment.append(line);
+        }
+        return fragment;
+    }
+
+    function updateRange() {
+        rangeEl.textContent = firstId === null ? '' : `第 ${firstId}–${lastId - pending.length} 行 / 共 ${lastId} 行`;
+    }
 
     function flush() {
         flushScheduled = false;
         if (!pending.length) return;
         // 追加前先判断是否停在底部：在底部才自动跟随，往上翻历史时不打扰
         const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-        const texts = pending.map(item => item.text);
+        box.append(linesFragment(pending));
         pending = [];
-        const hadLines = logLines.length > 0;
-        for (const text of texts) logLines.push(text);
-        if (atBottom && logLines.length > MAX_LINES + TRIM_SLACK) {
-            const removed = logLines.length - MAX_LINES;
-            logLines.splice(0, removed);
-            firstId += removed;
-            render();
-        } else {
-            box.append((hadLines ? '\n' : '') + texts.join('\n'));
+        if (atBottom) {
+            while (box.childElementCount > MAX_LINES) {
+                box.firstElementChild.remove();
+                firstId += 1;
+            }
+            box.scrollTop = box.scrollHeight;
         }
-        if (atBottom) box.scrollTop = box.scrollHeight;
+        updateRange();
     }
     function scheduleFlush() {
         if (flushScheduled) return;
@@ -52,10 +78,10 @@
     function replaceAll(records) {
         records = records.slice(-MAX_LINES);
         pending = [];
-        logLines = records.map(item => item.text);
+        box.replaceChildren(linesFragment(records));
         firstId = records.length ? records[0].id : null;
         lastId = records.length ? records[records.length - 1].id : 0;
-        render();
+        updateRange();
         box.scrollTop = box.scrollHeight;
     }
 
@@ -80,9 +106,9 @@
             const records = ((await r.json()).lines).filter(item => item.id < firstId);
             if (!records.length) return;
             const oldHeight = box.scrollHeight;
-            logLines = records.map(item => item.text).concat(logLines);
+            box.prepend(linesFragment(records));
             firstId = records[0].id;
-            render();
+            updateRange();
             box.scrollTop += box.scrollHeight - oldHeight;
         } catch (_) {
             // 网络失败时下次滚动到顶部再试
