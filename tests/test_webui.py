@@ -13,7 +13,7 @@ from werkzeug.serving import make_server
 
 import DMR.utils.console_buffer as console
 from DMR.WebService.webapi import WebApi
-from test_console_buffer import _close, _reset
+from tests.test_console_buffer import _close, _reset
 
 
 def _webapi(engine=None):
