@@ -100,6 +100,9 @@
             <span id="restart-status" role="status" aria-live="polite"></span>
         </header>
         <script>
+        // 页面上的秒表按此间隔重算，只在显示变化时写 DOM；间隔远小于 1 秒，跳秒才不会忽快忽慢
+        const CLOCK_TICK_MS = 250;
+
         // ===== 统一轮询：切到后台标签暂停，切回前台立即刷新一次并恢复轮询 =====
         function startPolling(fn, interval) {
             var timer = null, running = false;

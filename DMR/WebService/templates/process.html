@@ -250,11 +250,12 @@
         const now = Date.now() / 1000;
         document.querySelectorAll('.remaining-time').forEach(el => {
             const executeAt = parseFloat(el.dataset.executeAt);
-            el.textContent = fmtRemaining(executeAt - now);
+            const text = fmtRemaining(executeAt - now);
+            if (el.textContent !== text) el.textContent = text;
         });
     }
 
-    startPolling(updateRemainingTimes, 1000);
+    startPolling(updateRemainingTimes, CLOCK_TICK_MS);
     startPolling(refreshTasks, 3000);
 </script>
 {% endblock %}

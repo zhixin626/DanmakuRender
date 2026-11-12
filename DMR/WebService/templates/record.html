@@ -179,7 +179,8 @@
     }
 
     function updateTaskTimeCell(cell, task) {
-        cell.innerHTML = taskTimeHTML(task);
+        const html = taskTimeHTML(task);
+        if (cell.innerHTML !== html) cell.innerHTML = html;
     }
 
     function toggleTaskTime(cell) {
@@ -557,6 +558,6 @@
     }
 
     startPolling(refreshTasks, 3000);
-    startPolling(updateTaskTimes, 1000);
+    startPolling(updateTaskTimes, CLOCK_TICK_MS);
 </script>
 {% endblock %}

@@ -7,7 +7,6 @@ import time
 import json
 import yaml
 import subprocess
-import math
 import gzip
 
 
@@ -748,7 +747,7 @@ class WebApi:
             if deadline is None:
                 return None
             try:
-                return max(0, int(math.ceil(float(deadline) - time.monotonic())))
+                return max(0.0, float(deadline) - time.monotonic())
             except (TypeError, ValueError):
                 return None
 
@@ -773,9 +772,9 @@ class WebApi:
                         seg_start = getattr(task, 'segment_start_time', None)
                         live_start = getattr(task, 'live_start_time', None)
                         if seg_start:
-                            segment_elapsed = int((now - seg_start).total_seconds())
+                            segment_elapsed = (now - seg_start).total_seconds()
                         if live_start:
-                            live_elapsed = int((now - live_start).total_seconds())
+                            live_elapsed = (now - live_start).total_seconds()
 
                     recording_tasks.append({
                         'name': taskname,

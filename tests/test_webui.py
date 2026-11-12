@@ -151,3 +151,59 @@ def test_logs_page_resumes_without_gaps_after_outage(tmp_path, mode):
     assert result["lastId"] > result["cutAt"] + 300
     expected = [f"tick-{i}" for i in range(result["firstId"], result["lastId"] + 1)]
     assert result["lines"] == expected
+
+
+# 打开录制页，在几次任务刷新之间高频采样“分段”时长，记录每次显示变化的时刻和秒数
+_CLOCK_SCRIPT = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  await page.goto(process.env.BASE_URL + '/');
+  const changes = await page.evaluate(async (duration) => {
+    const seen = [];
+    const start = performance.now();
+    while (performance.now() - start < duration) {
+      const m = document.querySelector('.rec-time').textContent.match(/分段 (\d+):(\d+)/);
+      const value = Number(m[1]) * 60 + Number(m[2]);
+      if (!seen.length || seen[seen.length - 1].value !== value) seen.push({ at: performance.now(), value });
+      await new Promise(r => setTimeout(r, 20));
+    }
+    return seen;
+  }, Number(process.env.DURATION_MS));
+  console.log(JSON.stringify(changes));
+  await browser.close();
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not _node_playwright_available(), reason="需要 node 和 playwright")
+def test_record_page_clock_ticks_once_per_second():
+    from datetime import datetime
+    # 0.5 秒的零头：服务器若取整下发，每次刷新任务都会让显示前后跳
+    recording = SimpleNamespace(
+        plat="douyin", url="u", stoped=False,
+        segment_start_time=datetime.fromtimestamp(time.time() - 100.5),
+        live_start_time=None,
+    )
+    downloader = SimpleNamespace(download_tasks={"a": recording})
+    engine = SimpleNamespace(plugin_dict={"downloader": {"class": downloader}}, task_dict={})
+    server = make_server("127.0.0.1", 0, _webapi(engine).create_app(), threaded=True)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        env = dict(os.environ, BASE_URL=f"http://127.0.0.1:{server.server_port}", DURATION_MS="8000")
+        run = subprocess.run(
+            ["node", "-e", _CLOCK_SCRIPT], env=env, capture_output=True, text=True, timeout=60
+        )
+        assert run.returncode == 0, run.stderr
+        changes = json.loads(run.stdout)
+    finally:
+        server.shutdown()
+        thread.join()
+
+    steps = list(zip(changes, changes[1:]))
+    assert len(steps) >= 6
+    assert all(b["value"] - a["value"] == 1 for a, b in steps)
+    # 第一次变化前的时长不定，之后每秒一跳；允许 250ms 刷新间隔和 20ms 采样带来的误差
+    assert all(700 <= b["at"] - a["at"] <= 1300 for a, b in steps[1:])
