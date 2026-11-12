@@ -9,6 +9,10 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from DMR.utils.console_buffer import install_console_tee
+
+LOG_PATTERNS = ("DMR-*.log*", "console-*.txt")
+
 
 def _logging_level(value, default):
     if isinstance(value, int):
@@ -34,8 +38,16 @@ def _delete_log(path, current_log):
         return 0
 
 
+def _log_files(log_dir):
+    return [
+        path for pattern in LOG_PATTERNS
+        for path in log_dir.glob(pattern)
+        if path.is_file()
+    ]
+
+
 def cleanup_logs(log_dir, current_log, args, logger):
-    """按保留天数和目录容量清理 DMR 主日志；其它文件不在清理范围内。"""
+    """按保留天数和目录容量清理 DMR 主日志和控制台日志；其它文件不在清理范围内。"""
     now = time.time()
     retention_days = max(0.0, float(args.get("retention_days", 30) or 0))
     protected_days = max(0.0, float(args.get("protected_days", 7) or 0))
@@ -47,7 +59,7 @@ def cleanup_logs(log_dir, current_log, args, logger):
     removed_bytes = 0
     failures = []
 
-    files = [path for path in log_dir.glob("DMR-*.log*") if path.is_file()]
+    files = _log_files(log_dir)
     if retention_days:
         cutoff = now - retention_days * 86400
         for path in files:
@@ -59,7 +71,7 @@ def cleanup_logs(log_dir, current_log, args, logger):
             except OSError as exc:
                 failures.append((path, exc))
 
-    files = [path for path in log_dir.glob("DMR-*.log*") if path.is_file()]
+    files = _log_files(log_dir)
     total_bytes = 0
     existing_files = []
     for path in files:
@@ -110,6 +122,8 @@ def configure_logging(config_path, args):
     args = args or {}
     log_dir = Path(args.get("directory") or "./logs")
     log_dir.mkdir(parents=True, exist_ok=True)
+    # 必须在下面 StreamHandler(sys.stdout) 创建前接管 stdout，WebUI 日志页才能看到 logging 输出
+    install_console_tee(log_dir)
 
     instance_name = args.get("instance_name")
     if not instance_name:

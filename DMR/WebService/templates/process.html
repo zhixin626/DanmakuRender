@@ -221,7 +221,7 @@
     }
 
     function refreshTasks() {
-        fetch('/api/tasks')
+        return fetch('/api/tasks')
             .then(response => response.json())
             .then(data => {
                 setSection('render-queue', 'render', data.render_queue, renderQueueHtml);
@@ -255,6 +255,6 @@
     }
 
     startPolling(updateRemainingTimes, 1000);
-    startPolling(refreshTasks, 1000);
+    startPolling(refreshTasks, 3000);
 </script>
 {% endblock %}

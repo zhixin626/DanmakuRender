@@ -8,6 +8,7 @@ import json
 import yaml
 import subprocess
 import math
+import gzip
 
 
 def _abspath(p):
@@ -69,7 +70,12 @@ from functools import wraps
 from datetime import datetime
 
 from DMR.utils import *
-from DMR.utils.console_buffer import get_console_lines, subscribe as console_subscribe, unsubscribe as console_unsubscribe
+from DMR.utils.console_buffer import (
+    MEMORY_LINES as CONSOLE_MEMORY_LINES,
+    get_console_history,
+    subscribe as console_subscribe,
+    unsubscribe as console_unsubscribe,
+)
 from DMR.utils.session_record import encode_dt, humanize_dt
 from DMR.Login import CookieManager
 from DMR.EmojiPack import bilibili as emoji_bilibili, douyin as emoji_douyin, douyu as emoji_douyu, common as emoji_common
@@ -247,32 +253,47 @@ class WebApi:
         def logs_page():
             return render_template('logs.html')
 
-        @app.route('/api/console')
-        @self.login_required
-        def api_console():
-            try:
-                lines = min(2000, int(request.args.get('lines', 500)))
-            except ValueError:
-                lines = 500
-            return {'lines': get_console_lines(lines), 'notifications': self.get_notifications()}
-
         @app.route('/api/console/stream')
         @self.login_required
         def api_console_stream():
-            """SSE 日志：历史一次性发送，之后逐行推送实时日志。"""
+            """带序号的 SSE 日志，断线后从 Last-Event-ID 继续。"""
+            try:
+                last_id = int(request.headers.get('Last-Event-ID', request.args.get('last_id', '0')) or 0)
+            except ValueError:
+                last_id = 0
             def gen():
-                q, history = console_subscribe(5000)
+                q, history = console_subscribe(5000, last_id)
                 try:
-                    yield f'event: history\ndata: {json.dumps(history)}\n\n'
+                    final_id = history[-1]['id'] if history else last_id
+                    yield f'id: {final_id}\nevent: history\ndata: {json.dumps(history, ensure_ascii=False)}\n\n'
                     while True:
                         try:
-                            yield f'data: {json.dumps(q.get(timeout=15))}\n\n'
+                            item = q.get(timeout=15)
+                            yield f'id: {item["id"]}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n'
                         except queue.Empty:
                             yield ': ping\n\n'   # 心跳，防连接被中途判超时断开
                 finally:
                     console_unsubscribe(q)
             return Response(gen(), mimetype='text/event-stream',
                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+        @app.route('/api/console/history')
+        @self.login_required
+        def api_console_history():
+            try:
+                before = int(request.args.get('before', '0') or 0)
+                limit = min(CONSOLE_MEMORY_LINES, max(1, int(request.args.get('limit', '500') or 500)))
+            except ValueError:
+                return {'error': 'invalid pagination'}, 400
+            payload = json.dumps(
+                {'lines': get_console_history(before, limit)},
+                ensure_ascii=False,
+            ).encode('utf-8')
+            return Response(
+                gzip.compress(payload),
+                mimetype='application/json',
+                headers={'Content-Encoding': 'gzip', 'Cache-Control': 'no-cache'},
+            )
 
         @app.route('/api/notifications')
         @self.login_required
@@ -745,25 +766,24 @@ class WebApi:
                         status = 1   # 录制中
                     else:
                         status = 0   # 未开播/离线
-                    duration = "未开播"
-                    live_duration = ""   # 从本场开播到现在的录制时长
-
+                    # 已录制秒数交给浏览器按收到时刻继续累加，不依赖客户端时钟与服务器一致
+                    segment_elapsed = live_elapsed = None
                     if status == 1:
                         now = datetime.now()
                         seg_start = getattr(task, 'segment_start_time', None)
                         live_start = getattr(task, 'live_start_time', None)
                         if seg_start:
-                            duration = str(now - seg_start).split('.')[0]
+                            segment_elapsed = int((now - seg_start).total_seconds())
                         if live_start:
-                            live_duration = str(now - live_start).split('.')[0]
+                            live_elapsed = int((now - live_start).total_seconds())
 
                     recording_tasks.append({
                         'name': taskname,
                         'platform': task.plat,
                         'url': task.url,
                         'status': status,
-                        'duration': duration,
-                        'live_duration': live_duration,
+                        'segment_elapsed': segment_elapsed,
+                        'live_elapsed': live_elapsed,
                         'next_check_remaining': _remaining_seconds(
                             getattr(task, 'next_check_deadline', None)),
                         'stop_wait_remaining': _remaining_seconds(
