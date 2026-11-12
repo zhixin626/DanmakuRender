@@ -35,3 +35,22 @@ DMR-**.yml
 
 # 字幕编辑器已独立到 D:\Editor字幕编辑器，不随本项目发布
 /editor/
+perf/tmp/
+perf/venv/
+perf/samples/
+perf/outputs/
+/演示视频/
+# Local performance fixtures copied from the user machine; never commit large binary packs/configs.
+/emoji_pack/
+/perf/configs_snapshot/
+/**/__pycache__/
+
+# Renderer unit tests and their small visual regression fixtures.
+!/tests/
+!/tests/*.py
+!/tests/references/
+!/tests/references/*.png
+!/tests/references/*.json
+!/tests/references/flicker/
+!/tests/references/flicker/*.png
+!/tests/references/flicker/*.json

@@ -344,5 +344,24 @@ class Config():
     def get_task_config(self, taskname):
         return self.task_configs.get(taskname)
 
+    def get_render_args(self, taskname, mode="overlay"):
+        """Resolve offline render settings, including a deliberately disabled task."""
+        path = next(
+            (
+                path
+                for path in self.task_config_files()
+                if filename_to_taskname(path) == taskname
+            ),
+            None,
+        )
+        if path is None:
+            raise ValueError(f"找不到任务配置: {taskname}")
+        with open(path, encoding="utf-8") as stream:
+            task = yaml.safe_load(stream) or {}
+        return merge_dict(
+            self.global_config["render_args"][mode],
+            (task.get("render_args") or {}).get(mode) or {},
+        )
+
     def get_task_names(self):
         return list(self.task_configs.keys())

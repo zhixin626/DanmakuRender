@@ -1,7 +1,8 @@
-# 核心依赖：录制 / 弹幕 / 渲染 / 上传 / 清理 / WebUI
-# 字幕编辑器与语音识别字幕为可选功能，依赖体积很大，见文件末尾。
+# DMR dependencies: recording / danmaku / rendering (CPU + NVIDIA GPU) / upload / cleanup / WebUI
+# Tested with Python 3.12 on Windows x64. Keep this file ASCII-only:
+# pip on Chinese Windows reads requirement files with the GBK locale codec.
 
-# ── 网络 / 协议 ──
+# -- Network / protocols --
 requests
 aiohttp
 httpx
@@ -15,13 +16,13 @@ m3u8
 jsengine
 quickjs
 
-# ── 直播流下载 ──
+# -- Live stream download --
 stream-gears
 streamlink
 yt-dlp
 yutto
 
-# ── 配置 / 工具 ──
+# -- Config / utilities --
 pyyaml
 easydict
 python-dotenv
@@ -30,33 +31,33 @@ tqdm
 colorama
 colorlog
 wcwidth
+psutil==7.2.2
 tree-sitter>=0.25
 tree-sitter-javascript>=0.23
 
-# ── WebUI ──
+# -- WebUI --
 flask
 
-# ── 渲染（弹幕 / 彩色 emoji / 封面）──
-pillow
-numpy
-av
+# -- Rendering (danmaku / color emoji / covers); versions pinned to the tested GPU set --
+pillow==11.3.0
+numpy==2.5.4
+av==15.1.0
 matplotlib
 fonttools
 opencv-python
 
-# ── 登录（扫码；装完还需执行 playwright install chromium）──
+# -- NVIDIA GPU renderer (engine: gpu_render) --
+# Needs an NVIDIA GPU, a recent driver and FFmpeg/ffprobe on PATH; see README-gpu.md.
+cupy-cuda12x==14.2.0
+pynvvideocodec==2.2.4
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-cuda-runtime-cu12==12.9.79
+
+# -- Login (QR code; afterwards run: playwright install chromium) --
 playwright
 
-# ── Windows 专用（回收站 / 资源管理器）──
+# -- Windows only (recycle bin / explorer) --
 pywin32; sys_platform == "win32"
 
-
-# ════════════════════════════════════════════════════════════════════
-# 可选功能，按需单独安装：
-#
-#   字幕编辑器 (editor/qt.py)
-#       pip install -r requirements-editor.txt
-#
-#   语音识别字幕 (配置 subtitle.enable: true)
-#       pip install -r requirements-asr.txt
-# ════════════════════════════════════════════════════════════════════
+# -- Tests (python -m pytest tests -q) --
+pytest>=8

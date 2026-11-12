@@ -96,14 +96,14 @@ class WebApi:
         self.send_queue, self.recv_queue = pipe
         self.engine = engine
         self.kwargs = kwargs
-        
+
         # WebAPI Config
         self.host = host
         self.port = port
         self.force_login = force_login
         self.username = username
         self.password = password
-        
+
         # 强制使用高强度随机密钥，每次启动自动生成，极大提高安全性
         # 注意：这意味着每次重启程序后，所有已登录用户都需要重新登录
         self.secret_key = secrets.token_hex(32)
@@ -131,7 +131,7 @@ class WebApi:
         # Silence Flask/Werkzeug non-error logs
         log = logging.getLogger('werkzeug')
         log.setLevel(logging.ERROR)
-        
+
         app = Flask(__name__, template_folder='templates')
         app.secret_key = self.secret_key
         app.logger = self.logger
@@ -196,6 +196,17 @@ class WebApi:
                 result = result.strip().strip('"\'').strip()
             if not taskname or not hold_id:
                 return 'missing task/hold_id', 400
+            if str(hold_id).startswith("render:"):
+                renderer, task_id = self._failed_render(taskname, hold_id)
+                if renderer is None:
+                    return "失败任务不存在或已被处理", 404
+                if result != "__ignore__":
+                    return "独立渲染任务请使用重试或忽略", 400
+                return (
+                    ("success", 200)
+                    if renderer.delete_failed_task(task_id)
+                    else ("任务已开始处理", 409)
+                )
             # 提交前校验，当场打回错误：render/merge 回传的必须是真实存在的视频文件，
             # 否则错误路径会流进管线，在下游的上传/合并处炸出难排查的失败
             info = (getattr(self.engine, 'task_dict', {}) or {}).get(taskname) if self.engine else None
@@ -222,6 +233,15 @@ class WebApi:
             taskname, hold_id = req.get('task'), req.get('hold_id')
             if not taskname or not hold_id:
                 return 'missing task/hold_id', 400
+            if str(hold_id).startswith("render:"):
+                renderer, task_id = self._failed_render(taskname, hold_id)
+                if renderer is None:
+                    return "失败任务不存在或已被处理", 404
+                return (
+                    ("success", 200)
+                    if renderer.retry_task(task_id)
+                    else ("任务已开始处理", 409)
+                )
             self.send_queue.put(PipeMessage(
                 source='webservice', target=f'replay/{taskname}', event='retry',
                 data={'hold_id': hold_id},
@@ -711,6 +731,16 @@ class WebApi:
 
         return app
 
+    def _failed_render(self, taskname, hold_id):
+        renderer = (
+            (getattr(self.engine, "plugin_dict", {}) or {}).get("render") or {}
+        ).get("class")
+        task_id = str(hold_id).partition(":")[2]
+        task = (getattr(renderer, "failed_tasks", {}) or {}).get(task_id)
+        if not task or _disp_task(task.get("source")) != taskname:
+            return None, None
+        return renderer, task_id
+
     def get_tasks_data(self):
         # Get Recording Tasks
         recording_tasks = []
@@ -855,6 +885,29 @@ class WebApi:
                         'time'   : t.strftime('%Y-%m-%d %H:%M:%S') if hasattr(t, 'strftime') else '',
                     })
 
+        renderer = (
+            (getattr(self.engine, "plugin_dict", {}) or {}).get("render") or {}
+        ).get("class")
+        for task_id, task in list(
+            (getattr(renderer, "failed_tasks", {}) or {}).items()
+        ):
+            if task_id in renderer.render_tasks:
+                continue
+            video = task.get("video")
+            held_tasks_list.append(
+                {
+                    "task": _disp_task(task.get("source")),
+                    "hold_id": f"render:{task_id}",
+                    "stage": "render",
+                    "independent_render": True,
+                    "time": "",
+                    "info": {
+                        "flv": getattr(video, "path", None),
+                        "danmaku": getattr(video, "dm_file_id", None),
+                        "error": task.get("error", "已停止，可独立重试"),
+                    },
+                }
+            )
         return {
             'recording_tasks'   : recording_tasks,
             # 四个阶段队列：每个含 active(进行中,带%/倒计时) + done(已完成子集)
@@ -903,6 +956,13 @@ class WebApi:
             for info in (getattr(self.engine, 'task_dict', {}).values() if self.engine else []):
                 ev = getattr(info.get('class'), 'event_class', None)
                 n['failed'] += len(getattr(ev, 'held_tasks', {}) or {})
+            renderer = (
+                (getattr(self.engine, "plugin_dict", {}) or {}).get("render") or {}
+            ).get("class")
+            n["failed"] += sum(
+                task_id not in renderer.render_tasks
+                for task_id in list(getattr(renderer, "failed_tasks", {}) or {})
+            )
         except Exception:
             pass
         try:
@@ -930,6 +990,6 @@ class WebApi:
 
     def stop(self):
         self.stoped = True
-        # Flask doesn't have a clean stop method when running with .run(), 
+        # Flask doesn't have a clean stop method when running with .run(),
         # but since it's a daemon thread, it will die when main process dies.
         # Alternatively, we could use a production server like waitress/gunicorn but that adds dependencies.

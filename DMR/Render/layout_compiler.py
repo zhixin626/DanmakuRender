@@ -14,31 +14,86 @@ from DMR.utils import replace_keywords
 from DMR.utils.text_width import TextMeasurer
 
 from .emoji_width import EmojiWidthMeasurer
-from .layout_models import LayoutState, RenderPlan
+from .layout_models import (
+    LayoutState,
+    RenderPlan,
+    TRACK_R2L,
+    TRACK_SLIDE_LEFT,
+    TRACK_SLIDE_RIGHT,
+    EVENT_TRACKS,
+)
 from .resolution import resolve_render_canvas
 
 
 SUPPORTED_SCHEMA = 1
 logger = logging.getLogger(__name__)
 
+_CONTROL_TO_SPACE = {
+    *"\r\n\t\v\f",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",
+    "\u2028",
+    "\u2029",
+}
+_FORMAT_TO_REMOVE = {
+    "\u180e",
+    "\u200b",
+    "\u00ad",
+    "\u2060",
+    "\ufeff",
+}
+_BIDI_TO_REMOVE = {
+    *map(chr, range(0x202A, 0x202F)),
+    *map(chr, range(0x2066, 0x206A)),
+}
+_VISIBLE_SPACE_CHARS = {
+    "\u00a0",
+    *map(chr, range(0x2000, 0x200B)),
+    "\u202f",
+    "\u205f",
+    "\u3000",
+    "\u3164",
+    "\u115f",
+    "\u1160",
+    "\uffa0",
+    "\u2800",
+}
+DISPLAY_FIELDS = (
+    "uname",
+    "content",
+    "gift_name",
+    "member_name",
+    "member_unit",
+    "message",
+    "title",
+    "text",
+)
+
+
+def clean_text(value) -> str:
+    """Normalize display text while preserving emoji and combining sequences."""
+    if value is None:
+        return ""
+    output = []
+    for char in str(value):
+        codepoint = ord(char)
+        if char in _CONTROL_TO_SPACE or char in _VISIBLE_SPACE_CHARS:
+            output.append(" ")
+        elif char in _FORMAT_TO_REMOVE or char in _BIDI_TO_REMOVE:
+            continue
+        elif codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
+            continue
+        else:
+            output.append(char)
+    return re.sub(r" +", " ", "".join(output)).strip()
+
+
 PANEL_ENTER_DURATION = 0.5
 PANEL_EXIT_DURATION = 0.5
 PANEL_PUSH_DURATION = 0.3
 PANEL_STACK_GAP = 10.0
-
-TRACK_R2L = "r2l"
-TRACK_SLIDE_LEFT = "slide_left"
-TRACK_SLIDE_RIGHT = "slide_right"
-
-# Event routing is intentionally fixed for now. Event configuration controls
-# content/filtering and optional platform overrides; track configuration
-# controls motion, geometry, colour policy and lifetime policy.
-EVENT_TRACKS = {
-    "danmaku": TRACK_R2L,
-    "superchat": TRACK_SLIDE_LEFT,
-    "gift": TRACK_SLIDE_RIGHT,
-    "member": TRACK_SLIDE_RIGHT,
-}
 
 # Fallback panel policies used only when a track omits its own ranges.
 # Ranges are left-closed and right-open; the last range has no upper bound.
@@ -109,6 +164,11 @@ def _hex_color(value, default="#FFFFFF") -> str:
     raw = str(value or default).lstrip("#")
     if len(raw) != 6:
         raw = str(default).lstrip("#")
+    else:
+        try:
+            int(raw, 16)
+        except ValueError:
+            raw = str(default).lstrip("#")
     return "#" + raw.upper()
 
 
@@ -267,6 +327,57 @@ def _quantity_suffix(value, unit="") -> str:
     return f" ×{count}{unit or ''}"
 
 
+def merge_gift_records(records, *, window_seconds=5.0):
+    """Merge gifts by user/name while adjacent messages stay within a window."""
+    ordered = sorted(
+        records,
+        key=lambda item: (
+            float(item.get("received_at", 0) or 0),
+            item.get("_line", 0),
+        ),
+    )
+    result = []
+    groups = {}
+    seen_tids = set()
+    for record in ordered:
+        if record.get("type") != "gift":
+            result.append(record)
+            continue
+        tid = record.get("tid")
+        if tid not in (None, ""):
+            if tid in seen_tids:
+                continue
+            seen_tids.add(tid)
+        uid = record.get("uid") or record.get("uname") or ""
+        name = record.get("gift_name") or ""
+        key = (uid, name)
+        when = float(record.get("received_at", 0) or 0)
+        previous = groups.get(key)
+        if previous is None or when - previous["_last_time"] > float(window_seconds):
+            merged = dict(record)
+            merged["gift_count"] = _positive_count(record.get("gift_count"))
+            merged["gift_states"] = [
+                (when, merged["gift_count"], float(record.get("price_cny") or 0))
+            ]
+            merged["_last_time"] = when
+            groups[key] = merged
+            result.append(merged)
+            continue
+        merged = previous
+        count = _positive_count(record.get("gift_count"))
+        merged["gift_count"] += count
+        merged["gift_states"].append(
+            (when, merged["gift_count"], float(record.get("price_cny") or 0))
+        )
+        merged["_last_time"] = when
+        merged["price_cny"] = float(merged.get("price_cny") or 0) + float(
+            record.get("price_cny") or 0
+        )
+    for record in result:
+        record.pop("_last_time", None)
+    return result
+
+
 def _optional_quantity_suffix(value, unit="") -> str:
     return "" if value is None else _quantity_suffix(value, unit)
 
@@ -371,17 +482,49 @@ def _clip_path(path: list, start: float, end: float) -> list:
     return result
 
 
+class CompileStats:
+    """Track accepted and dropped events without embedding counters in dispatch."""
+
+    def __init__(self):
+        self.track_stats = {
+            TRACK_R2L: {"accepted": 0, "dropped": 0},
+            TRACK_SLIDE_LEFT: {"accepted": 0, "dropped": 0},
+            TRACK_SLIDE_RIGHT: {"accepted": 0, "dropped": 0},
+        }
+        self.unrouted_dropped = 0
+
+    def accepted(self, track):
+        self.track_stats[track]["accepted"] += 1
+
+    def dropped(self, track):
+        if track in self.track_stats:
+            self.track_stats[track]["dropped"] += 1
+        else:
+            self.unrouted_dropped += 1
+
+    @property
+    def event_count(self):
+        return sum(item["accepted"] for item in self.track_stats.values())
+
+    @property
+    def dropped_count(self):
+        return sum(item["dropped"] for item in self.track_stats.values()) + self.unrouted_dropped
+
+
 class LayoutCompiler:
     """Compile typed JSONL events into a RenderPlan and the next LayoutState."""
 
     def __init__(
         self,
         layout_config: dict = None,
-        engine: str = "dmrender",
+        engine: str | None = None,
         engine_config: dict = None,
     ):
         self.config = layout_config or {}
-        self.engine = engine
+        from . import get_engine, DEFAULT_ENGINE
+
+        self.engine = engine if engine is not None else DEFAULT_ENGINE
+        self.engine_spec = get_engine(self.engine)
         self.engine_config = engine_config or {}
 
     def compile(
@@ -391,40 +534,70 @@ class LayoutCompiler:
         previous_state: LayoutState | dict | None = None,
         work_dir: str = None,
     ) -> LayoutCompileResult:
+        context = self._prepare_compile_context(
+            video, events_path, previous_state, work_dir
+        )
+        self._compile_records(context)
+        return self._finalize_compile(
+            context, context["new_r2l"], context["new_panels"]
+        )
+
+    def _prepare_compile_context(
+        self,
+        video,
+        events_path: str,
+        previous_state: LayoutState | dict | None,
+        work_dir: str,
+    ) -> dict:
         header, records = self._read_events(events_path)
+        context = {
+            "self": self,
+            "video": video,
+            "events_path": events_path,
+            "previous_state": previous_state,
+            "work_dir": work_dir,
+            "header": header,
+            "records": records,
+            "stats": CompileStats(),
+            "new_r2l": [],
+            "new_panels": {
+                TRACK_SLIDE_LEFT: [],
+                TRACK_SLIDE_RIGHT: [],
+            },
+        }
+        context.update(self._resolve_segment(video, header, previous_state))
+        context.update(self._build_render_context(header))
+        ordered_records = sorted(
+            records,
+            key=lambda item: (float(item.get("received_at", 0) or 0), item["_line"]),
+        )
+        gift_cfg = context["event_configs"].get("gift") or {}
+        context["ordered_records"] = merge_gift_records(
+            ordered_records,
+            window_seconds=float(gift_cfg.get("combo_window_seconds", 5) or 5),
+        )
+        return context
+
+    def _resolve_segment(self, video, header, previous_state) -> dict:
         source_resolution = resolve_render_canvas(
             getattr(video, "resolution", None),
             rescale_to_1080p=False,
         )
         raw_segment_start = float(header["segment_start_time"])
         duration = max(0.0, float(getattr(video, "duration", 0) or 0))
-
-        if isinstance(previous_state, LayoutState):
-            old_state = LayoutState.from_dict(
-                previous_state.to_dict(),
-                raw_segment_start,
-            )
-        else:
-            old_state = LayoutState.from_dict(
-                previous_state,
-                raw_segment_start,
-            )
+        old_state = LayoutState.from_dict(
+            previous_state.to_dict() if isinstance(previous_state, LayoutState) else previous_state,
+            raw_segment_start,
+        )
         current_canvas = resolve_render_canvas(
             source_resolution,
-            rescale_to_1080p=bool(
-                self.engine_config.get("rescale_to_1080p", False)
-            ),
-            rescale_orientation=self.engine_config.get(
-                "rescale_orientation", "auto"
-            ),
+            rescale_to_1080p=bool(self.engine_config.get("rescale_to_1080p", False)),
+            rescale_orientation=self.engine_config.get("rescale_orientation", "auto"),
             previous_canvas=old_state.canvas_resolution,
             previous_source_resolution=old_state.source_resolution,
         )
         width, height = current_canvas
-        if (
-            previous_state is not None
-            and old_state.canvas_resolution != current_canvas
-        ):
+        if previous_state is not None and old_state.canvas_resolution != current_canvas:
             logger.info(
                 "布局画布变化 %s → %s，放弃上一段布局状态",
                 old_state.canvas_resolution,
@@ -435,24 +608,11 @@ class LayoutCompiler:
                 canvas_resolution=current_canvas,
                 source_resolution=source_resolution,
             )
-
-        # The downloader records a wall-clock start in each JSONL, while render
-        # uses the video's packet timeline. Some containers report a shorter
-        # format duration than their real packet timeline, so the next JSONL
-        # may start slightly before the previous LayoutState ends. A rendered
-        # live timeline must never run backwards: collapse only this overlap,
-        # but preserve a positive real-world gap between two segments.
         segment_start = raw_segment_start
         if previous_state is not None and old_state.at > segment_start:
             segment_start = float(old_state.at)
         segment_time_shift = segment_start - raw_segment_start
         segment_end = segment_start + duration
-
-        # Stacked panels must be retained from the checkpoint time, including
-        # panels which expire in a recording gap.  Their exits still change the
-        # positions of surviving panels even though no frames are emitted for
-        # that gap.  Other tracks have no persistent stack state and can be
-        # filtered directly at the new segment boundary.
         state_events = [
             copy.deepcopy(event)
             for event in old_state.events
@@ -462,7 +622,12 @@ class LayoutCompiler:
                 else segment_start
             )
         ]
+        for event in state_events:
+            if (event.get("visual") or {}).get("type") == "panel":
+                event["mode"] = "raster" if self.engine_spec.panel_raster else "ass"
+        return locals()
 
+    def _build_render_context(self, header) -> dict:
         r2l_render = self.config.get(TRACK_R2L) or {}
         slide_left_render = self.config.get(TRACK_SLIDE_LEFT) or {}
         slide_right_render = self.config.get(TRACK_SLIDE_RIGHT) or {}
@@ -476,7 +641,6 @@ class LayoutCompiler:
             "superchat": sc_render,
             "member": member_render,
         }
-
         font = dan_render.get("font", "Microsoft YaHei")
         fontsize = int(dan_render.get("fontsize", 36) or 36)
         text_measurer = TextMeasurer(font, fontsize, bold=True)
@@ -490,6 +654,7 @@ class LayoutCompiler:
         style = {
             "font": font,
             "size": fontsize,
+            "bold": bool(dan_render.get("bold", True)),
             "color": "#FFFFFF",
             "opacity": float(dan_render.get("opacity", 0.8) or 0.8),
             "outline": _pixels(dan_render.get("outline_size"), 1.0),
@@ -497,7 +662,6 @@ class LayoutCompiler:
                 dan_render.get("outline_color", "000000"), "#000000"
             ),
         }
-
         vip_map = _build_vip_map(dan_render.get("vip_users"))
         keyword_patterns = _compile_patterns(dan_render.get("filter_keywords"))
         username_patterns = _compile_patterns(dan_render.get("filter_users"))
@@ -508,217 +672,231 @@ class LayoutCompiler:
             if isinstance(raw_includes, (list, tuple, set))
             else set(EVENT_TRACKS)
         )
+        return locals()
 
-        track_stats = {
-            TRACK_R2L: {"accepted": 0, "dropped": 0},
-            TRACK_SLIDE_LEFT: {"accepted": 0, "dropped": 0},
-            TRACK_SLIDE_RIGHT: {"accepted": 0, "dropped": 0},
-        }
-        unrouted_dropped = 0
-
-        def mark_accepted(track):
-            track_stats[track]["accepted"] += 1
-
-        def mark_dropped(track):
-            nonlocal unrouted_dropped
-            if track in track_stats:
-                track_stats[track]["dropped"] += 1
-            else:
-                unrouted_dropped += 1
-
-        new_r2l = []
-        new_panels = {
-            TRACK_SLIDE_LEFT: [],
-            TRACK_SLIDE_RIGHT: [],
-        }
-        ordered_records = sorted(
-            records,
-            key=lambda item: (float(item.get("received_at", 0) or 0), item["_line"]),
-        )
-
-        for record in ordered_records:
+    def _compile_records(self, context: dict):
+        stats = context["stats"]
+        for record in context["ordered_records"]:
             event_type = record.get("type")
             event_track = EVENT_TRACKS.get(event_type)
-            if event_type not in included_events or event_track is None:
-                mark_dropped(event_track)
+            if (
+                event_type not in context["included_events"]
+                or event_track is None
+            ):
+                stats.dropped(event_track)
                 continue
-            event_cfg = event_configs.get(event_type) or {}
+            event_cfg = context["event_configs"].get(event_type) or {}
             if not _event_is_enabled(record, event_cfg):
-                mark_dropped(event_track)
+                stats.dropped(event_track)
                 continue
             try:
-                # Keep the event's segment-local time unchanged when an
-                # overlapping segment origin was moved forward.
-                start_at = float(record["received_at"]) + segment_time_shift
+                start_at = (
+                    float(record["received_at"]) + context["segment_time_shift"]
+                )
             except (KeyError, TypeError, ValueError):
-                mark_dropped(event_track)
+                stats.dropped(event_track)
                 continue
-            if duration > 0 and start_at >= segment_end + 1:
-                mark_dropped(event_track)
+            if (
+                context["duration"] > 0
+                and start_at >= context["segment_end"] + 1
+            ):
+                stats.dropped(event_track)
                 continue
+            self._compile_record(context, record, event_type, event_track, start_at)
 
-            event_id = self._event_id(video, events_path, record["_line"])
-            if event_type == "danmaku":
-                prepared = self._prepare_line(
-                    record=record,
-                    event_id=event_id,
-                    start_at=start_at,
-                    width=width,
-                    height=height,
-                    dan_render=dan_render,
-                    style=style,
-                    vip_map=vip_map,
-                    keyword_patterns=keyword_patterns,
-                    username_patterns=username_patterns,
-                    max_length=max_length,
-                    text_measurer=text_measurer,
-                    emoji_measurer=emoji_measurer,
-                )
-                if prepared is None:
-                    mark_dropped(event_track)
-                    continue
-                new_r2l.append(prepared)
-                continue
+    def _compile_record(
+        self,
+        context: dict,
+        record: dict,
+        event_type: str,
+        event_track: str,
+        start_at: float,
+    ) -> None:
+        stats = context["stats"]
+        event_id = self._event_id(
+            context["video"], context["events_path"], record["_line"]
+        )
+        if event_type == "danmaku":
+            prepared = self._compile_danmaku(
+                record=record,
+                event_id=event_id,
+                start_at=start_at,
+                width=context["width"],
+                height=context["height"],
+                dan_render=context["dan_render"],
+                style=context["style"],
+                vip_map=context["vip_map"],
+                keyword_patterns=context["keyword_patterns"],
+                username_patterns=context["username_patterns"],
+                max_length=context["max_length"],
+                text_measurer=context["text_measurer"],
+                emoji_measurer=context["emoji_measurer"],
+                scroll_vertical_gap=_pixels(
+                    context["r2l_render"].get("vertical_gap"), 6.0
+                ),
+            )
+            if prepared is None:
+                stats.dropped(event_track)
+            else:
+                context["new_r2l"].append(prepared)
+            return
+        if event_type == "gift":
+            panels = self._compile_gift(
+                record=record,
+                event_id=event_id,
+                event_track=event_track,
+                segment_time_shift=context["segment_time_shift"],
+                width=context["width"],
+                height=context["height"],
+                gift_render=context["gift_render"],
+                slide_right_render=context["slide_right_render"],
+                emoji_measurer=context["emoji_measurer"],
+            )
+            context["new_panels"][event_track].extend(panels)
+            for _ in panels:
+                stats.accepted(event_track)
+            return
+        if event_type not in ("member", "superchat"):
+            stats.dropped(event_track)
+            return
+        self._compile_panel_record(context, record, event_type, event_track, start_at)
 
-            if event_type == "gift":
-                display_record = dict(record)
-                display_record["gift_count_suffix"] = _quantity_suffix(
-                    record.get("gift_count")
-                )
-                content = self._format_template(
-                    gift_render.get("template"),
-                    display_record,
-                    (
-                        f"送出 {record.get('gift_name', '')}"
-                        f"{display_record['gift_count_suffix']}"
-                    ),
-                )
-                panel = self._prepare_panel(
-                    event_id,
-                    event_track,
-                    start_at,
-                    _panel_duration(record, gift_render, slide_right_render),
-                    record.get("uname", ""),
-                    content,
-                    width,
-                    height,
-                    gift_render,
-                    slide_right_render,
-                    panel_class="gift",
-                    record=record,
-                )
-                new_panels[event_track].append(panel)
-                mark_accepted(event_track)
-                continue
+    def _compile_panel_record(
+        self,
+        context: dict,
+        record: dict,
+        event_type: str,
+        event_track: str,
+        start_at: float,
+    ) -> None:
+        event_id = self._event_id(
+            context["video"], context["events_path"], record["_line"]
+        )
+        if event_type == "member":
+            panel = self._compile_member(
+                record=record,
+                event_id=event_id,
+                event_track=event_track,
+                start_at=start_at,
+                width=context["width"],
+                height=context["height"],
+                member_render=context["member_render"],
+                slide_right_render=context["slide_right_render"],
+                emoji_measurer=context["emoji_measurer"],
+            )
+        else:
+            panel = self._compile_superchat(
+                record=record,
+                event_id=event_id,
+                event_track=event_track,
+                start_at=start_at,
+                width=context["width"],
+                height=context["height"],
+                sc_render=context["sc_render"],
+                slide_left_render=context["slide_left_render"],
+                emoji_measurer=context["emoji_measurer"],
+            )
+        if panel is None:
+            context["stats"].dropped(event_track)
+            return
+        context["new_panels"][event_track].append(panel)
+        context["stats"].accepted(event_track)
 
-            if event_type == "member":
-                display_record = dict(record)
-                display_record["member_count_suffix"] = _optional_quantity_suffix(
-                    record.get("member_count"),
-                    record.get("member_unit", ""),
-                )
-                content = self._format_template(
-                    member_render.get("template"),
-                    display_record,
-                    (
-                        f"开通 {record.get('member_name', '')}"
-                        f"{display_record['member_count_suffix']}"
-                    ),
-                )
-                panel = self._prepare_panel(
-                    event_id,
-                    event_track,
-                    start_at,
-                    _panel_duration(record, member_render, slide_right_render),
-                    record.get("uname", ""),
-                    content,
-                    width,
-                    height,
-                    member_render,
-                    slide_right_render,
-                    panel_class="member",
-                    record=record,
-                )
-                new_panels[event_track].append(panel)
-                mark_accepted(event_track)
-                continue
-
-            if event_type == "superchat":
-                panel = self._prepare_panel(
-                    event_id,
-                    event_track,
-                    start_at,
-                    _panel_duration(record, sc_render, slide_left_render),
-                    record.get("uname", ""),
-                    str(record.get("content", "") or ""),
-                    width,
-                    height,
-                    sc_render,
-                    slide_left_render,
-                    panel_class="superchat",
-                    record=record,
-                )
-                new_panels[event_track].append(panel)
-                mark_accepted(event_track)
-                continue
-
-            mark_dropped(event_track)
-
+    def _layout_tracks(self, context: dict):
+        state_events = context["state_events"]
         active_r2l = [
             event for event in state_events
             if event.get("track") == TRACK_R2L
         ]
-        for event in sorted(new_r2l, key=lambda item: _path_start(item)):
+        for event in sorted(context["new_r2l"], key=lambda item: _path_start(item)):
             if self._place_r2l(
                 event,
                 active_r2l,
-                width,
-                height,
-                dan_render,
-                r2l_render,
+                context["width"],
+                context["height"],
+                context["dan_render"],
+                context["r2l_render"],
             ):
                 active_r2l.append(event)
                 state_events.append(event)
-                mark_accepted(TRACK_R2L)
+                context["stats"].accepted(TRACK_R2L)
             else:
-                mark_dropped(TRACK_R2L)
-
-        track_configs = {
-            TRACK_SLIDE_LEFT: slide_left_render,
-            TRACK_SLIDE_RIGHT: slide_right_render,
-        }
+                context["stats"].dropped(TRACK_R2L)
         next_track_orders = {}
+        track_configs = {
+            TRACK_SLIDE_LEFT: context["slide_left_render"],
+            TRACK_SLIDE_RIGHT: context["slide_right_render"],
+        }
         for track, track_render in track_configs.items():
-            existing = [event for event in state_events if event.get("track") == track]
+            existing = [
+                event for event in state_events if event.get("track") == track
+            ]
             combined, track_order = self._layout_stacked_panels(
                 track=track,
                 existing=existing,
-                newcomers=new_panels[track],
-                state_at=old_state.at,
-                initial_order=old_state.track_orders.get(track),
-                segment_start=segment_start,
-                segment_end=segment_end,
-                width=width,
-                height=height,
+                newcomers=self._coalesce_gift_states(
+                    context["new_panels"][track]
+                ),
+                state_at=context["old_state"].at,
+                initial_order=context["old_state"].track_orders.get(track),
+                segment_start=context["segment_start"],
+                segment_end=context["segment_end"],
+                width=context["width"],
+                height=context["height"],
                 track_cfg=track_render,
             )
-            next_track_orders[track] = track_order
-            state_events = [event for event in state_events if event.get("track") != track]
+            representative_by_id = {
+                str(event.get("id")): event for event in combined
+            }
+            combined = self._expand_gift_states(combined)
+            expanded_by_group = {}
+            for event in combined:
+                group = event.get("gift_state_group")
+                if group:
+                    expanded_by_group.setdefault(group, []).append(event)
+            mapped_order = []
+            for event_id in track_order:
+                representative = representative_by_id.get(str(event_id))
+                group = (
+                    representative.get("gift_state_group")
+                    if representative
+                    else None
+                )
+                candidates = expanded_by_group.get(group, []) if group else []
+                mapped_order.append(
+                    str(candidates[-1].get("id"))
+                    if candidates
+                    else str(event_id)
+                )
+            next_track_orders[track] = mapped_order
+            state_events = [
+                event for event in state_events if event.get("track") != track
+            ]
             state_events.extend(combined)
+        return state_events, next_track_orders
 
+    def _build_result(
+        self,
+        context: dict,
+        state_events: list,
+        next_track_orders: dict,
+    ) -> LayoutCompileResult:
+        segment_start = context["segment_start"]
+        segment_end = context["segment_end"]
         plan_events = []
         for state_event in state_events:
-            local_path = _clip_path(state_event.get("path") or [], segment_start, segment_end)
+            local_path = _clip_path(
+                state_event.get("path") or [], segment_start, segment_end
+            )
             if len(local_path) < 2:
                 continue
             plan_event = {
                 key: copy.deepcopy(value)
                 for key, value in state_event.items()
-                if key != "track" and not key.startswith("_")
+                if not key.startswith("_")
             }
             plan_event["path"] = local_path
             plan_events.append(plan_event)
-
         next_events = [
             copy.deepcopy(event)
             for event in state_events
@@ -730,39 +908,295 @@ class LayoutCompiler:
             events=next_events,
             track_orders={
                 track: [
-                    event_id
-                    for event_id in order
-                    if event_id in live_ids
+                    event_id for event_id in order if event_id in live_ids
                 ]
                 for track, order in next_track_orders.items()
             },
-            canvas_resolution=current_canvas,
-            source_resolution=source_resolution,
+            canvas_resolution=context["current_canvas"],
+            source_resolution=context["source_resolution"],
         )
-        plan = RenderPlan(duration=duration, events=plan_events)
-        accepted = sum(stats["accepted"] for stats in track_stats.values())
-        dropped = (
-            sum(stats["dropped"] for stats in track_stats.values())
-            + unrouted_dropped
+        plan = RenderPlan(
+            duration=context["duration"],
+            events=plan_events,
+            platform=context["header"].get("platform"),
         )
-
-        os.makedirs(work_dir or tempfile.gettempdir(), exist_ok=True)
+        os.makedirs(context["work_dir"] or tempfile.gettempdir(), exist_ok=True)
         fd, plan_path = tempfile.mkstemp(
             prefix="render_plan_",
             suffix=".json",
-            dir=work_dir or None,
+            dir=context["work_dir"] or None,
         )
         os.close(fd)
         plan.save(plan_path)
+        stats = context["stats"]
         return LayoutCompileResult(
             render_plan_path=plan_path,
             next_state=next_state,
-            event_count=accepted,
-            dropped_count=dropped,
-            track_stats=track_stats,
-            unrouted_dropped_count=unrouted_dropped,
+            event_count=stats.event_count,
+            dropped_count=stats.dropped_count,
+            track_stats=stats.track_stats,
+            unrouted_dropped_count=stats.unrouted_dropped,
             cleanup_paths=[plan_path],
         )
+
+    def _finalize_compile(
+        self,
+        context: dict,
+        new_r2l: list,
+        new_panels: dict,
+    ) -> LayoutCompileResult:
+        context["new_r2l"] = new_r2l
+        context["new_panels"] = new_panels
+        state_events, next_track_orders = self._layout_tracks(context)
+        return self._build_result(context, state_events, next_track_orders)
+
+    def _compile_danmaku(
+        self,
+        *,
+        record: dict,
+        event_id: str,
+        start_at: float,
+        width: int,
+        height: int,
+        dan_render: dict,
+        style: dict,
+        vip_map: dict,
+        keyword_patterns: list,
+        username_patterns: list,
+        max_length: int | None,
+        text_measurer,
+        emoji_measurer,
+        scroll_vertical_gap: float,
+    ) -> dict | None:
+        """Compile one scrolling danmaku record without changing placement."""
+        return self._prepare_line(
+            record=record,
+            event_id=event_id,
+            start_at=start_at,
+            width=width,
+            height=height,
+            dan_render=dan_render,
+            style=style,
+            vip_map=vip_map,
+            keyword_patterns=keyword_patterns,
+            username_patterns=username_patterns,
+            max_length=max_length,
+            text_measurer=text_measurer,
+            emoji_measurer=emoji_measurer,
+            scroll_vertical_gap=scroll_vertical_gap,
+        )
+
+    def _compile_gift(
+        self,
+        *,
+        record: dict,
+        event_id: str,
+        event_track: str,
+        segment_time_shift: float,
+        width: int,
+        height: int,
+        gift_render: dict,
+        slide_right_render: dict,
+        emoji_measurer,
+    ) -> list[dict]:
+        """Compile all contiguous quantity states for one merged gift."""
+        states = record.get("gift_states") or []
+        state_records = []
+        cumulative_price = 0.0
+        for state_time, state_count, state_price in states:
+            cumulative_price += float(state_price or 0)
+            state_record = dict(record)
+            state_record["received_at"] = state_time
+            state_record["gift_count"] = state_count
+            state_record["price_cny"] = cumulative_price
+            state_records.append(state_record)
+        if not state_records:
+            state_records = [record]
+        final_duration = _panel_duration(record, gift_render, slide_right_render)
+        panels = []
+        for state_index, state_record in enumerate(state_records):
+            state_start = float(state_record["received_at"]) + segment_time_shift
+            if state_index + 1 < len(state_records):
+                state_end = float(state_records[state_index + 1]["received_at"]) + segment_time_shift
+            else:
+                state_end = state_start + final_duration
+            state_duration = max(0.1, state_end - state_start)
+            display_record = dict(state_record)
+            display_record["gift_count_suffix"] = _quantity_suffix(
+                state_record.get("gift_count")
+            )
+            content = self._format_template(
+                gift_render.get("template"),
+                display_record,
+                (
+                    f"送出 {record.get('gift_name', '')}"
+                    f"{display_record['gift_count_suffix']}"
+                ),
+            )
+            panel = self._prepare_panel(
+                event_id if len(state_records) == 1 else f"{event_id}:state{state_index}",
+                event_track,
+                state_start,
+                state_duration,
+                record.get("uname", ""),
+                content,
+                width,
+                height,
+                gift_render,
+                slide_right_render,
+                panel_class="gift",
+                record=display_record,
+                emoji_measurer=emoji_measurer,
+            )
+            if panel is None:
+                continue
+            panel["_gift_state_index"] = state_index
+            if len(state_records) > 1:
+                panel["gift_state_group"] = event_id
+            panels.append(panel)
+        return panels
+
+    def _compile_member(
+        self,
+        *,
+        record: dict,
+        event_id: str,
+        event_track: str,
+        start_at: float,
+        width: int,
+        height: int,
+        member_render: dict,
+        slide_right_render: dict,
+        emoji_measurer,
+    ) -> dict | None:
+        """Compile one membership panel using the shared slide-right layout."""
+        display_record = dict(record)
+        display_record["member_count_suffix"] = _optional_quantity_suffix(
+            record.get("member_count"),
+            record.get("member_unit", ""),
+        )
+        content = self._format_template(
+            member_render.get("template"),
+            display_record,
+            (
+                f"开通 {record.get('member_name', '')}"
+                f"{display_record['member_count_suffix']}"
+            ),
+        )
+        return self._prepare_panel(
+            event_id,
+            event_track,
+            start_at,
+            _panel_duration(record, member_render, slide_right_render),
+            record.get("uname", ""),
+            content,
+            width,
+            height,
+            member_render,
+            slide_right_render,
+            panel_class="member",
+            record=record,
+            emoji_measurer=emoji_measurer,
+        )
+
+    def _compile_superchat(
+        self,
+        *,
+        record: dict,
+        event_id: str,
+        event_track: str,
+        start_at: float,
+        width: int,
+        height: int,
+        sc_render: dict,
+        slide_left_render: dict,
+        emoji_measurer,
+    ) -> dict | None:
+        """Compile one superchat panel using the slide-left layout."""
+        return self._prepare_panel(
+            event_id,
+            event_track,
+            start_at,
+            _panel_duration(record, sc_render, slide_left_render),
+            record.get("uname", ""),
+            str(record.get("content", "") or ""),
+            width,
+            height,
+            sc_render,
+            slide_left_render,
+            panel_class="superchat",
+            record=record,
+            emoji_measurer=emoji_measurer,
+        )
+
+    @staticmethod
+    def _coalesce_gift_states(events):
+        """Let one gift state group occupy one stacked-panel slot."""
+        grouped = {}
+        result = []
+        for event in events:
+            group = event.get("gift_state_group")
+            if not group:
+                result.append(event)
+                continue
+            grouped.setdefault(group, []).append(event)
+        for group_events in grouped.values():
+            ordered = sorted(
+                group_events,
+                key=lambda item: int(item.get("_gift_state_index", 0)),
+            )
+            representative = copy.deepcopy(ordered[0])
+            representative["_gift_state_panels"] = ordered
+            start = _path_start(ordered[0])
+            end = _path_start(ordered[-1]) + float(
+                ordered[-1].get("_duration", 0.1)
+            )
+            representative["path"] = [[start, 0.0, 0.0]]
+            representative["_duration"] = max(0.1, end - start)
+            result.append(representative)
+        return sorted(result, key=_path_start)
+
+    @staticmethod
+    def _expand_gift_states(events):
+        """Split one laid-out gift slot into contiguous number states."""
+        result = []
+        for event in events:
+            templates = event.pop("_gift_state_panels", None)
+            if not templates:
+                result.append(event)
+                continue
+            base_path = event.get("path") or []
+            base_motion = copy.deepcopy((event.get("visual") or {}).get("motion") or {})
+            ordered = sorted(
+                templates,
+                key=lambda item: int(item.get("_gift_state_index", 0)),
+            )
+            for index, template in enumerate(ordered):
+                state = copy.deepcopy(template)
+                start = _path_start(template)
+                end = start + float(template.get("_duration", 0.1))
+                points = []
+                timestamps = [float(point[0]) for point in base_path]
+                timestamps = [timestamp for timestamp in timestamps if start < timestamp < end]
+                timestamps = [start, *timestamps, end]
+                for timestamp in timestamps:
+                    x, y = _position_at(base_path, timestamp)
+                    points.append([timestamp, x, y])
+                state["path"] = points
+                visual = state.setdefault("visual", {})
+                motion = copy.deepcopy(base_motion)
+                motion["enter_duration"] = (
+                    float(base_motion.get("enter_duration", 0.0)) if index == 0 else 0.0
+                )
+                motion["exit_duration"] = (
+                    float(base_motion.get("exit_duration", 0.0))
+                    if index == len(ordered) - 1
+                    else 0.0
+                )
+                visual["motion"] = motion
+                state["_duration"] = max(0.1, end - start)
+                result.append(state)
+        return sorted(result, key=_path_start)
 
     def _prepare_line(
         self,
@@ -780,11 +1214,15 @@ class LayoutCompiler:
         max_length,
         text_measurer,
         emoji_measurer,
+        scroll_vertical_gap,
     ):
         content = str(record.get("content", "") or "")
-        uname = str(record.get("uname", "") or "")
+        uid = str(record.get("uid", "") or "")
+        uname = str(record.get("uname", "") or "") or uid
         if record.get("type") == "entry":
             content = content or f"{uname} 进入直播间"
+        if not content:
+            return None
         if any(pattern.search(content) for pattern in keyword_patterns):
             return None
         if any(pattern.fullmatch(uname) for pattern in username_patterns):
@@ -793,7 +1231,6 @@ class LayoutCompiler:
         template = dan_render.get("template")
         text = self._format_template(template, record, content)
         pill = None
-        uid = str(record.get("uid", ""))
         if uid in vip_map:
             text = f"{uname}:{content}"
             pill = {
@@ -807,7 +1244,7 @@ class LayoutCompiler:
         # 会走 libass，而带 Emoji 的 VIP 会走 Pillow，产生两套圆角、留白、
         # 描边透明度和文字基线。普通 dmrender 没有 Pillow 合成阶段，仍走 ASS。
         is_raster = (
-            self.engine == "emoji_dmrender" and pill is not None
+            self.engine_spec.raster and pill is not None
         ) or emoji_measurer.is_special(text, emoticon)
         measure = (
             (lambda value: emoji_measurer.measure(value, emoticon))
@@ -838,6 +1275,7 @@ class LayoutCompiler:
         visual = {
             "type": "line",
             "text": text,
+            "scroll_vertical_gap": scroll_vertical_gap,
             "style": {
                 **style,
                 "color": _hex_color(record.get("color"), "#FFFFFF"),
@@ -849,6 +1287,8 @@ class LayoutCompiler:
                 "ascent": content_ascent,
                 "descent": content_descent,
             }
+            if self.engine_config.get("fallback_fonts"):
+                visual["fallback_fonts"] = self.engine_config["fallback_fonts"]
         if pill:
             visual["pill"] = pill
         return {
@@ -883,17 +1323,18 @@ class LayoutCompiler:
                 / max(1.0, fontsize + vertical_gap)
             ),
         )
-        duration = max(
-            0.1,
-            float(
-                track_cfg.get(
-                    "screen_duration",
-                    track_cfg.get("duration", 16),
-                )
-                or 16
-            ),
-        )
-        speed = width / duration
+        speed = track_cfg.get("speed")
+        if speed is None:
+            duration = float(
+                track_cfg.get("screen_duration", track_cfg.get("duration", 16))
+            )
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError("r2l.screen_duration must be positive and finite")
+            # Legacy duration denotes travel across a 1920px landscape canvas.
+            speed = 1920.0 / duration
+        speed = float(speed)
+        if not math.isfinite(speed) or speed <= 0:
+            raise ValueError("r2l.speed must be positive and finite")
         start_at = float(event["path"][0][0])
         render_width = float(event["bounds"]["width"])
 
@@ -945,6 +1386,7 @@ class LayoutCompiler:
         *,
         panel_class,
         record=None,
+        emoji_measurer=None,
     ):
         def panel_setting(key, default=None):
             # Event-level visual keys are accepted for legacy configurations;
@@ -957,7 +1399,7 @@ class LayoutCompiler:
         fontsize = max(1, int(panel_setting("fontsize", 30) or 30))
         box_width = _panel_width(width, track_cfg.get("width", "25%"))
         top_height = 40
-        corner_radius = _pixels(panel_setting("corner_radius"), 40)
+        corner_radius = _pixels(panel_setting("corner_radius"), 20)
         box_outline = _pixels(panel_setting("box_border_width"), 1)
         box_outline_opacity = float(
             panel_setting("box_border_opacity", 0.45) or 0
@@ -965,15 +1407,50 @@ class LayoutCompiler:
         padding_top = 9
         padding_bottom = 14
         text_padding = 6
+        text_budget = box_width - 2 * text_padding
+        name_outline = _pixels(panel_setting("name_border_width"), 0)
+        content_outline = _pixels(panel_setting("content_border_width"), 1)
         measurer = TextMeasurer(font, fontsize, bold=True)
-        lines = measurer.wrap(str(content or ""), box_width - 2 * text_padding) or [""]
-        bottom_height = len(lines) * fontsize + padding_top + padding_bottom
+        name_measurer = measurer
+        if self.engine_spec.panel_raster:
+            from .sprites import PillowText
+
+            pack = emoji_measurer.pack if emoji_measurer is not None else {}
+            emoji_font = self.engine_config.get("emoji_font")
+            fallback_fonts = self.engine_config.get("fallback_fonts")
+            layout_engine = self.engine_config.get("layout_engine")
+            measurer = PillowText(
+                font,
+                fontsize,
+                content_outline,
+                pack,
+                emoji_font,
+                fallback_fonts,
+                layout_engine,
+            )
+            name_measurer = PillowText(
+                font,
+                fontsize,
+                name_outline,
+                pack,
+                emoji_font,
+                fallback_fonts,
+                layout_engine,
+            )
+        record = record or {}
+        content = str(content or "")
+        uname = str(uname or "") or str(record.get("uid", "") or "")
+        if not content:
+            return None
+        lines = measurer.wrap(content, text_budget) or [""]
+        line_height = fontsize
+        if self.engine_spec.panel_raster:
+            line_height = max(measurer.height(line, text_budget) for line in lines)
+        bottom_height = len(lines) * line_height + padding_top + padding_bottom
         total_height = top_height + bottom_height
         content = "\n".join(lines)
-        text_budget = box_width - 2 * text_padding
-        record = record or {}
         price_text = _panel_price_text(record)
-        price_width = measurer.measure(price_text)
+        price_width = min(text_budget, name_measurer.measure(price_text))
         name_price_gap = (
             max(12, int(round(box_width * 0.05))) if price_text else 0
         )
@@ -984,15 +1461,23 @@ class LayoutCompiler:
             render_cfg,
             track_cfg,
         )
-        uname = measurer.truncate(
-            str(uname or ""), name_budget, ellipsis="..."
-        )
+        uname = name_measurer.truncate(str(uname or ""), name_budget, ellipsis="...")
         top_opacity = float(panel_setting("top_opacity", 0.7) or 0.7)
         bottom_opacity = float(panel_setting("bottom_opacity", 0.3) or 0.3)
         name_opacity = content_opacity = 1.0
-        name_outline = _pixels(panel_setting("name_border_width"), 0)
-        content_outline = _pixels(panel_setting("content_border_width"), 1)
+        if self.engine_spec.panel_raster:
+            top_height = max(
+                top_height,
+                name_measurer.height(uname) + 10,
+                name_measurer.height(price_text, text_budget) + 10,
+            )
+            total_height = top_height + bottom_height
         name_outline_color = content_outline_color = "#000000"
+
+        def node_images(text_value):
+            if emoji_measurer is None:
+                return {}
+            return emoji_measurer.resolve_images(str(text_value or ""))
 
         nodes = [
             {
@@ -1038,6 +1523,7 @@ class LayoutCompiler:
                 "outline": name_outline,
                 "outline_color": name_outline_color,
                 "layer": 1,
+                "images": node_images(uname),
             },
         ]
         if price_text:
@@ -1055,6 +1541,7 @@ class LayoutCompiler:
                     "outline": name_outline,
                     "outline_color": name_outline_color,
                     "layer": 1,
+                    "images": node_images(price_text),
                 }
             )
         nodes.append(
@@ -1071,6 +1558,7 @@ class LayoutCompiler:
                 "outline": content_outline,
                 "outline_color": content_outline_color,
                 "layer": 1,
+                "images": node_images(content),
             }
         )
         visual = {
@@ -1078,10 +1566,20 @@ class LayoutCompiler:
             "class": panel_class,
             "nodes": nodes,
         }
+        if self.engine_spec.panel_raster:
+            for node in nodes:
+                if node["type"] != "text":
+                    continue
+                node["width"] = name_budget if node is nodes[2] else text_budget
+                node["line_height"] = line_height
+            if self.engine_config.get("emoji_font"):
+                visual["emoji_font"] = self.engine_config["emoji_font"]
+            if self.engine_config.get("fallback_fonts"):
+                visual["fallback_fonts"] = self.engine_config["fallback_fonts"]
         return {
             "id": event_id,
             "track": track,
-            "mode": "ass",
+            "mode": "raster" if self.engine_spec.panel_raster else "ass",
             "bounds": {"width": box_width, "height": total_height},
             "path": [[float(start_at), 0.0, 0.0]],
             "visual": visual,
@@ -1416,15 +1914,18 @@ class LayoutCompiler:
 
     @staticmethod
     def _format_template(template, record, default):
+        def normalize(value):
+            return str(value or "").replace("\n", " ")
+
         if not template:
-            return str(default or "")
+            return normalize(default)
         try:
-            return str(template).format_map(_SafeFormatDict(record))
+            return normalize(str(template).format_map(_SafeFormatDict(record)))
         except Exception:
             try:
-                return replace_keywords(template, record)
+                return normalize(replace_keywords(template, record))
             except Exception:
-                return str(default or "")
+                return normalize(default)
 
     @staticmethod
     def _event_id(video, events_path, line_number):
@@ -1458,6 +1959,9 @@ class LayoutCompiler:
                     raise ValueError(f"{path} 包含多个 meta")
                 header = data
             else:
+                for field in DISPLAY_FIELDS:
+                    if field in data and isinstance(data[field], str):
+                        data[field] = clean_text(data[field])
                 data["_line"] = index + 1
                 records.append(data)
         if not header:
