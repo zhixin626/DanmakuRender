@@ -474,6 +474,24 @@ class PipelineProfiler:
         return result
 
 
+def slide_alpha(motion: dict[str, Any], x: float) -> float:
+    """Fade sliding panels by how far they are inside, like the ASS backend.
+
+    Alpha follows the x position between outside_x and inside_x instead of
+    the event's start/end: a panel carried across a segment boundary keeps
+    its opacity rather than fading out at the cut and in again after it.
+    """
+    try:
+        inside_x = float(motion["inside_x"])
+        outside_x = float(motion["outside_x"])
+    except (KeyError, TypeError, ValueError):
+        return 1.0
+    distance = inside_x - outside_x
+    if math.isclose(distance, 0.0, abs_tol=1e-7):
+        return 1.0
+    return min(1.0, max(0.0, (float(x) - outside_x) / distance))
+
+
 class EventScanner:
     """Maintain active events with a start-time scanline."""
 
@@ -540,14 +558,7 @@ class EventScanner:
             event = self.events[index]
             position = self._position(index, timestamp)
             if position is not None:
-                motion = event.motion
-                enter = max(0.0, float(motion.get("enter_duration", 0.0)))
-                exit_duration = max(0.0, float(motion.get("exit_duration", 0.0)))
-                alpha = 1.0
-                if enter and timestamp < event.start + enter:
-                    alpha = max(0.0, min(1.0, (timestamp - event.start) / enter))
-                elif exit_duration and timestamp > event.end - exit_duration:
-                    alpha = max(0.0, min(1.0, (event.end - timestamp) / exit_duration))
+                alpha = slide_alpha(event.motion, position[0])
                 visible.append(
                     (event, position[0], position[1], int(round(alpha * 255)))
                 )

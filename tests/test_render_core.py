@@ -49,7 +49,7 @@ def test_scanline_enter_exit_and_source_order():
             0.5,
             2.0,
             ((0.5, 5, 6), (1.0, 7, 8), (2.0, 5, 6)),
-            {"enter_duration": 0.5, "exit_duration": 0.5},
+            {"enter_duration": 0.5, "exit_duration": 0.5, "outside_x": 5, "inside_x": 7},
         ),
         RenderEvent(
             "a",
@@ -65,7 +65,7 @@ def test_scanline_enter_exit_and_source_order():
     scanner = EventScanner(events)
     visible = scanner.visible(0.75)
     assert [item[0].id for item in visible] == ["b", "a"]
-    assert visible[0][3] == 128
+    assert visible[0][3] == 128  # halfway between outside_x and inside_x
     assert scanner.visible(1.75)[0][0].id == "b"
     assert scanner.path_indices[0] == 1
     assert scanner.active_order == [(1, 0)]
@@ -88,3 +88,17 @@ def test_frame_rate_and_encoder_argument_name_guard():
     nvc = Mock()
     create_encoder(nvc, 1920, 1080, 60, "hevc_nvenc", {})
     assert nvc.CreateEncoder.call_args.kwargs == {"codec": "hevc", "fps": "60"}
+
+
+def test_panel_carried_across_segments_does_not_refade():
+    """A panel already inside at the cut keeps full opacity in both segments."""
+    motion = {"enter_duration": 0.5, "exit_duration": 0.5, "outside_x": 2000, "inside_x": 1500}
+    # Segment 1 ends while the panel is still fully inside.
+    first = EventScanner([RenderEvent("g", 0, 2, 2, 0.0, 10.0,
+                                      ((0.0, 2000, 900), (0.5, 1500, 900), (10.0, 1500, 900)), motion)])
+    assert first.visible(9.9)[0][3] == 255
+    # Segment 2 starts with the same panel clipped at t=0, then slides out.
+    second = EventScanner([RenderEvent("g", 0, 2, 2, 0.0, 5.0,
+                                       ((0.0, 1500, 900), (4.5, 1500, 900), (5.0, 2000, 900)), motion)])
+    assert second.visible(0.0)[0][3] == 255
+    assert second.visible(4.75)[0][3] == 128
