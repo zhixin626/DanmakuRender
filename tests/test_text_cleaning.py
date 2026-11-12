@@ -24,7 +24,7 @@ def test_entry_events_are_dropped_by_default(tmp_path):
         ),
         encoding="utf8",
     )
-    config = {"r2l": {"danmaku": {"font": "Microsoft YaHei", "fontsize": 30}}, "slide_left": {}, "slide_right": {}}
+    config = {"r2l": {"speed": 240, "danmaku": {"font": "Microsoft YaHei", "fontsize": 30}}, "slide_left": {}, "slide_right": {}}
     video = VideoInfo(path="source.flv", dm_file_id=str(events), duration=20, resolution=(1920, 1080))
     compiled = LayoutCompiler(config, engine="gpu_render", engine_config=config).compile(
         video=video, events_path=str(events), work_dir=str(tmp_path)
@@ -90,7 +90,7 @@ def test_invisible_uname_falls_back_to_uid_and_empty_content_drops(tmp_path):
     ]
     events.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf8")
     config = {
-        "r2l": {"danmaku": {"font": "Microsoft YaHei", "fontsize": 30, "vip_users": {"604006167": None}}},
+        "r2l": {"speed": 240, "danmaku": {"font": "Microsoft YaHei", "fontsize": 30, "vip_users": {"604006167": None}}},
         "slide_left": {},
         "slide_right": {},
     }

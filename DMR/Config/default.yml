@@ -333,7 +333,7 @@ render_args:
     vencoder: h264_nvenc
     # 传给视频编码器的附加参数；例如 [-b:v, 6M] 表示目标视频码率 6 Mbps
     vencoder_args: [-b:v, 6M]
-    # GPU 引擎读取 vencoder_args 中 -b:v、-maxrate、-bufsize；未配置的项使用编码器默认值。
+    # GPU 引擎只读取 vencoder_args 中的 -b:v、-maxrate、-bufsize、-rc、-preset，其余参数忽略；未配置的项使用编码器默认值
     # 音频无需叠加弹幕，可选择 aac 重新编码或 copy 直接复制
     aencoder: aac
     # 例如 [-b:a, 160K]；aencoder 为 copy 时应写 []
@@ -366,11 +366,9 @@ render_args:
     layout_engine: basic
     # 轨道是第一层，事件类型嵌套在所属轨道中。
     r2l:
-      # 固定滚动速度，单位为画布像素/秒；关闭1080p缩放使用其他分辨率时也不自动缩放
-      # 留空时用1920 / screen_duration换算，保留旧配置的横屏效果
-      speed: ~
-      # 兼容旧配置：移动横屏1920像素所需秒数；设置speed后此项不生效
-      screen_duration: 8
+      # 滚动速度，单位为画布像素/秒；横竖屏、长短弹幕速度相同
+      # 240 相当于 8 秒滚过 1920 像素宽的横屏；关闭1080p缩放使用其他分辨率时不自动换算
+      speed: 240
       # 从 margin_top 以下可供 R2L 使用的垂直比例，范围 0~1
       vertical_ratio: 0.3
       margin_top: 10px

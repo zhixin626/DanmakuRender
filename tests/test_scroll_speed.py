@@ -20,10 +20,9 @@ def place(width, text_width, options, active=None, start=0):
 
 
 @pytest.mark.parametrize("options,expected", [
-    ({"screen_duration": 8}, 240),
-    ({"screen_duration": 12}, 160),
-    ({"speed": 300, "screen_duration": 0}, 300),
-    ({"speed": None, "screen_duration": 8}, 240),
+    ({"speed": 240}, 240),
+    ({"speed": 160}, 160),
+    ({"speed": "300"}, 300),
 ])
 def test_fixed_speed_for_orientations_and_text_lengths(options, expected):
     for canvas in (1080, 1920):
@@ -49,7 +48,7 @@ def test_lane_gap_uses_fixed_speed(canvas):
 
 @pytest.mark.parametrize("options", [
     {"speed": 0}, {"speed": -1}, {"speed": float("nan")},
-    {"speed": float("inf")}, {"screen_duration": 0},
+    {"speed": float("inf")}, {"speed": None}, {},
 ])
 def test_invalid_motion_configuration_fails(options):
     with pytest.raises(ValueError, match="r2l\\."):

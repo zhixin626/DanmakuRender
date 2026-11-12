@@ -1323,16 +1323,10 @@ class LayoutCompiler:
                 / max(1.0, fontsize + vertical_gap)
             ),
         )
-        speed = track_cfg.get("speed")
-        if speed is None:
-            duration = float(
-                track_cfg.get("screen_duration", track_cfg.get("duration", 16))
-            )
-            if not math.isfinite(duration) or duration <= 0:
-                raise ValueError("r2l.screen_duration must be positive and finite")
-            # Legacy duration denotes travel across a 1920px landscape canvas.
-            speed = 1920.0 / duration
-        speed = float(speed)
+        try:
+            speed = float(track_cfg["speed"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("r2l.speed must be a number (canvas px/s)") from None
         if not math.isfinite(speed) or speed <= 0:
             raise ValueError("r2l.speed must be positive and finite")
         start_at = float(event["path"][0][0])
