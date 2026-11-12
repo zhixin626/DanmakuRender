@@ -153,7 +153,7 @@ def test_logs_page_resumes_without_gaps_after_outage(tmp_path, mode):
     assert result["lines"] == expected
 
 
-# 打开录制页，在几次任务刷新之间高频采样“分段”时长，记录每次显示变化的时刻和秒数
+# 打开录制页，在几次任务刷新之间高频采样“分段”“本场”时长，记录每次显示变化的时刻和秒数
 _CLOCK_SCRIPT = r"""
 const { chromium } = require('playwright');
 (async () => {
@@ -164,9 +164,14 @@ const { chromium } = require('playwright');
     const seen = [];
     const start = performance.now();
     while (performance.now() - start < duration) {
-      const m = document.querySelector('.rec-time').textContent.match(/分段 (\d+):(\d+)/);
-      const value = Number(m[1]) * 60 + Number(m[2]);
-      if (!seen.length || seen[seen.length - 1].value !== value) seen.push({ at: performance.now(), value });
+      const text = document.querySelector('.rec-time').textContent;
+      const seconds = label => {
+        const m = text.match(new RegExp(label + ' (\\d+):(\\d+)'));
+        return Number(m[1]) * 60 + Number(m[2]);
+      };
+      const value = seconds('分段'), live = seconds('本场');
+      if (!seen.length || seen[seen.length - 1].value !== value || seen[seen.length - 1].live !== live)
+        seen.push({ at: performance.now(), value, live });
       await new Promise(r => setTimeout(r, 20));
     }
     return seen;
@@ -178,13 +183,14 @@ const { chromium } = require('playwright');
 
 
 @pytest.mark.skipif(not _node_playwright_available(), reason="需要 node 和 playwright")
-def test_record_page_clock_ticks_once_per_second():
+def test_record_page_clocks_tick_together_once_per_second():
     from datetime import datetime
-    # 0.5 秒的零头：服务器若取整下发，每次刷新任务都会让显示前后跳
+    # 两个起点的零头不同：服务器若取整下发，每次刷新都会让显示前后跳；若不对齐整秒，两者会错开跳
+    now = time.time()
     recording = SimpleNamespace(
         plat="douyin", url="u", stoped=False,
-        segment_start_time=datetime.fromtimestamp(time.time() - 100.5),
-        live_start_time=None,
+        segment_start_time=datetime.fromtimestamp(now - 100.5),
+        live_start_time=datetime.fromtimestamp(now - 160.2),
     )
     downloader = SimpleNamespace(download_tasks={"a": recording})
     engine = SimpleNamespace(plugin_dict={"downloader": {"class": downloader}}, task_dict={})
@@ -204,6 +210,6 @@ def test_record_page_clock_ticks_once_per_second():
 
     steps = list(zip(changes, changes[1:]))
     assert len(steps) >= 6
-    assert all(b["value"] - a["value"] == 1 for a, b in steps)
+    assert all(b["value"] - a["value"] == 1 and b["live"] - a["live"] == 1 for a, b in steps)
     # 第一次变化前的时长不定，之后每秒一跳；允许 250ms 刷新间隔和 20ms 采样带来的误差
     assert all(700 <= b["at"] - a["at"] <= 1300 for a, b in steps[1:])

@@ -765,16 +765,17 @@ class WebApi:
                         status = 1   # 录制中
                     else:
                         status = 0   # 未开播/离线
-                    # 已录制秒数交给浏览器按收到时刻继续累加，不依赖客户端时钟与服务器一致
+                    # 已录制秒数交给浏览器按收到时刻继续累加，不依赖客户端时钟与服务器一致；
+                    # 起点截到整秒，分段和本场就在同一时刻跳秒
                     segment_elapsed = live_elapsed = None
                     if status == 1:
                         now = datetime.now()
                         seg_start = getattr(task, 'segment_start_time', None)
                         live_start = getattr(task, 'live_start_time', None)
                         if seg_start:
-                            segment_elapsed = (now - seg_start).total_seconds()
+                            segment_elapsed = (now - seg_start.replace(microsecond=0)).total_seconds()
                         if live_start:
-                            live_elapsed = (now - live_start).total_seconds()
+                            live_elapsed = (now - live_start.replace(microsecond=0)).total_seconds()
 
                     recording_tasks.append({
                         'name': taskname,
