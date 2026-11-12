@@ -42,6 +42,20 @@
 - 用旧版 `logs.html` / `webapi.py` 跑新测试会失败，确认测试能抓到上面的问题。
 - Playwright 冒烟：录制页、处理页无 JS 报错，录制时长/倒计时/“即将检测…”显示正确；`configure_logging` 会生成 `console-*.txt` 并写入 logging 输出。
 
+## Windows 上跑测试
+
+在 worktree 根目录用 Python 3.12 建独立 venv（目录名 `venv`，已被 `.gitignore` 忽略），不要往全局 Python 装包：
+
+```
+py -3.12 -m venv venv
+venv\Scripts\python.exe -m pip install -r requirements.txt pytest
+venv\Scripts\python.exe -m pytest tests -v
+```
+
+- 项目需要 Python 3.10+（代码使用 `tuple[int, int] | None`），系统默认的 3.8 不能用。
+- 断网恢复测试依赖 Node 版 Playwright，没有时显示 skipped，属正常。
+- 主 DMR 在运行时不要在 worktree 里再启动 `main.py`（WebUI 端口冲突、重复录制）。
+
 ## 需要用户做
 
 - 在电脑和手机浏览器上实际试用日志页、录制页、处理页：切后台再回来、一直往上翻到第一行、断网（关 Wi-Fi/Tailscale）再恢复。
