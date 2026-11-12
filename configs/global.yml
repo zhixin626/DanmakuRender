@@ -172,7 +172,7 @@ render_args:
       fontsize: 30
       top_opacity: 0.7
       bottom_opacity: 0.3
-      corner_radius: 40px
+      corner_radius: 20px
       box_border_width: 1px
       box_border_opacity: 0.45
       name_border_width: 0px
@@ -214,7 +214,7 @@ render_args:
       fontsize: 30
       top_opacity: 0.7
       bottom_opacity: 0.3
-      corner_radius: 40px
+      corner_radius: 20px
       box_border_width: 1px
       box_border_opacity: 0.45
       name_border_width: 0px
