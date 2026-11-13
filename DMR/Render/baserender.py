@@ -8,6 +8,10 @@ class RenderStopped(RuntimeError):
     """User cancellation; callers must neither retry nor fall back."""
 
 
+class RenderInputError(ValueError):
+    """Input the engine cannot handle; retrying cannot help, fall back directly."""
+
+
 class BaseRender(ABC):
     @abstractmethod
     def __init__(self, debug, **kwargs):

@@ -157,9 +157,22 @@ def test_common_audio_video_origin_and_single_frame_tail():
     ]
 
 
-def test_schedule_rejects_nonmonotonic_source():
-    with pytest.raises(ValueError):
-        list(schedule_frames(iter([(1, 0.04), (2, 0.02)]), (0, 0), 25))
+def test_schedule_treats_subframe_jitter_as_same_instant():
+    result = list(schedule_frames(iter([(1, 0.04), (2, 0.02)]), (0, 0), 25, source_fps=25))
+    assert [item[0] for item in result] == [0, 2]
+
+
+def test_schedule_continues_after_timestamp_reset():
+    frames = [(1, 100.04), (2, 0.0), (3, 0.04)]
+    result = list(schedule_frames(iter(frames), (0, 100.0), 25, source_fps=25))
+    assert [item[0] for item in result] == [0, 1, 2, 3]
+    assert [round(item[1], 2) for item in result] == [0.0, 0.04, 0.08, 0.12]
+
+
+def test_schedule_does_not_freeze_on_huge_forward_jump():
+    frames = [(1, 0.04), (2, 500.0), (3, 500.04)]
+    result = list(schedule_frames(iter(frames), (0, 0.0), 25, source_fps=25))
+    assert [item[0] for item in result] == [0, 1, 2, 3]
 
 
 def test_decoder_drains_tail_with_empty_packet(monkeypatch):

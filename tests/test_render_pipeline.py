@@ -12,7 +12,7 @@ import yaml
 from DMR.Render import Render, get_engine
 from DMR.Render import gpu_render as gpu
 from DMR.Render import emoji_dmrender as emoji
-from DMR.Render.baserender import BaseRender, RenderStopped
+from DMR.Render.baserender import BaseRender, RenderInputError, RenderStopped
 from DMR.Task.liveevents import LiveEvents
 from DMR.utils import VideoInfo, FFprobe, PipeMessage
 
@@ -24,6 +24,7 @@ from DMR.utils import VideoInfo, FFprobe, PipeMessage
         ("gpu_render", "success", "uploader"),
         ("gpu_render", "success", "merger"),
         ("gpu_render", "fallback", "uploader"),
+        ("gpu_render", "input_error", "uploader"),
         ("gpu_render", "stopped", None),
         ("gpu_render", "fallback_stopped", None),
     ],
@@ -88,12 +89,17 @@ def test_segment_render_and_state_progression(
         progress_cb(45)
         if outcome in ("fallback", "fallback_stopped"):
             raise RuntimeError("simulated NVENC failure")
+        if outcome == "input_error":
+            raise RenderInputError("simulated unsupported source")
         if outcome == "stopped":
             stop_event.set()
             raise RenderStopped("user cancellation")
         Path(output).write_bytes(b"gpu encoded fixture")
         progress_cb(100)
-        return dict(width=1920, height=1080, frames=60, frame_rate=60)
+        return dict(
+            width=1920, height=1080, frames=60, frame_rate=60,
+            wall_s=0.5, active_events_avg=1.0, active_events_peak=1,
+        )
 
     monkeypatch.setattr(gpu, "render_one", gpu_worker)
     fallback_calls = []
@@ -171,8 +177,13 @@ def test_segment_render_and_state_progression(
             "uploading" if next_stage == "uploader" else "merging"
         )
         assert len(fallback_calls) == (
-            1 if engine == "emoji_dmrender" or outcome == "fallback" else 0
+            1
+            if engine == "emoji_dmrender" or outcome in ("fallback", "input_error")
+            else 0
         )
+        if outcome == "input_error":
+            # Retrying the same unsupported input cannot help.
+            assert len(gpu_calls) == 1
     assert not plugin.render_tasks
     plugin.render_executors.shutdown()
 

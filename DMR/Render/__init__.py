@@ -21,7 +21,7 @@ from DMR.utils import (
     StreamerInfo,
     atomic_json_dump,
 )
-from .baserender import RenderStopped
+from .baserender import RenderInputError, RenderStopped
 
 
 @dataclass(frozen=True)
@@ -434,6 +434,10 @@ class Render():
                     or target_render.is_stopped()
                     or isinstance(info, RenderStopped)
                 ):
+                    break
+                if isinstance(info, RenderInputError):
+                    # The same input fails the same way; skip to the fallback.
+                    self.logger.warning(f'{verb}失败且重试无效，不再重试: {video.path}')
                     break
                 if attempt < retry:
                     self.logger.warning(f'{verb}失败，重试 {attempt + 1}/{retry}: {video.path}')

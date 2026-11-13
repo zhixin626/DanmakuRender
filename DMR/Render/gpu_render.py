@@ -25,7 +25,7 @@ from fractions import Fraction
 from .layout_models import RenderEvent
 from .resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
 from ..utils.ffprobe import source_frame_rate
-from .baserender import BaseRender, RenderStopped
+from .baserender import BaseRender, RenderInputError, RenderStopped
 from .sprites import build_atlas
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,10 @@ RING_SLOTS = 4
 METADATA_FIELDS = 6  # x, y, offset, width, height, alpha
 AV_DURATION_TOLERANCE_SECONDS = 0.1
 
+
+# A forward timestamp jump larger than this is a stream reset, not missing
+# media; holding the last frame that long would freeze the video.
+MAX_TIMESTAMP_GAP = 10.0
 
 PLAN_KERNEL = r"""
 extern "C" __global__
@@ -274,9 +278,9 @@ def validate_av_duration(path: pathlib.Path) -> dict[str, float]:
         if item["codec_type"] in ("video", "audio")
     }
     if "video" not in durations or "audio" not in durations:
-        raise ValueError(f"missing audio/video stream: {path}")
+        raise RenderInputError(f"missing audio/video stream: {path}")
     if abs(durations["video"] - durations["audio"]) > AV_DURATION_TOLERANCE_SECONDS:
-        raise ValueError(
+        raise RenderInputError(
             "audio/video duration difference exceeds "
             f"{AV_DURATION_TOLERANCE_SECONDS}s: {durations}"
         )
@@ -356,14 +360,29 @@ def schedule_frames(
     current = first_frame
     current_relative = 0.0
     last_interval = 1.0 / (source_fps or output_fps)
+    # Live recordings may reset or jump their timestamps (pusher reconnects,
+    # CDN switches, flaky downloads). Shift the rest of the timeline so it
+    # continues one frame after the last good frame instead of failing.
+    timeline_shift = 0.0
     pending = next(decoded, None)
     frame_index = 0
     while True:
         presentation = frame_index / output_fps
         while pending is not None:
-            pending_relative = max(0.0, float(pending[1]) - first_pts)
-            if pending_relative < current_relative - 1e-9:
-                raise ValueError("source timestamps must be monotonic")
+            nominal = 1.0 / source_fps if source_fps else last_interval
+            pending_relative = float(pending[1]) - first_pts + timeline_shift
+            backward = current_relative - pending_relative
+            if backward > nominal or -backward > MAX_TIMESTAMP_GAP:
+                jump = -backward
+                timeline_shift += current_relative + nominal - pending_relative
+                pending_relative = current_relative + nominal
+                logger.warning(
+                    "源视频时间戳在第 %.2f 秒跳变 %+.2f 秒，已接续时间线",
+                    current_relative,
+                    jump,
+                )
+            # Sub-frame jitter is treated as the same instant.
+            pending_relative = max(pending_relative, current_relative)
             if pending_relative > presentation + 1e-9:
                 break
             if pending_relative > current_relative:
@@ -1141,7 +1160,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
     if chroma_location in ("unknown", "unspecified"):
         chroma_location = "left"
     if chroma_location not in CHROMA_PHASES:
-        raise ValueError(f"unsupported source chroma location: {chroma_location}")
+        raise RenderInputError(f"unsupported source chroma location: {chroma_location}")
     source_start = float(timing.get("start_time", 0))
     # Live FLV containers often carry cumulative timestamps, so format.duration
     # is unreliable. Prefer the recorder's timeline duration, then probe the
@@ -1165,7 +1184,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
         )
         codec = codec_name(config.video_encoder)
         if codec not in ("hevc", "h264"):
-            raise ValueError(f"unsupported GPU video codec: {codec}")
+            raise RenderInputError(f"unsupported GPU video codec: {codec}")
         with tempfile.TemporaryDirectory(
             prefix="dmr_render_", dir=destination.parent
         ) as work:
@@ -1252,14 +1271,16 @@ class GpuRender(BaseRender):
             self.logger.debug(
                 "GPU render statistics: %s", json.dumps(result, ensure_ascii=False)
             )
+            # A summary line must never fail an otherwise finished render.
             video_seconds = result["frames"] / result["frame_rate"]
+            wall_s = float(result.get("wall_s") or 0.0)
             self.logger.info(
                 "GPU 渲染完成：视频 %.0f 秒，用时 %.1f 秒（%.1f 倍速），同屏弹幕平均 %.0f 条、最多 %d 条",
                 video_seconds,
-                result["wall_s"],
-                video_seconds / max(result["wall_s"], 1e-9),
-                result["active_events_avg"],
-                result["active_events_peak"],
+                wall_s,
+                video_seconds / max(wall_s, 1e-9),
+                result.get("active_events_avg", 0.0),
+                result.get("active_events_peak", 0),
             )
             output_info = self.output_info(
                 video,
