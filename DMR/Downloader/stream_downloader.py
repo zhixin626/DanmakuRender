@@ -5,7 +5,7 @@ import threading
 import time
 import re
 
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError, wait
 from os.path import join,exists,splitext
 from datetime import datetime
 from DMR.Downloader.Danmaku import DanmakuDownloader
@@ -34,6 +34,10 @@ def startup_state(onair: bool, trust_onair_at_startup: bool, in_record_window: b
     if trust_onair_at_startup and in_record_window:
         return StreamState.LIVE_START
     return StreamState.REPLAY_START
+
+
+# Seconds stop_once waits for the recording thread to finish its last file.
+VIDEO_STOP_TIMEOUT = 15
 
 
 class StreamUnavailableError(RuntimeError):
@@ -400,8 +404,10 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
         if self.danmaku:
             futures.append(self.executor.submit(danmaku_thread))
+        self._video_future = None
         if self.video:
-            futures.append(self.executor.submit(video_thread))
+            self._video_future = self.executor.submit(video_thread)
+            futures.append(self._video_future)
 
         last_onair_check = time.time()
 
@@ -826,12 +832,23 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 self.downloader.stop()
             except Exception as e:
                 self.logger.exception(e)
+        # The recording thread may still be finishing its last file (FFmpeg
+        # killed by Ctrl+C reports it from that thread). Wait for it so the
+        # JSONL is paired with its video before the danmaku writer stops.
+        video_future = getattr(self, '_video_future', None)
+        if video_future is not None:
+            wait([video_future], timeout=VIDEO_STOP_TIMEOUT)
         if self.danmaku and hasattr(self, 'dmw') and self.dmw:
             try:
-                # 视频后端先通过 segment_end_callback 收尾已有视频；此时仍留在
-                # dm_file 中的临时 JSONL 没有对应视频，应在关闭 writer 后删除。
+                # 视频后端已通过 segment_end_callback 收尾已有视频；此时仍留在
+                # dm_file 中的临时 JSONL 没有对应视频，应在关闭 writer 后丢弃。
+                # 若仍有视频段未收尾，JSONL 可能属于它，必须保留。
                 # 纯弹幕任务没有视频，必须保留其当前 JSONL。
-                self.dmw.stop(discard_unpaired=self.video)
+                with self._segment_lock:
+                    pending_video = bool(self._segment_contexts)
+                if pending_video:
+                    self.logger.warning("仍有视频段未收尾，保留当前弹幕文件以免丢失")
+                self.dmw.stop(discard_unpaired=self.video and not pending_video)
                 with self._segment_lock:
                     self._dm_preopened_start_time = None
             except Exception as e:

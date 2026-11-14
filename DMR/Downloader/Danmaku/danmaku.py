@@ -1,4 +1,5 @@
 import asyncio
+from send2trash import send2trash
 import logging
 import os
 import platform
@@ -281,9 +282,10 @@ class DanmakuDownloader:
         if discard_unpaired and unpaired_file:
             try:
                 if os.path.exists(unpaired_file):
-                    os.remove(unpaired_file)
+                    # Recycle bin, not os.remove: a wrong guess stays recoverable.
+                    send2trash(unpaired_file)
                     self.logger.info(
-                        "删除没有对应视频的弹幕事件文件: %s",
+                        "没有对应视频的弹幕事件文件已移到回收站: %s",
                         unpaired_file,
                     )
             except OSError:

@@ -46,6 +46,15 @@ class FFmpegDownloader():
         
         self.ffmpeg_proc = None
         self.stoped = False
+        # stop() and the recording thread may both finish the current file
+        # (e.g. Ctrl+C kills FFmpeg while stop() runs); only one may report it.
+        self._finish_lock = threading.Lock()
+
+    def _finish_current_segment(self, end_time):
+        with self._finish_lock:
+            filename, self.thisfile = self.thisfile, None
+        if filename:
+            self.segment_end_callback(filename, end_time)
     
     @property
     def duration(self):
@@ -160,9 +169,7 @@ class FFmpegDownloader():
                 while self.msg_queue and not self.msg_queue.empty():
                     queued_time, queued_line = self.msg_queue.get_nowait()
                     self._handle_opening_line(queued_time, queued_line)
-                if self.thisfile:
-                    self.segment_end_callback(self.thisfile, time.time())
-                    self.thisfile = None
+                self._finish_current_segment(time.time())
                 self.logger.debug('FFmpeg exit.')
                 self.logger.debug(log)
                 raise RuntimeError(f'FFmpeg 退出.')
@@ -250,6 +257,5 @@ class FFmpegDownloader():
             # 时间在 FFmpeg 退出后立即固定；等待仅用于确保文件句柄和尾部数据稳定，
             # 不能把这1秒算进视频的现实时间边界。
             time.sleep(1)
-            self.segment_end_callback(self.thisfile, end_time)
-            self.thisfile = None
+            self._finish_current_segment(end_time)
         self.logger.debug('ffmpeg downloader stoped.')
