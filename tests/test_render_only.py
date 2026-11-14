@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 import render_only as cli
 from DMR.utils import VideoInfo
+from DMR.utils.prompts import default_task
 
 
 def answers(monkeypatch, values):
@@ -129,9 +130,7 @@ def test_missing_sidecar_manual_or_skip(monkeypatch, tmp_path):
 def test_output_existing_choices(monkeypatch, tmp_path, choice, result):
     (tmp_path / "out.mp4").write_bytes(b"existing")
     answers(monkeypatch, [choice])
-    output, overwrite = cli.ask_output(
-        "source.flv", str(tmp_path), "out.mp4", False, set()
-    )
+    output, overwrite = cli.ask_output(str(tmp_path), "out.mp4", False, set())
     assert (output, overwrite) == (
         (str(tmp_path / "out.mp4"), True) if result == "overwrite" else (None, False)
     )
@@ -142,13 +141,12 @@ def test_output_invalid_choice_then_rename_and_protect_source(monkeypatch, tmp_p
     source = tmp_path / "out.mp4"
     source.touch()
     answers(monkeypatch, ["bad", "2", "renamed.mp4"])
-    assert cli.ask_output("source.flv", str(tmp_path), "out.mp4", False, set()) == (
+    assert cli.ask_output(str(tmp_path), "out.mp4", False, set()) == (
         str(tmp_path / "renamed.mp4"),
         False,
     )
     answers(monkeypatch, ["safe.mp4"])
     assert cli.ask_output(
-        str(source),
         str(tmp_path),
         "out.mp4",
         False,
@@ -160,8 +158,11 @@ def test_task_default_and_invalid_choice(monkeypatch, tmp_path):
     answers(monkeypatch, ["bad", ""])
     assert "demo" in cli.ask_task(config_fixture(tmp_path), str(tmp_path), "overlay")[1]
     assert (
-        cli.default_task(
-            [("parent", str(tmp_path)), ("child", str(tmp_path / "nested"))],
+        default_task(
+            [
+                ("parent", str(tmp_path), "parent.yml"),
+                ("child", str(tmp_path / "nested"), "child.yml"),
+            ],
             str(tmp_path / "nested" / "day"),
         )
         == 2
@@ -295,7 +296,5 @@ def test_rename_enter_uses_nonconflicting_suggestion(monkeypatch, tmp_path, caps
     for filename in ("out.mp4", "out_2.mp4"):
         (tmp_path / filename).touch()
     answers(monkeypatch, ["2", ""])
-    output, overwrite = cli.ask_output(
-        "source.flv", str(tmp_path), "out.mp4", False, set()
-    )
+    output, overwrite = cli.ask_output(str(tmp_path), "out.mp4", False, set())
     assert output == str(tmp_path / "out_3.mp4") and not overwrite

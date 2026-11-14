@@ -6,8 +6,8 @@
 断线会自动重连。
 
 用法:
-    python sample_unknown.py <URL1> <URL2> ...
-    python sample_unknown.py rooms.txt          # 一行一个 URL 的文本(# 开头为注释)
+    python tools/sample_unknown.py <URL1> <URL2> ...
+    python tools/sample_unknown.py rooms.txt          # 一行一个 URL 的文本(# 开头为注释)
 
 选项(环境变量):
     SAMPLE_DIR   输出文件夹(默认 unknown_danmaku_samples)
@@ -22,11 +22,11 @@ import sys
 
 os.environ['http_proxy'] = ''
 os.environ['https_proxy'] = ''
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from DMR.LiveAPI.danmaku import DanmakuClient
 from DMR.utils import BaseDanmaku
-from run_danmu import to_danmaku, detect_platform, auto_cookie
+from run_danmu import detect_platform, auto_cookie
 
 SAMPLE_DIR = os.environ.get("SAMPLE_DIR", "unknown_danmaku_samples")
 LIMIT = int(os.environ.get("SAMPLE_LIMIT", "10"))
@@ -111,8 +111,8 @@ def _cookie_kwargs(platform):
 
 async def _consume(q, platform, sampler):
     while True:
-        dm = to_danmaku(await q.get())
-        if dm is not None and type(dm) is BaseDanmaku:   # 只采"解析不出"的(子类都是已识别类型)
+        dm = await q.get()
+        if type(dm) is BaseDanmaku:   # 只采"解析不出"的(子类都是已识别类型)
             sampler.save(platform, dm)
 
 

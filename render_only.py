@@ -17,7 +17,6 @@ import os
 import sys
 import logging
 import tempfile
-import yaml
 from glob import glob
 from os.path import exists, join
 
@@ -26,12 +25,18 @@ sys.path.append('.')
 
 from DMR.Config import Config
 from DMR.Render import get_engine, DEFAULT_ENGINE, EMOJI_ENGINE, TRANSCODE_ENGINE
-from DMR.utils import FFprobe, isvideo, VideoInfo
-
-
-def input_path(prompt):
-    """Accept a pasted Windows path, including surrounding quotes."""
-    return input(prompt).strip().strip('"').strip("'")
+from DMR.utils import FFprobe, VideoInfo
+from DMR.utils.prompts import (
+    OUTPUT_SUFFIXES,
+    ask_numbers,
+    ask_output,
+    ask_output_folder,
+    ask_path,
+    ask_task as ask_task_name,
+    confirm as confirm_lines,
+    input_path,
+    protect,
+)
 
 
 def show_progress(label, pct):
@@ -89,7 +94,7 @@ def source_videos(folder: str) -> list[str]:
         for path in files
         if os.path.splitext(path)[1].lower() in (".flv", ".ts", ".mp4")
         and not any(
-            marker in os.path.basename(path) for marker in ("（弹幕版）", "（转码后）")
+            marker in os.path.basename(path) for marker in OUTPUT_SUFFIXES
         )
         and not (
             path.lower().endswith(".mp4")
@@ -99,18 +104,13 @@ def source_videos(folder: str) -> list[str]:
 
 
 def ask_video(default: str = "") -> str:
-    while True:
-        path = (
-            input_path(
-                f'请输入视频文件或文件夹（可拖入{f"，回车：{default}" if default else ""}）：'
-            )
-            or default
-        )
-        if os.path.isdir(path) or (
-            os.path.isfile(path) and path.lower().endswith((".flv", ".ts", ".mp4"))
-        ):
-            return os.path.abspath(path)
-        print("路径不存在或不是 FLV/TS/MP4，请重新输入。")
+    return ask_path(
+        "请输入视频文件或文件夹",
+        lambda path: os.path.isdir(path)
+        or (os.path.isfile(path) and path.lower().endswith((".flv", ".ts", ".mp4"))),
+        "路径不存在或不是 FLV/TS/MP4，请重新输入。",
+        default,
+    )
 
 
 def select_videos(folder: str, transcode: bool = False) -> list[str]:
@@ -120,29 +120,19 @@ def select_videos(folder: str, transcode: bool = False) -> list[str]:
     for index, video in enumerate(videos, 1):
         candidates = danmaku_candidates(video)
         if candidates or transcode:
-            defaults.append(index)
+            defaults.append(index - 1)
         sidecar = "✓ " + os.path.basename(candidates[0]) if candidates else "✗ 未找到"
         print(f"  [{index}] {os.path.basename(video)}    弹幕：{sidecar}")
     if not videos:
         print("没有符合条件的源视频。")
         return []
-    while True:
-        value = input("视频编号（空格分隔，回车选所有有弹幕的，n取消）：").strip()
-        if value.lower() == "n":
-            return []
-        try:
-            indices = (
-                list(dict.fromkeys(int(v) for v in value.split()))
-                if value
-                else defaults
-            )
-            if not indices or any(
-                index < 1 or index > len(videos) for index in indices
-            ):
-                raise ValueError()
-            return [videos[index - 1] for index in indices]
-        except ValueError:
-            print("请选择有效编号；没有匹配弹幕时需手动选编号。")
+    picked = ask_numbers(
+        "视频编号（空格分隔，回车选所有有弹幕的，n取消）：",
+        len(videos),
+        defaults,
+        "请选择有效编号；没有匹配弹幕时需手动选编号。",
+    )
+    return [videos[index] for index in picked]
 
 
 def ask_danmaku(video: str, allow_skip: bool = False) -> str | None:
@@ -175,134 +165,22 @@ def ask_danmaku(video: str, allow_skip: bool = False) -> str | None:
         print("弹幕编号无效或文件不存在，请重新输入。")
 
 
-def task_directories(config) -> list[tuple[str, str | None]]:
-    from DMR.utils import filename_to_taskname, merge_dict
-
-    tasks = []
-    for filename in config.task_config_files():
-        with open(filename, encoding="utf8") as stream:
-            raw = yaml.safe_load(stream) or {}
-        task = raw.get("download_args") or {}
-        defaults = config.global_config.get("download_args", {}).get(
-            task.get("dltype", "live"), {}
-        )
-        tasks.append(
-            (
-                filename_to_taskname(filename),
-                merge_dict(defaults, task).get("output_dir"),
-            )
-        )
-    return tasks
-
-
-def default_task(tasks, folder: str) -> int:
-    folder = os.path.normcase(os.path.realpath(folder))
-    matches = []
-    for index, (_, directory) in enumerate(tasks, 1):
-        if not directory:
-            continue
-        directory = os.path.normcase(os.path.realpath(directory))
-        if folder == directory or folder.startswith(directory + os.sep):
-            matches.append((len(directory), index))
-    if not matches:
-        return 0
-    longest = max(length for length, _ in matches)
-    best = [index for length, index in matches if length == longest]
-    return best[0] if len(best) == 1 else 0
-
-
 def ask_task(config, folder: str, mode: str):
-    tasks = task_directories(config)
-    default = default_task(tasks, folder)
-    print("任务配置：")
-    for index, name in enumerate(["全局配置"] + [name for name, _ in tasks]):
-        print(f"  [{index}] {name}" + (" ← 默认" if index == default else ""))
-    while True:
-        value = input(f"任务编号（回车选{default}）：").strip()
-        if not value:
-            value = str(default)
-        if value.isdigit() and 0 <= int(value) <= len(tasks):
-            index = int(value)
-            if index == 0:
-                return config.global_config["render_args"][mode], "全局配置"
-            name = tasks[index - 1][0]
-            return config.get_render_args(name, mode), f"任务「{name}」"
-        print("任务编号无效，请重新输入。")
-
-
-def ask_output_folder(default: str) -> str:
-    while True:
-        folder = input_path(f"输出文件夹（回车：{default}）：") or default
-        if not exists(folder) or os.path.isdir(folder):
-            return os.path.abspath(folder)
-        print("该路径是文件，请输入文件夹。")
-
-
-def ask_output(
-    video: str, directory: str, name: str, ask_name: bool, protected: set[str]
-):
-    while True:
-        if ask_name:
-            name = input_path(f"输出文件名（回车：{name}）：") or name
-            ask_name = False
-        if (
-            not name
-            or os.path.basename(name) != name
-            or any(char in name for char in '<>:"/\\|?*')
-        ):
-            print("文件名无效，只填写文件名。")
-            ask_name = True
-            continue
-        if not os.path.splitext(name)[1]:
-            name += ".mp4"
-        output = os.path.abspath(join(directory, name))
-        if os.path.normcase(os.path.realpath(output)) in protected:
-            print("输出不能覆盖输入视频或弹幕，请改名。")
-            ask_name = True
-            continue
-        if not exists(output):
-            return output, False
-        print(f"输出已存在：{output}")
-        choice = input("[1] 覆盖  [2] 改名  [3] 跳过：").strip()
-        if choice == "1":
-            return output, True
-        if choice == "2":
-            stem, extension = os.path.splitext(name)
-            candidate = 2
-            while True:
-                suggested = f"{stem}_{candidate}{extension}"
-                suggested_path = os.path.abspath(join(directory, suggested))
-                if (
-                    not exists(suggested_path)
-                    and os.path.normcase(os.path.realpath(suggested_path))
-                    not in protected
-                ):
-                    name = suggested
-                    break
-                candidate += 1
-            ask_name = True
-        elif choice == "3":
-            return None, False
-        else:
-            print("请输入1、2或3。")
+    name, _ = ask_task_name(config, folder)
+    if name is None:
+        return config.global_config["render_args"][mode], "全局配置"
+    return config.get_render_args(name, mode), f"任务「{name}」"
 
 
 def confirm(tasks, source: str, label: str) -> bool:
-    print("──────── 确认 ────────")
-    print(f"任务：{source}（引擎：{label}）")
-    print("视频 | 弹幕 | 输出")
-    for task in tasks:
-        print(
+    return confirm_lines(
+        [f"任务：{source}（引擎：{label}）", "视频 | 弹幕 | 输出"]
+        + [
             f'{task["video"]} | {task["danmaku"] or "不烧弹幕"} | {task["output"]}'
             + (" [覆盖]" if task.get("overwrite") else "")
-        )
-    while True:
-        value = input("回车开始，输入n取消：").strip().lower()
-        if value in ("", "y", "1"):
-            return True
-        if value in ("n", "2"):
-            return False
-        print("回车开始，或输入n取消。")
+            for task in tasks
+        ]
+    )
 
 
 def selected_engine(options, args, mode):
@@ -344,12 +222,9 @@ def interactive_tasks(config, args, mode):
     options, source = ask_task(config, os.path.dirname(tasks[0]["video"]), config_mode)
     engine = get_engine(selected_engine(options, args, mode))
     directory = args.output_dir or ask_output_folder(os.path.dirname(tasks[0]["video"]))
-    protected = {
-        os.path.normcase(os.path.realpath(p))
-        for task in tasks
-        for p in (task["video"], task["danmaku"])
-        if p
-    }
+    protected = protect(
+        *(path for task in tasks for path in (task["video"], task["danmaku"]))
+    )
     selected = []
     suffix = "（转码后）" if mode == "transcode" else "（弹幕版）"
     for task in tasks:
@@ -359,9 +234,7 @@ def interactive_tasks(config, args, mode):
             + "."
             + options.get("format", "mp4")
         )
-        output, overwrite = ask_output(
-            task["video"], directory, name, len(tasks) == 1, protected
-        )
+        output, overwrite = ask_output(directory, name, len(tasks) == 1, protected)
         if output:
             selected.append({**task, "output": output, "overwrite": overwrite})
     selected = sort_tasks(selected)

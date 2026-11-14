@@ -1,3 +1,10 @@
+"""手动合并：把同一场直播的多个 MP4 按顺序无损拼接成一个文件（原文件保留）。
+
+用法：python merge_only.py
+依次询问：视频（文件夹或逐个文件）→ 合并顺序 → 音量 → 输出位置 → 确认。
+"""
+
+from datetime import datetime
 from pathlib import Path
 import math
 import os
@@ -11,29 +18,34 @@ from DMR.Merger.video_merge import (
     probe_seg,
     retime,
 )
-from DMR.utils.utils import safe_filename
+from DMR.utils.prompts import (
+    ask_choice,
+    ask_numbers,
+    ask_output,
+    ask_output_folder,
+    ask_path,
+    confirm,
+    input_path,
+    protect,
+)
 
 
-def strip_quotes(value: str) -> str:
-    value = value.strip()
-    if (
-        len(value) >= 2
-        and value[0] == value[-1]
-        and value[0] in {'"', "'"}
-    ):
-        return value[1:-1]
-    return value
+def is_mp4(path):
+    return os.path.isfile(path) and path.lower().endswith(".mp4")
+
+
+def format_duration(seconds):
+    seconds = int(seconds)
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
 def merge_mp4(
-    videos,
+    metas,
     target_path,
     amplify_audio=False,
     extra_gain_db=0,
 ) -> Path:
-    """按当前 DMR Merger 的规则无损合并一组同分辨率 MP4。"""
-    paths = [Path(video).resolve() for video in videos]
-    metas = [probe_seg(path) for path in paths]
+    """按当前 DMR Merger 的规则无损合并一组同分辨率 MP4（metas 来自 probe_seg）。"""
     groups = group_by_resolution(metas)
     if len(groups) != 1:
         resolutions = [group[0].get("wh") for group in groups]
@@ -42,7 +54,7 @@ def merge_mp4(
             f"{resolutions}"
         )
 
-    target = Path(safe_filename(Path(target_path).resolve()))
+    target = Path(target_path).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     workdir = Path(
         tempfile.mkdtemp(prefix=".merge_only_tmp_", dir=str(target.parent))
@@ -85,120 +97,101 @@ def merge_mp4(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def parse_yn(prompt: str, default: bool) -> bool:
-    s = input(prompt).strip().lower()
-    if s == "":
-        print(f"无输入，按默认值 {default} 处理。")
-        return default
-    if s in ("y", "yes", "1", "true", "t"):
-        return True
-    if s in ("n", "no", "0", "false", "f"):
-        return False
-    print(f"输入无效，按默认值 {default} 处理。")
-    return default
+def ask_videos():
+    path = ask_path(
+        "请输入要合并的视频文件夹，或第一个 MP4",
+        lambda p: os.path.isdir(p) or is_mp4(p),
+        "路径不存在或不是 MP4/文件夹，请重新输入。",
+    )
+    if is_mp4(path):
+        videos = [path]
+        while True:
+            value = input_path(f"第 {len(videos) + 1} 个 MP4（可拖入，回车结束）：")
+            if not value:
+                return videos
+            if is_mp4(value):
+                videos.append(os.path.abspath(value))
+            else:
+                print("文件不存在或不是 MP4，请重新输入。")
+
+    videos = sorted(
+        (str(p) for p in Path(path).iterdir() if is_mp4(str(p))),
+        key=os.path.getctime,
+    )
+    if not videos:
+        print("该文件夹中没有 MP4。")
+        return []
+    print("该文件夹中的 MP4（按创建时间排序）：")
+    for index, video in enumerate(videos, 1):
+        created = datetime.fromtimestamp(os.path.getctime(video))
+        print(f"  [{index}] {os.path.basename(video)}    创建于 {created:%m-%d %H:%M}")
+    picked = ask_numbers(
+        "按合并顺序输入编号（空格分隔，回车按上面顺序全选，n取消）：",
+        len(videos),
+        range(len(videos)),
+    )
+    return [videos[index] for index in picked]
 
 
-def parse_gain_db(prompt: str, default: float = 0.0) -> float:
+def ask_gain_db():
     while True:
-        value = input(prompt).strip()
+        value = input("额外增益 dB（回车：0，只把峰值提到 -1 dBFS）：").strip()
         if not value:
-            return float(default)
+            return 0.0
         try:
             gain_db = float(value)
         except ValueError:
-            print("请输入大于或等于 0 的数字，例如 5、10 或 20。")
-            continue
-        if not math.isfinite(gain_db) or gain_db < 0:
-            print("请输入大于或等于 0 的有限数字。")
-            continue
-        return gain_db
+            gain_db = -1
+        if math.isfinite(gain_db) and gain_db >= 0:
+            return gain_db
+        print("请输入大于或等于 0 的数字，例如 5、10 或 20。")
 
 
 def main():
-    print("请输入需要按顺序合并的视频【文件或文件夹】路径,每行一个,输入空行结束：")
-    videos = []
-    while True:
-        inp = strip_quotes(input("> ").strip())
-        if not inp:
-            break
+    videos = ask_videos()
+    if len(videos) < 2:
+        print("至少需要两个视频，没有开始合并。")
+        return
+    metas = [probe_seg(video) for video in videos]
 
-        p = Path(inp)
-        if not p.exists():
-            print("❌ 路径不存在，请重新输入。")
-            continue
+    amplify_audio = (
+        ask_choice("音量：", ["保持原音量", "放大（峰值提到 -1 dBFS）"]) == 1
+    )
+    extra_gain_db = ask_gain_db() if amplify_audio else 0.0
 
-        # 输入的是文件：沿用原逻辑（但顺手限定一下 mp4，更安全）
-        if p.is_file():
-            if p.suffix.lower() != ".mp4":
-                print("❌ 不是 mp4 文件，请重新输入。")
-                continue
-            videos.append(str(p))
-            continue
-
-        if p.is_dir():
-            mp4s = [x for x in p.iterdir() if x.is_file() and x.suffix.lower() == ".mp4"]
-            if not mp4s:
-                print("❌ 文件夹下没有 mp4。")
-                continue
-
-            mp4s.sort(key=lambda x: os.path.getctime(x))
-
-            print("📂 检测到文件夹，按创建时间排序后的 mp4 如下：")
-            for i, f in enumerate(mp4s, 1):
-                print(f"  {i:02d}. {f.name}")
-
-            ok = parse_yn("以上顺序是否正确？(y/n)，默认 y\n", default=True)
-            if not ok:
-                print("🔁 顺序未确认，请重新输入路径。")
-                continue
-
-            videos.extend(str(x) for x in mp4s)
-            print(f"✅ 已确认并加入 {len(mp4s)} 个 mp4：{p}")
-            break
-
-    if not videos:
-        print("❌ 未输入任何视频文件，程序退出。")
+    first = Path(videos[0])
+    directory = ask_output_folder(str(first.parent))
+    target, overwrite = ask_output(
+        directory, f"{first.stem}_merged.mp4", True, protect(*videos)
+    )
+    if not target:
+        print("没有开始合并。")
         return
 
-    # 询问输出名称
-    print("请输入输出文件名或输出路径(可空行,默认为 *_merged.mp4):")
-    target_path = strip_quotes(input("> ").strip())
-
-    # 默认输出：第一个文件名 + "_merged.mp4"
-    if not target_path:
-        first = Path(videos[0])
-        fp = first.with_name(first.stem + "_merged" + first.suffix)
-    else:
-        fp = Path(target_path)
-        if fp.parent == Path("."):
-            first = Path(videos[0])
-            fp = first.parent / fp.name
-    if fp.suffix == "":
-        fp = fp.with_suffix(".mp4")
-    target_path = str(fp)
-
-    amplify_audio = parse_yn(
-        "是否放大音频？(y/n)，默认 n\n",
-        default=False,
+    lines = ["合并顺序 | 分辨率 | 时长"]
+    for index, meta in enumerate(metas, 1):
+        size = "x".join(map(str, meta["wh"])) if meta["wh"] else "探测失败"
+        lines.append(
+            f"{index}. {meta['path'].name} | {size} | {format_duration(meta['dur'])}"
+        )
+    lines.append(
+        "音量："
+        + (f"放大，额外增益 {extra_gain_db:g} dB" if amplify_audio else "保持原音量")
     )
-    extra_gain_db = 0.0
-    if amplify_audio:
-        extra_gain_db = parse_gain_db(
-            "请输入额外增益 dB；0 表示仅自动提升峰值到 -1 dBFS，默认 0\n> ",
-            default=0,
-        )
-        print(
-            "🔊 合并后将检测音频峰值并放大："
-            f"峰值目标 -1 dBFS，额外增益 {extra_gain_db:g} dB。"
-        )
-    print("正在按当前 DMR Merger 规则无损合并（原始文件会保留）")
+    lines.append(f"输出：{target}" + (" [覆盖]" if overwrite else ""))
+    if not confirm(lines):
+        print("没有开始合并。")
+        return
+
+    print("正在无损合并（原文件会保留）……")
     final_path = merge_mp4(
-        videos,
-        target_path,
+        metas,
+        target,
         amplify_audio=amplify_audio,
         extra_gain_db=extra_gain_db,
     )
-    print(f"🎉 合并完成：{final_path}")
+    print(f"合并完成：{final_path}")
+
 
 if __name__ == "__main__":
     main()

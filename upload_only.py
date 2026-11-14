@@ -1,10 +1,26 @@
-import yaml
+"""手动上传：把已有视频按任务的上传配置投稿（多个视频即分P）。
+
+用法：python upload_only.py
+依次询问：视频（文件或文件夹）→ 任务配置 → 上传账号 → 确认。
+"""
+
 from pathlib import Path
 import logging
+import os
 from datetime import datetime
 from DMR.utils.ffprobe import probe_media
 from DMR.utils.session_record import read_last_complete_session
-from DMR.utils import *
+from DMR.Config import Config
+from DMR.utils import merge_dict, uuid
+from DMR.utils.prompts import (
+    OUTPUT_SUFFIXES,
+    ask_choice,
+    ask_numbers,
+    ask_path,
+    ask_task,
+    confirm,
+    read_task_file,
+)
 from DMR.LiveAPI import LiveAPI
 from DMR.utils.dataclass import VideoInfo, StreamerInfo
 from DMR.Task.liveevents import LiveEvents
@@ -33,90 +49,30 @@ logger.setLevel(logging.INFO)
 _MANUAL_GROUP_ID = "upload_only"
 
 
-def strip_quotes(s: str) -> str:
-    s = s.strip()
-    if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
-        return s[1:-1]
-    return s
+VIDEO_TYPES = {"dm_video": "弹幕版", "src_video": "原画/转码"}
 
 
-# ── 配置加载 ─────────────────────────────────────────────
-
-def _pick_upload_arg(upload_args_dict: dict, vtype: str) -> dict:
-    if vtype in upload_args_dict:
-        return upload_args_dict[vtype]
-    for k, cfg in upload_args_dict.items():
-        parts = [p.strip() for p in str(k).split("+")]
-        if vtype in parts:
-            return cfg
-    raise RuntimeError(f"upload_args 里找不到适用于 {vtype} 的配置（支持 dm_video+src_video 形式）")
-
-
-def load_config(file_path):
-    """从文件路径推断 taskname/vtype，加载完整 YAML，返回 (taskname, vtype, data)。"""
-    taskname = Path(file_path).parent.name
-    if taskname.endswith("（弹幕版）"):
-        vtype = "dm_video"
-        taskname = taskname[:-len("（弹幕版）")].strip()
-    elif taskname.endswith("（转码后）"):
-        vtype = "src_video"
-        taskname = taskname[:-len("（转码后）")].strip()
-    else:
-        raise RuntimeError(f"未知视频类型：{file_path}")
-
-    yml_path = None
-    for prefix in ["./configs/DMR-", "./configs/test-"]:
-        if Path(f"{prefix}{taskname}.yml").exists():
-            yml_path = f"{prefix}{taskname}.yml"
-            break
-    if not yml_path:
-        matched = list(Path("./configs").glob(f"*{taskname}*.yml"))
-        if len(matched) == 1:
-            yml_path = str(matched[0])
-        elif len(matched) > 1:
-            print(f"找到多个匹配的配置文件，请选择：")
-            for i, p in enumerate(matched):
-                print(f"[{i}] {p}")
-            idx = input("请输入序号: ").strip()
-            yml_path = str(matched[int(idx)])
-        else:
-            raise RuntimeError(f"找不到包含 '{taskname}' 的配置文件")
-
-    logger.info(f"将按照 {yml_path} 的配置信息")
-    with open(yml_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    return taskname, vtype, data
-
-
-def file_to_args(file_path):
-    """返回 (common_event_args, download_args, [upload_config, ...])。"""
-    taskname, vtype, data = load_config(file_path)
-    common_event_args = data.get("common_event_args") or {}
-    # 兼容：merge_args/bark_args 现已上移为顶层；回填进 common_event_args，旧调用方无需改动
-    for key in ("merge_args", "bark_args"):
-        if data.get(key) is not None and key not in common_event_args:
-            common_event_args[key] = data.get(key)
-    download_args = data.get("download_args")
-    raw_upload_args = _pick_upload_arg(data.get("upload_args", {}), vtype)
-    if isinstance(raw_upload_args, dict):
-        raw_upload_args = [raw_upload_args]
-    return common_event_args, download_args, raw_upload_args
+def upload_configs(config: Config, data: dict, vtype: str) -> list:
+    """任务里适用于 vtype 的上传配置（支持 dm_video+src_video 形式的键），
+    与主流程一样叠加在上传目标的全局默认之上。"""
+    targets = config.global_config["upload_args"]
+    for key, value in (data.get("upload_args") or {}).items():
+        if vtype in (part.strip() for part in str(key).split("+")):
+            return [
+                merge_dict(targets.get(cfg.get("target", "bilibili")) or {}, cfg)
+                for cfg in (value if isinstance(value, list) else [value])
+            ]
+    return []
 
 
 # ── LiveEvents 实例化 ─────────────────────────────────────
 
-def _make_live_events(file_path) -> tuple:
+def make_live_events(taskname: str, data: dict) -> LiveEvents:
     """
-    加载 YAML 并创建 LiveEvents 实例，手动初始化路径和 session_data，
+    创建 LiveEvents 实例并手动初始化 session_data，
     完全绕过 onLiveStart（从而避免触发 bark_notify 等）。
-    返回 (live_events, download_args)。
     """
-    taskname, vtype, data = load_config(file_path)
-    download_args = data.get("download_args", {})
-
     live_events = LiveEvents(taskname, data)
-    # src_path/dmvideo_path/transcode_path 已在 LiveEvents.__init__ 里按 output_dir 算好，无需手动设置
-
     # 手动初始化 session_data（结构与 onLiveStart 保持一致）
     live_events.session_data[_MANUAL_GROUP_ID] = {
         "rendered_cover_names": set(),
@@ -133,89 +89,40 @@ def _make_live_events(file_path) -> tuple:
     }
     # 从磁盘读取礼物统计和开播时间，写入 session_data
     live_events._collect_session_data(_MANUAL_GROUP_ID)
-    return live_events, download_args
-
-
-# ── 礼物统计（LiveEvents 只从消息读，这里需要从磁盘读） ────────
-
-def get_last_gift_stats(folder_path):
-    file_path = os.path.join(folder_path, "gifts_statistics.jsonl")
-    if not os.path.exists(file_path):
-        return {}
-    last_entry = None
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    last_entry = json.loads(line)
-    except Exception as e:
-        logger.warning(f"读取礼物统计出错: {e}")
-        return {}
-    return last_entry if last_entry else {}
+    return live_events
 
 
 # ── VideoInfo 构建 ────────────────────────────────────────
 
-def build_videoinfo(file_path: str, live_events) -> VideoInfo:
+def build_videoinfo(path: str, vtype: str, streamer: StreamerInfo, title: str,
+                    live_events: LiveEvents) -> VideoInfo:
     """
     构建基础 VideoInfo，会话级字段（礼物统计、时间）由 live_events._backfill_video_info 统一填入。
-    live_events 须已调用过 _collect_session_data。
     """
-    p = Path(file_path)
-    if not p.exists():
-        raise FileNotFoundError(file_path)
-
-    _, download_args, _ = file_to_args(file_path)
-
-    try:
-        api      = LiveAPI(download_args.get("url"))
-        roominfo = api.GetRoomInfo() or {}
-    except Exception:
-        roominfo = {}
-
-    streamer = StreamerInfo(
-        name = roominfo.get("name", ""),
-        url  = download_args.get("url", ""),
-    )
-
+    p = Path(path)
     st_stat = p.stat()
     media   = probe_media(str(p))
-
-    taskname = p.parent.name
-    if taskname.endswith("（弹幕版）"):
-        dtype    = "dm_video"
-        taskname = taskname[:-len("（弹幕版）")].strip()
-    elif taskname.endswith("（转码后）"):
-        dtype    = "src_video"
-        taskname = taskname[:-len("（转码后）")].strip()
-    else:
-        dtype = ""
-
     video_info = VideoInfo(
         path       = str(p),
-        dtype      = dtype,
+        dtype      = vtype,
         file_id    = uuid(),
         size       = st_stat.st_size,
         ctime      = datetime.fromtimestamp(st_stat.st_ctime),
         duration   = media["duration"],
         resolution = media["resolution"],
-        title      = roominfo.get("title", ""),
+        title      = title,
         streamer   = streamer,
-        taskname   = taskname,
+        taskname   = live_events.name,
         group_id   = _MANUAL_GROUP_ID,
         segment_id = 1,
     )
 
     # 把 VideoInfo 注入 state_dict，让 _backfill_video_info 能找到它
-    if _MANUAL_GROUP_ID not in live_events.state_dict:
-        live_events.state_dict[_MANUAL_GROUP_ID] = []
-    live_events.state_dict[_MANUAL_GROUP_ID].append({
-        dtype: {"status": "ready", "file": video_info, "wait": []}
+    live_events.state_dict.setdefault(_MANUAL_GROUP_ID, []).append({
+        vtype: {"status": "ready", "file": video_info, "wait": []}
     })
     # 统一回填会话级字段（礼物统计、stime/etime/totaltime 等）
     live_events._backfill_video_info(_MANUAL_GROUP_ID)
-
     return video_info
 
 
@@ -227,9 +134,8 @@ def upload_process(video_infos: list, account_config: dict, live_events: LiveEve
     1. 若配置了 auto_append_period，注入 base_bvid（对齐 LiveEvents._check_for_upload）
     2. 调用 DMR 的 uploader
     3. 上传成功后写入 bvid 历史；合集/封面由 uploader 按 cfg 自行处理
-    acfun 引擎支持传入多个 VideoInfo 实现分P上传，其他引擎仅使用第一个。
+    多个 VideoInfo 按顺序作为分P，与主流程的整场上传一致。
     """
-    video_info = video_infos[0]
     account = account_config["account"]
     cfg = account_config.copy()
 
@@ -259,8 +165,7 @@ def upload_process(video_infos: list, account_config: dict, live_events: LiveEve
     else:
         raise ValueError(f"未知上传引擎: {engine_type}")
 
-    upload_files = video_infos if engine_type == "acfun" else [video_info]
-    status, result = uploader.upload(upload_files, **cfg)
+    status, result = uploader.upload(video_infos, **cfg)
 
     if status:
         logger.info(f"账号 {account} 上传成功: {result}")
@@ -283,49 +188,109 @@ def upload_process(video_infos: list, account_config: dict, live_events: LiveEve
 
 
 
-# ── 主流程 ────────────────────────────────────────────────
+# ── 交互 ──────────────────────────────────────────────────
+
+def is_video(path):
+    return os.path.isfile(path) and path.lower().endswith((".mp4", ".flv"))
+
+
+def ask_videos():
+    path = ask_path(
+        "请输入要上传的视频文件或文件夹",
+        lambda p: os.path.isdir(p) or is_video(p),
+        "路径不存在或不是 MP4/FLV/文件夹，请重新输入。",
+    )
+    if is_video(path):
+        return [path]
+    videos = sorted(
+        (str(p) for p in Path(path).iterdir() if is_video(str(p))),
+        key=os.path.getctime,
+    )
+    if not videos:
+        print("该文件夹中没有 MP4/FLV。")
+        return []
+    print("该文件夹中的视频（按创建时间排序）：")
+    for index, video in enumerate(videos, 1):
+        print(f"  [{index}] {os.path.basename(video)}")
+    picked = ask_numbers(
+        "要上传的编号（多个即分P，按分P顺序空格分隔，n取消）：", len(videos), ()
+    )
+    return [videos[index] for index in picked]
+
+
+def ask_video_type(folder):
+    for suffix, vtype in OUTPUT_SUFFIXES.items():
+        if folder.endswith(suffix):
+            return vtype
+    types = list(VIDEO_TYPES)
+    return types[ask_choice("视频类型：", list(VIDEO_TYPES.values()))]
+
+
+def ask_upload_task(config, folder):
+    while True:
+        taskname, filename = ask_task(config, folder)
+        if taskname:
+            return taskname, read_task_file(filename)
+        print("上传需要具体任务的 upload_args，请选择任务。")
+
+
+def ask_accounts(upload_configs):
+    print("上传账号：")
+    for index, cfg in enumerate(upload_configs, 1):
+        print(
+            f"  [{index}] {cfg.get('account')}（{cfg.get('engine', 'biliuprs')}）"
+            f"  标题：{str(cfg.get('title', ''))[:30]}"
+        )
+    picked = ask_numbers(
+        "账号编号（空格分隔，回车选全部，n取消）：",
+        len(upload_configs),
+        range(len(upload_configs)),
+    )
+    return [upload_configs[index] for index in picked]
+
 
 def main():
-    video_path = strip_quotes(input("请输入需要上传的视频路径：\n").strip())
+    videos = ask_videos()
+    if not videos:
+        print("没有开始上传。")
+        return
+    folder = os.path.dirname(videos[0])
+    vtype = ask_video_type(folder)
+    config = Config("configs/global.yml")
+    taskname, data = ask_upload_task(config, folder)
+    accounts = upload_configs(config, data, vtype)
+    if not accounts:
+        print(f"任务「{taskname}」没有{VIDEO_TYPES[vtype]}的上传配置，没有开始上传。")
+        return
+    selected = ask_accounts(accounts)
+    if not selected:
+        print("没有开始上传。")
+        return
 
-    # 加载配置 & 创建 LiveEvents 实例（不触发 onLiveStart）
-    live_events, download_args = _make_live_events(video_path)
-    _, _, all_upload_configs = file_to_args(video_path)
-    video_info = build_videoinfo(video_path, live_events)
-    video_infos = [video_info]
+    lines = [f"任务：{taskname}（{VIDEO_TYPES[vtype]}）"]
+    lines += [f"P{index} {video}" for index, video in enumerate(videos, 1)]
+    lines += [
+        f"账号：{cfg.get('account')}（{cfg.get('engine', 'biliuprs')}）"
+        for cfg in selected
+    ]
+    if not confirm(lines):
+        print("没有开始上传。")
+        return
 
-    # 选择账号
-    print("\n检测到以下上传账号配置：")
-    for i, cfg in enumerate(all_upload_configs):
-        print(f"[{i}] 账号: {cfg.get('account')} (标题模板: {str(cfg.get('title', ''))[:30]}...)")
-
-    choice = input("\n请选择上传账号 [输入索引数字, 或 'all' 全部上传] (默认 all): ").strip().lower()
-    if choice == "all" or choice == "":
-        selected_configs = all_upload_configs
-    else:
-        try:
-            selected_configs = [all_upload_configs[int(choice)]]
-        except Exception:
-            print("❌ 输入错误，取消上传")
-            return
-
-    # acfun 多P：若选中的配置中有 acfun 引擎，允许追加更多视频
-    if any(cfg.get("engine") == "acfun" for cfg in selected_configs):
-        print("\n检测到 AcFun 引擎，支持多P上传。")
-        print("请继续输入更多视频路径作为后续分P（直接回车结束输入）：")
-        while True:
-            extra = strip_quotes(input(f"P{len(video_infos) + 1} 路径（回车结束）: ").strip())
-            if not extra:
-                break
-            try:
-                video_infos.append(build_videoinfo(extra, live_events))
-                print(f"已添加 P{len(video_infos)}: {extra}")
-            except Exception as e:
-                print(f"❌ 读取失败，跳过: {e}")
-        if len(video_infos) > 1:
-            logger.info(f"共 {len(video_infos)} P 将一起上传")
-
-    for cfg in selected_configs:
+    download_args = data.get("download_args") or {}
+    try:
+        roominfo = LiveAPI(download_args.get("url")).GetRoomInfo() or {}
+    except Exception:
+        roominfo = {}
+    streamer = StreamerInfo(
+        name=roominfo.get("name", ""), url=download_args.get("url", "")
+    )
+    live_events = make_live_events(taskname, data)
+    video_infos = [
+        build_videoinfo(video, vtype, streamer, roominfo.get("title", ""), live_events)
+        for video in videos
+    ]
+    for cfg in selected:
         logger.info(f"开始处理账号: {cfg.get('account')}")
         upload_process(video_infos, cfg, live_events)
 

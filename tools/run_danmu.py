@@ -3,14 +3,14 @@
 直播弹幕实时监听(调试/预览用)
 
 用法:
-    python run_danmu.py <直播间URL> [选项]
+    python tools/run_danmu.py <直播间URL> [选项]
 
 示例:
-    python run_danmu.py https://live.bilibili.com/22230707
-    python run_danmu.py https://www.douyu.com/3125893 --only member
-    python run_danmu.py <url> --all                # 额外显示进场(entry)
-    python run_danmu.py <url> --only other         # 只看未识别的
-    python run_danmu.py <url> --debug feng.jsonl   # 全部消息落盘,供排查
+    python tools/run_danmu.py https://live.bilibili.com/22230707
+    python tools/run_danmu.py https://www.douyu.com/3125893 --only member
+    python tools/run_danmu.py <url> --all                # 额外显示进场(entry)
+    python tools/run_danmu.py <url> --only other         # 只看未识别的
+    python tools/run_danmu.py <url> --debug feng.jsonl   # 全部消息落盘,供排查
 
 选项:
     --cookie 路径    指定 cookie(默认按平台自动找 .login_info/ 下最新的)
@@ -38,7 +38,7 @@ from datetime import datetime
 # 禁用代理,防止干扰弹幕 WS 的 SSL 握手
 os.environ['http_proxy'] = ''
 os.environ['https_proxy'] = ''
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from DMR.LiveAPI.danmaku import DanmakuClient
 from DMR.utils import BaseDanmaku
