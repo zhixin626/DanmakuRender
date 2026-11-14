@@ -360,10 +360,15 @@ def schedule_frames(
     current = first_frame
     current_relative = 0.0
     last_interval = 1.0 / (source_fps or output_fps)
-    # Live recordings may reset or jump their timestamps (pusher reconnects,
-    # CDN switches, flaky downloads). Shift the rest of the timeline so it
-    # continues one frame after the last good frame instead of failing.
+    # Live recordings may jump their timestamps (pusher reconnects, CDN
+    # switches, flaky downloads). The audio is muxed by its own timestamps, so
+    # video must follow the same timeline:
+    # - a short step back (<= MAX_TIMESTAMP_GAP) re-sends content already
+    #   shown: drop those frames until the timeline catches up;
+    # - a timestamp reset or a huge forward jump is a new timeline: shift it
+    #   to continue one frame after the last good frame.
     timeline_shift = 0.0
+    dropping = False
     pending = next(decoded, None)
     frame_index = 0
     while True:
@@ -372,7 +377,19 @@ def schedule_frames(
             nominal = 1.0 / source_fps if source_fps else last_interval
             pending_relative = float(pending[1]) - first_pts + timeline_shift
             backward = current_relative - pending_relative
-            if backward > nominal or -backward > MAX_TIMESTAMP_GAP:
+            # Keep dropping until the re-sent content passes the last frame shown.
+            if nominal / 2 <= backward <= MAX_TIMESTAMP_GAP or (dropping and backward >= 0):
+                if not dropping:
+                    logger.warning(
+                        "源视频时间戳在第 %.2f 秒回退 %.2f 秒（重复片段），丢弃重叠画面以保持音画同步",
+                        current_relative,
+                        backward,
+                    )
+                dropping = True
+                pending = next(decoded, None)
+                continue
+            dropping = False
+            if backward > MAX_TIMESTAMP_GAP or -backward > MAX_TIMESTAMP_GAP:
                 jump = -backward
                 timeline_shift += current_relative + nominal - pending_relative
                 pending_relative = current_relative + nominal
@@ -381,7 +398,7 @@ def schedule_frames(
                     current_relative,
                     jump,
                 )
-            # Sub-frame jitter is treated as the same instant.
+            # Jitter under half a frame is treated as the same instant.
             pending_relative = max(pending_relative, current_relative)
             if pending_relative > presentation + 1e-9:
                 break
