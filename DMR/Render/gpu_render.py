@@ -424,6 +424,17 @@ def frame_geometry(decoded: Any) -> tuple[int, int]:
     return int(cai["shape"][1]), int(cai["shape"][0])
 
 
+def empty_atlas():
+    """Atlas of a plan without events: frames pass through the same decode,
+    canvas and encode path as a danmaku render, untouched."""
+    return {
+        "duration": 0.0,
+        "events": [],
+        "atlas_bytes": 0,
+        **{plane: np.zeros(0, dtype=np.uint8) for plane in ("y", "u", "v", "a")},
+    }
+
+
 def upload_atlas(cupy, atlas):
     """Upload the in-memory atlas once; no intermediate serialization."""
     return {
@@ -1135,6 +1146,8 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
 
     render_plan = kwargs.get("render_plan")
     atlas = kwargs.get("atlas")
+    if atlas is None and kwargs.get("without_danmaku"):
+        atlas = empty_atlas()
     if atlas is None:
         if not render_plan:
             raise ValueError("gpu_render requires a RenderPlan")

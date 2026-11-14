@@ -32,6 +32,9 @@ class RenderEngine:
     overlay: bool = True
     raster: bool = False
     panel_raster: bool = False
+    # Can re-encode a video without danmaku (render_one(without_danmaku=True)),
+    # producing the same stream format as its danmaku renders.
+    plain: bool = False
     fallback: str | None = None
 
     def load(self):
@@ -52,6 +55,7 @@ ENGINES = {
         "GPU 弹幕渲染",
         raster=True,
         panel_raster=True,
+        plain=True,
         fallback="emoji_dmrender",
     ),
     "transcode": RenderEngine(".transcode", "Transcoder", "转码", overlay=False),

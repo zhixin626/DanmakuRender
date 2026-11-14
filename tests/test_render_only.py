@@ -42,7 +42,7 @@ def test_single_file_shows_all_candidates_matches_task_and_confirms(
     augmented = tmp_path / "clip_augmented.jsonl"
     augmented.touch()
     answers(monkeypatch, [str(video), "", "", "", "", ""])
-    tasks, options, source = cli.interactive_tasks(
+    tasks, _, options, source = cli.interactive_tasks(
         config_fixture(tmp_path), args(), "danmaku_render"
     )
     assert tasks == [
@@ -85,7 +85,7 @@ def test_folder_selects_before_task_and_allows_missing_sidecar(
         monkeypatch,
         [str(tmp_path), "1 2", "", str(tmp_path / "manual.jsonl"), "", "", ""],
     )
-    tasks, _, _ = cli.interactive_tasks(
+    tasks, _, _, _ = cli.interactive_tasks(
         config_fixture(tmp_path), args(), "danmaku_render"
     )
     assert len(tasks) == 2 and tasks[1]["danmaku"] == str(tmp_path / "manual.jsonl")
@@ -156,7 +156,7 @@ def test_output_invalid_choice_then_rename_and_protect_source(monkeypatch, tmp_p
 
 def test_task_default_and_invalid_choice(monkeypatch, tmp_path):
     answers(monkeypatch, ["bad", ""])
-    assert "demo" in cli.ask_task(config_fixture(tmp_path), str(tmp_path), "overlay")[1]
+    assert "demo" in cli.ask_task(config_fixture(tmp_path), str(tmp_path))[1]
     assert (
         default_task(
             [
@@ -205,6 +205,7 @@ def test_overwrite_is_atomic_and_failure_preserves_existing(
                     "overwrite": True,
                 }
             ],
+            "gpu_render",
             cfg.global_config["render_args"]["overlay"],
             "demo",
         ),
@@ -227,7 +228,9 @@ def test_overwrite_is_atomic_and_failure_preserves_existing(
     monkeypatch.setattr(
         cli,
         "get_engine",
-        lambda _: SimpleNamespace(raster=True, label="test", load=lambda: Renderer),
+        lambda _: SimpleNamespace(
+            raster=True, overlay=True, plain=True, label="test", load=lambda: Renderer
+        ),
     )
     monkeypatch.setattr(sys, "argv", ["render_only.py"])
     assert cli.main() == (0 if success else 1)
@@ -272,7 +275,9 @@ def test_argument_mode_never_prompts(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli,
         "get_engine",
-        lambda _: SimpleNamespace(raster=True, label="test", load=lambda: Renderer),
+        lambda _: SimpleNamespace(
+            raster=True, overlay=True, plain=True, label="test", load=lambda: Renderer
+        ),
     )
     monkeypatch.setattr(
         sys,
@@ -298,3 +303,52 @@ def test_rename_enter_uses_nonconflicting_suggestion(monkeypatch, tmp_path, caps
     answers(monkeypatch, ["2", ""])
     output, overwrite = cli.ask_output(str(tmp_path), "out.mp4", False, set())
     assert output == str(tmp_path / "out_3.mp4") and not overwrite
+
+
+@pytest.mark.parametrize("plain", [True, False])
+def test_transcode_matches_danmaku_format_when_engine_can(monkeypatch, tmp_path, plain):
+    import sys
+
+    video = tmp_path / "source.flv"
+    video.touch()
+    output = tmp_path / "out.mp4"
+    overlay = {"engine": "gpu_render", "vencoder": "hevc_nvenc"}
+    transcode = {"engine": "transcode", "vencoder": "libx264"}
+    cfg = SimpleNamespace(
+        get_render_args=lambda _, mode: overlay if mode == "overlay" else transcode
+    )
+    monkeypatch.setattr(cli, "Config", lambda _: cfg)
+    monkeypatch.setattr(cli.FFprobe, "get_resolution", lambda _: (1920, 1080))
+    monkeypatch.setattr(cli.FFprobe, "get_timeline_duration", lambda _: 1)
+    calls = []
+
+    class Renderer:
+        def __init__(self, **options):
+            calls.append(options)
+
+        def render_one(self, video, output, **kwargs):
+            calls.append(kwargs)
+            Path(output).touch()
+            return True, VideoInfo(path=output)
+
+    engines = {
+        "gpu_render": SimpleNamespace(
+            raster=True, overlay=True, plain=plain, label="GPU", load=lambda: Renderer
+        ),
+        "transcode": SimpleNamespace(
+            raster=False, overlay=False, plain=False, label="转码", load=lambda: Renderer
+        ),
+    }
+    monkeypatch.setattr(cli, "get_engine", engines.__getitem__)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["render_only.py", "--transcode", "--task", "demo",
+         "--video", str(video), "--output", str(output)],
+    )
+    assert cli.main() == 0
+    options, kwargs = calls[0], calls[1]
+    if plain:
+        assert options["vencoder"] == "hevc_nvenc" and kwargs["without_danmaku"]
+    else:
+        assert options == transcode and "without_danmaku" not in kwargs

@@ -161,9 +161,9 @@ def main():
 
     first = Path(videos[0])
     directory = ask_output_folder(str(first.parent))
-    target, overwrite = ask_output(
-        directory, f"{first.stem}_merged.mp4", True, protect(*videos)
-    )
+    # 输出可以替换某个输入（例如沿用新录制第一段的文件名，让录制程序之后
+    # 自动合并时把它和后续分段接上）：合并先写临时文件，成功后才替换。
+    target, overwrite = ask_output(directory, f"{first.stem}_merged.mp4", True, set())
     if not target:
         print("没有开始合并。")
         return
@@ -178,7 +178,11 @@ def main():
         "音量："
         + (f"放大，额外增益 {extra_gain_db:g} dB" if amplify_audio else "保持原音量")
     )
-    lines.append(f"输出：{target}" + (" [覆盖]" if overwrite else ""))
+    replaces_input = protect(target) & protect(*videos)
+    lines.append(
+        f"输出：{target}"
+        + (" [替换输入]" if replaces_input else " [覆盖]" if overwrite else "")
+    )
     if not confirm(lines):
         print("没有开始合并。")
         return

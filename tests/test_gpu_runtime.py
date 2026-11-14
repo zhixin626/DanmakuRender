@@ -302,3 +302,39 @@ def test_enabled_pipeline_configuration_uses_isolated_fixture(tmp_path, monkeypa
     config = Config(str(global_file)).get_task_config("demo")
     assert config["render_args"]["overlay"]["engine"] == "gpu_render"
     assert config["upload_args"]["dm_video"][0]["account"] == "demo"
+
+
+def test_without_danmaku_encodes_through_same_path_with_empty_atlas(
+    monkeypatch, tmp_path
+):
+    def frames(*_):
+        yield SimpleNamespace(), 0
+
+    cp = SimpleNamespace(
+        cuda=SimpleNamespace(Device=lambda _: SimpleNamespace(use=lambda: None)),
+        get_default_memory_pool=lambda: SimpleNamespace(free_all_blocks=Mock()),
+    )
+    monkeypatch.setattr(gpu, "load_cuda_modules", lambda: (cp, None))
+    monkeypatch.setattr(gpu, "decode_frames", frames)
+    monkeypatch.setattr(gpu, "source_frame_rate", lambda _: 25)
+    monkeypatch.setattr(
+        gpu.FFprobe,
+        "run_ffprobe",
+        lambda _: {"format": {"duration": 1, "start_time": 0}, "streams": [{}]},
+    )
+    seen = []
+
+    def encode(*args, **kwargs):
+        seen.append(args[7].atlas)
+        kwargs["stop_event"].set()
+        gpu.check_stop(kwargs["stop_event"])
+
+    monkeypatch.setattr(gpu, "encode_to_file", encode)
+    ok, _ = gpu.GpuRender().render_one(
+        "source.flv",
+        str(tmp_path / "out.mp4"),
+        without_danmaku=True,
+        canvas_resolution=(2, 2),
+    )
+    assert not ok and seen[0]["events"] == []
+    assert gpu.upload_atlas(np, seen[0])["events"] == []

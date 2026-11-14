@@ -5,6 +5,8 @@
   - JSONL 由 LayoutCompiler 依次生成每段 RenderPlan，并维护跨段 track；
   - 同名 ASS 仍作为旧文件兼容输入；
   - --emoji / --no-emoji 可强制覆盖配置。
+  - --transcode：弹幕引擎能不烧弹幕重编码时（gpu_render）沿用弹幕版的编码设置，
+    输出与弹幕版同格式、可无损合并；否则使用 render_args.transcode。
 
 用法：
     python render_only.py [--config configs/global.yml] [--input_dir 路径]
@@ -165,11 +167,16 @@ def ask_danmaku(video: str, allow_skip: bool = False) -> str | None:
         print("弹幕编号无效或文件不存在，请重新输入。")
 
 
-def ask_task(config, folder: str, mode: str):
+def ask_task(config, folder: str):
+    """Returns (task name or None for the global config, display label)."""
     name, _ = ask_task_name(config, folder)
-    if name is None:
-        return config.global_config["render_args"][mode], "全局配置"
-    return config.get_render_args(name, mode), f"任务「{name}」"
+    return name, f"任务「{name}」" if name else "全局配置"
+
+
+def render_args(config, task, mode):
+    if task:
+        return config.get_render_args(task, mode)
+    return config.global_config["render_args"][mode]
 
 
 def confirm(tasks, source: str, label: str) -> bool:
@@ -183,14 +190,23 @@ def confirm(tasks, source: str, label: str) -> bool:
     )
 
 
-def selected_engine(options, args, mode):
-    if mode == "transcode":
-        return TRANSCODE_ENGINE
+def selected_engine(options, args):
     if args.emoji:
         return EMOJI_ENGINE
     if args.no_emoji:
         return DEFAULT_ENGINE
     return options["engine"]
+
+
+def render_settings(config, task, args, mode):
+    """(engine name, render args). Transcoding re-encodes with the danmaku
+    engine when it can, so a task's transcoded and danmaku outputs share one
+    format and merge losslessly; otherwise the transcode settings apply."""
+    overlay = render_args(config, task, "overlay")
+    name = selected_engine(overlay, args)
+    if mode != "transcode" or get_engine(name).plain:
+        return name, overlay
+    return TRANSCODE_ENGINE, render_args(config, task, "transcode")
 
 
 def sort_tasks(tasks):
@@ -216,11 +232,11 @@ def interactive_tasks(config, args, mode):
         )
         if danmaku or mode == "transcode":
             tasks.append({"video": video, "danmaku": danmaku})
-    config_mode = "transcode" if mode == "transcode" else "overlay"
     if not tasks:
-        return [], config.global_config["render_args"][config_mode], "未选择视频"
-    options, source = ask_task(config, os.path.dirname(tasks[0]["video"]), config_mode)
-    engine = get_engine(selected_engine(options, args, mode))
+        return [], None, None, "未选择视频"
+    task_name, source = ask_task(config, os.path.dirname(tasks[0]["video"]))
+    engine_name, options = render_settings(config, task_name, args, mode)
+    engine = get_engine(engine_name)
     directory = args.output_dir or ask_output_folder(os.path.dirname(tasks[0]["video"]))
     protected = protect(
         *(path for task in tasks for path in (task["video"], task["danmaku"]))
@@ -238,8 +254,10 @@ def interactive_tasks(config, args, mode):
         if output:
             selected.append({**task, "output": output, "overwrite": overwrite})
     selected = sort_tasks(selected)
+    label = engine.label + ("（不烧弹幕）" if mode == "transcode" and engine.overlay else "")
     return (
-        (selected if selected and confirm(selected, source, engine.label) else []),
+        (selected if selected and confirm(selected, source, label) else []),
+        engine_name,
         options,
         source,
     )
@@ -273,30 +291,30 @@ def main():
 
     single = any((args.task, args.video, args.danmaku, args.output))
     if single:
-        if not all((args.task, args.video, args.danmaku, args.output)):
-            parser.error("单文件模式需要 --task --video --danmaku --output")
-        if not exists(args.video) or not exists(args.danmaku):
+        required = (args.task, args.video, args.output) + (
+            () if args.transcode else (args.danmaku,)
+        )
+        if not all(required):
+            parser.error("单文件模式需要 --task --video --output（渲染还需要 --danmaku）")
+        if not exists(args.video) or (args.danmaku and not exists(args.danmaku)):
             parser.error("视频或弹幕文件不存在")
         if exists(args.output):
             parser.error("输出已存在，请另选文件名")
-        render_args = config.get_render_args(
-            args.task, "transcode" if args.transcode else "overlay"
-        )
+        try:
+            engine_name, options = render_settings(config, args.task, args, mode)
+        except ValueError as error:
+            parser.error(str(error))
         source = f"任务「{args.task}」(default → global → task)"
         selected = [
             {"video": args.video, "danmaku": args.danmaku, "output": args.output}
         ]
     else:
-        selected, render_args, source = interactive_tasks(config, args, mode)
+        selected, engine_name, options, source = interactive_tasks(config, args, mode)
 
     if not selected:
         print("没有开始渲染。")
         return 0
-    engine_name = selected_engine(render_args, args, mode)
-    try:
-        engine = get_engine(engine_name)
-    except ValueError as error:
-        parser.error(str(error))
+    engine = get_engine(engine_name)
     print(f'渲染参数来源: {source} → 渲染引擎: {engine_name}')
     TargetRender = engine.load()
 
@@ -332,17 +350,17 @@ def main():
                     prefix=".render_only_", dir=os.path.dirname(output)
                 )
                 render_output = join(output_work.name, os.path.basename(output))
-            target_args = render_args
+            target_args = options
             render_kwargs = {}
             layout_result = None
-            if mode != 'transcode':
+            if engine.overlay:
                 layout_keys = {
                     'include_events',
                     'danmaku', 'gift', 'superchat', 'member',
                     'r2l', 'slide_left', 'slide_right',
                 }
                 target_args = {
-                    key: value for key, value in render_args.items()
+                    key: value for key, value in options.items()
                     if key != 'engine' and key not in layout_keys
                 }
                 if not engine.raster:
@@ -350,12 +368,15 @@ def main():
                         'emoji_pack', 'emoji_font', 'min_fps',
                     ):
                         target_args.pop(key, None)
-                if task['danmaku'].lower().endswith('.jsonl'):
+                if not task['danmaku']:
+                    # 不烧弹幕：用弹幕引擎原样重编码，输出与弹幕版同格式、可无损合并
+                    render_kwargs['without_danmaku'] = True
+                elif task['danmaku'].lower().endswith('.jsonl'):
                     from DMR.Render.layout_compiler import LayoutCompiler
                     layout_result = LayoutCompiler(
-                        render_args,
+                        options,
                         engine=engine_name,
-                        engine_config=render_args,
+                        engine_config=options,
                     ).compile(
                         video=video,
                         events_path=task["danmaku"],
