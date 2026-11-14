@@ -27,6 +27,15 @@ class StreamState(str, Enum):
     REPLAY_START = "replay_start"
     STOPPING = "stopping"        # 稳态：刚下播,等待确认是否真的下播(stop_wait_time)
 
+def startup_state(onair: bool, trust_onair_at_startup: bool, in_record_window: bool) -> StreamState:
+    """State when the program starts: record only a trusted stream inside the record window."""
+    if not onair:
+        return StreamState.OFFLINE
+    if trust_onair_at_startup and in_record_window:
+        return StreamState.LIVE_START
+    return StreamState.REPLAY_START
+
+
 class StreamUnavailableError(RuntimeError):
     """房间报在播但拿不到直播流地址（如加密/密码房间）。
     用于区分"正常录制中途崩溃"(走快速重启)和"压根取不到流"(走慢速轮询)，避免无限空转重启。"""
@@ -488,13 +497,11 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             now = datetime.now()
             now_onair = self.get_effective_onair()
 
-            # 初始化
+            # 初始化：启动时已在播，只有信任开播状态且处于录制时段内才开录，否则视为回放
             if state is None:
-                if now_onair:
-                    state = StreamState.LIVE_START if trust_onair_at_startup else StreamState.REPLAY_START
-                else:
-                    state = StreamState.OFFLINE
-                return state
+                return startup_state(
+                    now_onair, trust_onair_at_startup, in_record_window(now)
+                )
 
             if state == StreamState.LIVE_END:
                 return StreamState.STOPPING
