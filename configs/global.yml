@@ -163,7 +163,7 @@ render_args:
     slide_left:
       width: 13%
       margin_left: 10px
-      margin_bottom: 12px
+      margin_bottom: 10px
       vertical_gap: 10px
       enter_duration: 0.5
       exit_duration: 0.5
@@ -205,7 +205,7 @@ render_args:
     slide_right:
       width: 13%
       margin_right: 10px
-      margin_bottom: 12px
+      margin_bottom: 10px
       vertical_gap: 10px
       enter_duration: 0.5
       exit_duration: 0.5
