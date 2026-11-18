@@ -59,3 +59,34 @@ def test_merge_only_refuses_mixed_formats_before_asking(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", unexpected)
     merge_only.main()
     assert "编码格式不一致" in capsys.readouterr().out
+
+
+def test_gain_is_one_value_for_the_whole_merge(tmp_path):
+    import subprocess
+
+    for index, level in ((1, -12), (2, -18)):
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+             "testsrc=size=160x90:rate=25", "-f", "lavfi", "-i",
+             "sine=frequency=440:sample_rate=48000", "-t", "4",
+             "-af", f"volume={level}dB", "-c:v", "libx264", "-bf", "0",
+             "-c:a", "aac", "-shortest", str(tmp_path / f"s{index}.mp4")],
+            check=True,
+        )
+    sources = [tmp_path / "s1.mp4", tmp_path / "s2.mp4"]
+    peaks = [video_merge.detect(str(p)) for p in sources]
+    metas = [video_merge.probe_seg(p) for p in sources]
+    output = video_merge.merge_group(metas, tmp_path / "out.mp4", tmp_path, (-1, 0))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.mp4", "s1.mp4", "s2.mp4"]
+
+    def peak(start):
+        log = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-ss", str(start), "-t", "2", "-i", str(output),
+             "-vn", "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True,
+        ).stderr
+        return float(log.split("max_volume:")[1].split("dB")[0])
+
+    # the loudest segment reaches the target; the other keeps its distance
+    assert abs(peak(1) - (-1)) < 1
+    assert abs((peak(1) - peak(5)) - (peaks[0] - peaks[1])) < 1

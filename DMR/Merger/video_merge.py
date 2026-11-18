@@ -7,7 +7,8 @@
 - group_by_format     : 按「连续同分辨率、同编码格式」把探测结果切组。
 - retime              : 无损改写 timescale（-c copy，不重编码）。
 - concat_copy         : concat 解复用器 + -c copy 纯拼接，输入须已处理好（同格式同 timescale）。
-- amplify_mp4 / detect: 音频峰值检测 + 响度增益。
+- concat_with_gain    : 拼接并对整体音频做同一个增益（峰值并行检测，音频与视频同时处理）。
+- merge_group         : 一组同格式片段 → 一个产物（retime + 拼接/增益），Merger 与 merge_only 共用。
 
 分辨率或编码格式（编码器、像素格式、参数头、音频参数）不一致的段不重编码，
 由 Merger 分组各自合并、单段直通复制，例如 GPU 渲染段与回退引擎渲染段。
@@ -16,13 +17,13 @@ import os
 import re
 import json
 import logging
+import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Union
 
-from send2trash import send2trash
-from DMR.utils.utils import safe_filename
 
 logger = logging.getLogger(__name__)
 
@@ -110,45 +111,47 @@ def retime(src: Union[str, Path], dst: Union[str, Path],
     return dst
 
 
-def concat_copy(inputs: List[Union[str, Path]], out_path: str, ffmpeg: str = r"ffmpeg"):
-    """用 concat 解复用器 + -c copy 无损拼接（要求所有片段编码参数一致）。"""
-    tmp = tempfile.NamedTemporaryFile(
-        prefix="ff_filelist_",
-        suffix=".txt",
-        mode="w",
-        encoding="utf-8",
-        delete=False,    # Windows 下要先关闭句柄
-    )
-    try:
-        for p in inputs:
-            tmp.write(f"file '{Path(p).resolve().as_posix()}'\n")
-            # .resolve()=====转成绝对路径 消掉 . 和 ..
-            # .as_posix()====posix风格 用斜杠/而不是反斜杠\
-        tmp.flush()
-        filelist = tmp.name
-    finally:
-        tmp.close()  # 先关闭，让 FFmpeg 能读取
+class ConcatList:
+    """concat 解复用器的文件列表（临时文件，退出时删除）。"""
 
-    try:
+    def __init__(self, inputs: List[Union[str, Path]]):
+        self.inputs = inputs
+
+    def __enter__(self) -> str:
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="ff_filelist_", suffix=".txt", mode="w", encoding="utf-8",
+            delete=False,    # Windows 下要先关闭句柄，FFmpeg 才能读取
+        )
+        with tmp:
+            for p in self.inputs:
+                # 绝对路径 + 正斜杠，concat 列表里不需要转义反斜杠
+                tmp.write(f"file '{Path(p).resolve().as_posix()}'\n")
+        self.path = tmp.name
+        return self.path
+
+    def __exit__(self, *_):
+        os.remove(self.path)
+
+
+def concat_copy(inputs: List[Union[str, Path]], out_path: str, ffmpeg: str = r"ffmpeg",
+                streams: List[str] = (), faststart: bool = True):
+    """用 concat 解复用器 + -c copy 无损拼接（要求所有片段编码参数一致）。
+    streams 为额外的 FFmpeg 选择参数，例如 ["-an"] 只拼视频。"""
+    with ConcatList(inputs) as filelist:
         cmd = [
-            ffmpeg, "-y",
-            "-f", "concat",
-            "-loglevel", "error",
-            "-safe", "0",
-            "-i", filelist,
-            "-c", "copy",
+            ffmpeg, "-y", "-f", "concat", "-loglevel", "error", "-safe", "0",
+            "-i", filelist, *streams, "-c", "copy",
             "-reset_timestamps", "1",
             "-avoid_negative_ts", "make_zero",   # 拼接处时间戳归零，避免非单调 DTS
-            "-movflags", "+faststart",
+            *(["-movflags", "+faststart"] if faststart else []),
             out_path,
         ]
         subprocess.run(cmd, check=True)
-    finally:
-        os.remove(filelist)
     return out_path
 
 
 def detect(file: str):
+    """音轨峰值 max_volume（dBFS）。"""
     cmd = [
             'ffmpeg',
             '-hide_banner',
@@ -165,33 +168,91 @@ def detect(file: str):
     return float(m.group(1))
 
 
-def amplify_mp4(file, target_db=-1, remover=True, extra_gain_db=0) -> Path:
-    file = Path(file)
-    peak = detect(str(file))  # 检测最高音量max_volume
+def audio_bit_rate(path: Union[str, Path], ffprobe: str = "ffprobe") -> Union[str, None]:
+    out = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+         "stream=bit_rate", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return out if out.isdigit() else None
 
-    gain_db = target_db - peak + extra_gain_db
-    if gain_db < 0:
-        gain_db = 0
 
-    dst = safe_filename(str(file.parent/f"{file.stem}_amplified.mp4"))
-    cmd = [
-        'ffmpeg',
-        '-y',                # ← 覆盖输出，避免交互
-        '-nostdin',          # ← 不读取标准输入 防止 FFmpeg 卡住等待用户输入
-        '-hide_banner',
-        '-i', str(file),
-        '-af', f'volume={gain_db:.2f}dB,alimiter=limit=0.891',  # audio filter音频滤镜
-        '-c:v', 'copy',
-        '-c:a', 'aac',  # AAC = 高级音频编码（Advanced Audio Coding）
-        '-movflags', '+faststart',
-        str(dst)
-    ]
-    logger.info('开始进行音频增益')
-    result = subprocess.run(cmd, text=True, capture_output=True, encoding='utf-8')
-    if result.returncode != 0:
-        logger.error("ffmpeg 失败：%s", result.stderr.strip().splitlines()[-1] if result.stderr else "未知错误")
-        raise RuntimeError("ffmpeg 执行失败")
-    logger.info(f"检测峰值 {peak:.2f} dBFS → 放大 {gain_db:.2f} dB → 输出: {dst}")
-    if remover:
-        send2trash(str(file))
-    return Path(dst)
+def concat_with_gain(inputs: List[Union[str, Path]], out_path: Union[str, Path],
+                     target_db: float = -1, extra_gain_db: float = 0,
+                     workdir: Union[str, Path, None] = None, ffmpeg: str = "ffmpeg") -> Path:
+    """拼接并对**整体**音频做同一个增益：峰值提到 target_db，再加 extra_gain_db。
+
+    - 增益按全部片段的最高峰值计算（各段峰值的最大值就是整体峰值，各段并行检测）；
+    - 拼接后的连续音频只编码一次，各段用同一个增益，接缝处没有单独编码的边界；
+    - 视频无损拼接与音频编码同时进行，最后一次封装（只做一次 faststart）。
+    音频码率沿用源文件，AAC 用 fast 编码器（约快一倍，高码率下听不出差别）。"""
+    workdir = Path(workdir or Path(out_path).parent)
+    with ThreadPoolExecutor(max_workers=min(len(inputs), os.cpu_count() or 1)) as pool:
+        peak = max(pool.map(detect, [str(p) for p in inputs]))
+    gain_db = max(0.0, target_db - peak + extra_gain_db)
+    logger.info("音频增益：整体峰值 %.2f dBFS → 放大 %.2f dB", peak, gain_db)
+
+    video = workdir / "gain_video.mp4"
+    audio = workdir / "gain_audio.m4a"
+    bit_rate = audio_bit_rate(inputs[0])
+
+    def encode_audio():
+        with ConcatList(inputs) as filelist:
+            subprocess.run(
+                [ffmpeg, "-y", "-nostdin", "-loglevel", "error",
+                 "-f", "concat", "-safe", "0", "-i", filelist, "-vn",
+                 "-af", f"volume={gain_db:.2f}dB,alimiter=limit=0.891",
+                 "-c:a", "aac", "-aac_coder", "fast",
+                 *(["-b:a", bit_rate] if bit_rate else []), str(audio)],
+                check=True,
+            )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = [
+                pool.submit(concat_copy, inputs, str(video), ffmpeg, ["-an"], False),
+                pool.submit(encode_audio),
+            ]
+            for job in jobs:
+                job.result()
+        subprocess.run(
+            [ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-i", str(video),
+             "-i", str(audio), "-map", "0:v", "-map", "1:a", "-c", "copy",
+             "-movflags", "+faststart", str(out_path)],
+            check=True,
+        )
+    finally:
+        for path in (video, audio):
+            if path.exists():
+                os.remove(path)
+    return Path(out_path)
+
+
+def merge_group(group: List[Dict], product: Union[str, Path], workdir: Union[str, Path],
+                amplify: Union[tuple, None] = None) -> Path:
+    """把 group_by_format 的一组（连续、同格式）合成 product：
+    timescale 不一致的段先无损 retime；amplify=(target_db, extra_gain_db) 时整体增益，
+    否则 -c copy 拼接（单段直接复制）。源文件不改动，临时件放在 workdir 并用完删除。"""
+    workdir = Path(workdir)
+    reference = max(group, key=lambda item: item.get("dur") or 0)
+    target_ts = reference.get("ts")
+    inputs, retimed = [], []
+    for index, segment in enumerate(group):
+        if len(group) > 1 and target_ts and segment.get("ts") and segment["ts"] != target_ts:
+            adjusted = workdir / f"retime_{Path(product).stem}_{index:03d}.mp4"
+            retime(segment["path"], adjusted, target_ts)
+            inputs.append(adjusted)
+            retimed.append(adjusted)
+        else:
+            inputs.append(segment["path"])
+    try:
+        if amplify:
+            concat_with_gain(inputs, product, *amplify, workdir=workdir)
+        elif len(inputs) == 1:
+            shutil.copy2(inputs[0], product)
+        else:
+            concat_copy(inputs, str(product))
+    finally:
+        for path in retimed:
+            os.remove(path)
+    return Path(product)

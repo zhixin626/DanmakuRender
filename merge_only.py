@@ -12,12 +12,10 @@ import shutil
 import tempfile
 
 from DMR.Merger.video_merge import (
-    amplify_mp4,
-    concat_copy,
     describe_format,
     group_by_format,
+    merge_group,
     probe_seg,
-    retime,
 )
 from DMR.utils.prompts import (
     ask_choice,
@@ -57,37 +55,12 @@ def merge_mp4(
         tempfile.mkdtemp(prefix=".merge_only_tmp_", dir=str(target.parent))
     )
     try:
-        group = groups[0]
-        product = workdir / "merged.mp4"
-        if len(group) == 1:
-            shutil.copy2(group[0]["path"], product)
-        else:
-            reference = max(group, key=lambda item: item.get("dur") or 0)
-            target_timescale = reference.get("ts")
-            inputs = []
-            for index, segment in enumerate(group):
-                if (
-                    target_timescale
-                    and segment.get("ts")
-                    and segment["ts"] != target_timescale
-                ):
-                    adjusted = workdir / f"retime_{index:03d}.mp4"
-                    retime(segment["path"], adjusted, target_timescale)
-                    inputs.append(adjusted)
-                else:
-                    inputs.append(segment["path"])
-            concat_copy(inputs, str(product))
-
-        if amplify_audio:
-            product = Path(
-                amplify_mp4(
-                    product,
-                    target_db=-1,
-                    extra_gain_db=extra_gain_db,
-                    remover=False,
-                )
-            )
-
+        product = merge_group(
+            groups[0],
+            workdir / "merged.mp4",
+            workdir,
+            (-1, extra_gain_db) if amplify_audio else None,
+        )
         product.replace(target)
         return target
     finally:

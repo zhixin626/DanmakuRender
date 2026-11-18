@@ -6,8 +6,8 @@
 
 合并策略（_merge_pipeline，三段式）：
   1. 计划：probe_seg 探测所有段（全程只探测一次），group_by_format 按「连续同分辨率、同编码格式」分组；
-  2. 执行：每组产出一个中间产物——≥2 段的组先把 timescale 无损对齐再 concat_copy，
-     单段组直接复制直通（不重编码、不改动源文件）；可选 amplify；
+  2. 执行：每组由 merge_group 产出一个中间产物——timescale 无损对齐后 concat_copy，
+     单段组直接复制直通（不重编码、不改动源文件）；放大音频时整组音频统一增益、只编码一次；
   3. 提交：模板命名（多产物自动加 _partN）→ probe 建 VideoInfo →
      **全部成功后**才统一 send2trash 源文件（remove_source 时）。
   源文件在提交前绝不被修改/移动，失败重试安全。
@@ -31,7 +31,6 @@ job data 约定（由 liveevents 发来；pipe 为进程内 queue，可直接传
 回发 'end' 的 data：{'outputs': [<VideoInfo>, ...], 'merge_type': vt}，列表按时间顺序排列。
 """
 import logging
-import os
 import queue
 import shutil
 import tempfile
@@ -48,7 +47,7 @@ from send2trash import send2trash
 from DMR.utils import *
 from DMR.utils.ffprobe import probe_media
 from DMR.utils.utils import rename_safe
-from .video_merge import probe_seg, group_by_format, describe_format, retime, concat_copy, amplify_mp4
+from .video_merge import probe_seg, group_by_format, describe_format, merge_group
 
 
 class Merger():
@@ -112,35 +111,11 @@ class Merger():
         try:
             # === 执行：每组产出一个中间产物（都落在工作目录里） ===
             products = []          # (中间产物路径, 无模板时的兜底文件名)
+            amplify = ((-1, args.get('extra_gain_db', 0))
+                       if args.get('is_amplify') else None)
             for gi, group in enumerate(groups):
-                product = workdir / f'group_{gi:02d}.mp4'
-                if len(group) >= 2:
-                    # 组内以最长段的 timescale 为基准，不一致的段先无损 retime
-                    ref = max(group, key=lambda x: x['dur'])
-                    target_ts = ref['ts']
-                    inputs, retimes = [], []
-                    for si, seg in enumerate(group):
-                        if target_ts and seg['ts'] and seg['ts'] != target_ts:
-                            dst = workdir / f'retime_{gi:02d}_{si:03d}.mp4'
-                            retime(seg['path'], dst, target_ts)
-                            inputs.append(dst)
-                            retimes.append(dst)
-                        else:
-                            inputs.append(seg['path'])
-                    concat_copy(inputs, str(product))
-                    for t in retimes:          # retime 临时件用完立刻删，不积到收尾
-                        os.remove(t)
-                else:
-                    # 单段直通：复制一份当产物，源文件不动
-                    shutil.copy2(group[0]['path'], product)
+                product = merge_group(group, workdir / f'group_{gi:02d}.mp4', workdir, amplify)
                 products.append((product, f"{Path(group[0]['path']).stem}_merged"))
-
-            if args.get('is_amplify'):
-                # amplify 删的是本组中间产物（remover=True），不碰源文件
-                products = [(Path(amplify_mp4(p, target_db=-1,
-                                              extra_gain_db=args.get('extra_gain_db', 0),
-                                              remover=True)), fb)
-                            for p, fb in products]
 
             # === 收尾：模板命名（多产物加 _partN）+ probe 元信息 + 构造 VideoInfo ===
             tmpl = args.get('file_name_template')
