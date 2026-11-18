@@ -26,6 +26,7 @@ def test_render_module_boundary():
     assert {p.name for p in (ROOT / "DMR/Render").glob("*.py")} - original == {
         "sprites.py",
         "gpu_render.py",
+        "av_timeline.py",
     }
 
 

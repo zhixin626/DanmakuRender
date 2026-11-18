@@ -26,6 +26,7 @@ from .layout_models import RenderEvent
 from .resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
 from ..utils.ffprobe import source_frame_rate
 from .baserender import BaseRender, RenderInputError, RenderStopped
+from .av_timeline import MAX_TIMESTAMP_GAP, AudioJob, SharedTimeline, mux_streams
 from .sprites import build_atlas
 
 logger = logging.getLogger(__name__)
@@ -34,15 +35,11 @@ RING_SLOTS = 4
 METADATA_FIELDS = 6  # x, y, offset, width, height, alpha
 
 
-# A forward timestamp jump larger than this is a stream reset, not missing
-# media; holding the last frame that long would freeze the video.
-MAX_TIMESTAMP_GAP = 10.0
-
-# Video frames are re-timed by schedule_frames, audio by FFmpeg aresample;
-# after network glitches the two repairs can end a little apart. That is
-# logged, not failed: the fallback engine uses the same audio repair and
-# would only redo the render slower. A gap beyond the timeline-repair scale
-# means media was lost, so the render still fails and falls back.
+# Audio and video share one timeline (av_timeline), so their lengths match by
+# construction; only stream-copied audio is not re-timed and can end a little
+# apart. That is logged, not failed: the fallback engine would only redo the
+# render slower. A gap beyond the timeline-repair scale means media was lost,
+# so the render still fails and falls back.
 AV_DURATION_WARN_SECONDS = 0.1
 AV_DURATION_FAIL_SECONDS = MAX_TIMESTAMP_GAP
 
@@ -270,6 +267,22 @@ def parse_encoder_args(args: list[str]) -> dict[str, str]:
     return result
 
 
+def parse_audio_encoder_args(args: list[str]) -> tuple[int | None, dict[str, str]]:
+    """``-b:a`` sets the bit rate; other ``-name value`` pairs become encoder
+    options (e.g. ``-aac_coder fast``). Rate and channels follow the source."""
+    if len(args) % 2:
+        raise ValueError(f"aencoder_args must be -name value pairs: {args}")
+    bit_rate = None
+    options = {}
+    for flag, value in zip(args[::2], args[1::2]):
+        name = str(flag).lstrip("-").split(":")[0]
+        if name == "b":
+            bit_rate = parse_bitrate(value)
+        else:
+            options[name] = str(value)
+    return bit_rate, options
+
+
 def validate_av_duration(path: pathlib.Path) -> dict[str, float]:
     """Warn when audio and video lengths disagree; fail when media was lost."""
     result = subprocess.run(
@@ -360,6 +373,7 @@ def schedule_frames(
     max_frames: int | None = None,
     source_fps: float | None = None,
     start_offset: float = 0.0,
+    timeline: SharedTimeline | None = None,
 ) -> Iterator[tuple[Any, float]]:
     """Yield one decoded frame and its CFR presentation time.
 
@@ -377,8 +391,8 @@ def schedule_frames(
     current_relative = 0.0
     last_interval = 1.0 / (source_fps or output_fps)
     # Live recordings may jump their timestamps (pusher reconnects, CDN
-    # switches, flaky downloads). The audio is muxed by its own timestamps, so
-    # video must follow the same timeline:
+    # switches, flaky downloads). The audio follows the same rules
+    # (av_timeline) and reuses each reset shift published to ``timeline``:
     # - a short step back (<= MAX_TIMESTAMP_GAP) re-sends content already
     #   shown: drop those frames until the timeline catches up;
     # - a timestamp reset or a huge forward jump is a new timeline: shift it
@@ -409,6 +423,8 @@ def schedule_frames(
                 jump = -backward
                 timeline_shift += current_relative + nominal - pending_relative
                 pending_relative = current_relative + nominal
+                if timeline is not None:
+                    timeline.add_shift(timeline_shift)
                 logger.warning(
                     "源视频时间戳在第 %.2f 秒跳变 %+.2f 秒，已接续时间线",
                     current_relative,
@@ -883,6 +899,7 @@ def encode_to_file(
     expected_frames: int | None = None,
     stop_event=None,
     chroma_location="left",
+    timeline: SharedTimeline | None = None,
 ) -> dict[str, Any]:
     """Composite and encode decoded frames into an elementary stream."""
     width, height = geometry
@@ -946,6 +963,7 @@ def encode_to_file(
                 max_frames=config.max_frames,
                 source_fps=source_frame_rate,
                 start_offset=start_offset,
+                timeline=timeline,
             ):
                 profiled = profiler.enabled
                 body_start = time.perf_counter() if profiled else 0.0
@@ -1080,14 +1098,13 @@ def mux_audio(
     output: pathlib.Path,
     frame_rate: float,
     trim_duration: float | None = None,
-    audio_encoder: str = "copy",
-    audio_args: list[str] | None = None,
-    video_duration: float | None = None,
     stop_event=None,
     packet_times=None,
     bframes=0,
 ) -> None:
-    """Mux encoded video with the source audio without truncating either stream."""
+    """Mux encoded video with the source audio stream-copied (aencoder: copy).
+    Copied audio keeps its own timestamps; re-encoded audio goes through the
+    shared timeline instead (av_timeline)."""
     if packet_times is not None:
         timestamped = bitstream.with_suffix(".mp4")
         stamp_video(
@@ -1114,22 +1131,12 @@ def mux_audio(
         "0:v:0",
         "-map",
         "1:a",
-        "-c:v",
+        "-c",
         "copy",
-        "-c:a",
-        audio_encoder,
-        *(audio_args or []),
         str(output),
     ]
     if trim_duration is not None:
         command[-1:-1] = ["-t", str(trim_duration)]
-    if audio_encoder != "copy":
-        # Same audio timeline repair used by emoji_render_mt; pad missing tail
-        # samples with silence without discarding any source audio.
-        filters = "aresample=async=1000:first_pts=0"
-        if trim_duration is None and video_duration is not None:
-            filters += f",apad=whole_dur={video_duration}"
-        command[-1:-1] = ["-af", filters]
     if stop_event is None:
         subprocess.run(command, check=True, capture_output=True, text=True)
     else:
@@ -1231,46 +1238,87 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
         codec = codec_name(config.video_encoder)
         if codec not in ("hevc", "h264"):
             raise RenderInputError(f"unsupported GPU video codec: {codec}")
+        audio_encoder = str(kwargs.get("aencoder", "copy"))
+        timeline = None if audio_encoder == "copy" else SharedTimeline()
         with tempfile.TemporaryDirectory(
             prefix="dmr_render_", dir=destination.parent
         ) as work:
             bitstream = pathlib.Path(work) / ("video." + codec)
             partial = pathlib.Path(work) / destination.name
-            result = encode_to_file(
-                decoded,
-                first,
-                cupy,
-                nvc,
-                bitstream,
-                (width, height),
-                frame_rate,
-                config,
-                source_frame_rate=source_fps,
-                start_offset=max(0.0, first[1] - source_start),
-                progress_cb=progress_cb,
-                expected_frames=expected,
-                stop_event=stop_event,
-                chroma_location=chroma_location,
-            )
-            check_stop(stop_event)
-            video_duration = result["frames"] / frame_rate
-            truncated = (
-                config.max_frames is not None
-                and video_duration < source_duration - 1 / frame_rate
-            )
-            mux_audio(
-                bitstream,
-                source,
-                partial,
-                frame_rate,
-                video_duration if truncated else None,
-                kwargs.get("aencoder", "copy"),
-                kwargs.get("aencoder_args"),
-                video_duration,
-                stop_event,
-                result.pop("packet_times"),
-                result["bframes"],
-            )
+            audio_path = pathlib.Path(work) / "audio.m4a"
+            audio = None
+            try:
+                if timeline is not None:
+                    bit_rate, audio_options = parse_audio_encoder_args(
+                        kwargs.get("aencoder_args") or []
+                    )
+                    # Encodes beside NVENC; waits for the video's reset shifts.
+                    audio = AudioJob(
+                        source=source,
+                        output=audio_path,
+                        origin=source_start,
+                        codec=audio_encoder,
+                        bit_rate=bit_rate,
+                        options=audio_options,
+                        timeline=timeline,
+                        tolerance=0.5 / frame_rate,
+                        stop_event=stop_event,
+                    )
+                result = encode_to_file(
+                    decoded,
+                    first,
+                    cupy,
+                    nvc,
+                    bitstream,
+                    (width, height),
+                    frame_rate,
+                    config,
+                    source_frame_rate=source_fps,
+                    start_offset=max(0.0, first[1] - source_start),
+                    progress_cb=progress_cb,
+                    expected_frames=expected,
+                    stop_event=stop_event,
+                    chroma_location=chroma_location,
+                    timeline=timeline,
+                )
+                check_stop(stop_event)
+                video_duration = result["frames"] / frame_rate
+                truncated = (
+                    config.max_frames is not None
+                    and video_duration < source_duration - 1 / frame_rate
+                )
+                packet_times = result.pop("packet_times")
+                if audio is not None:
+                    timeline.close(video_duration)
+                    audio.join()
+                    mux_streams(
+                        bitstream,
+                        packet_times,
+                        result["bframes"],
+                        frame_rate,
+                        audio_path,
+                        partial,
+                        video_duration,
+                        stop_event,
+                    )
+                else:
+                    mux_audio(
+                        bitstream,
+                        source,
+                        partial,
+                        frame_rate,
+                        video_duration if truncated else None,
+                        stop_event,
+                        packet_times,
+                        result["bframes"],
+                    )
+            except BaseException:
+                # The audio thread must release its files before the work
+                # directory is removed.
+                if audio is not None:
+                    timeline.close()
+                    audio.wait()
+                raise
             if not truncated:
                 validate_av_duration(partial)
             check_stop(stop_event)

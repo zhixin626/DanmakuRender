@@ -305,6 +305,8 @@ render_args:
     # 传给视频编码器的附加参数；例如 [-b:v, 6M] 表示目标视频码率 6 Mbps
     vencoder_args: [-b:v, 15M]
     # 音频编码器：aac 表示重新编码；copy 表示直接复制原音频流
+    # gpu_render 重新编码时，声音和画面按同一套规则修正直播流的时间戳跳变（不会音画错位）；
+    # copy 无法修正声音，网络卡顿过的录制可能音画不同步
     aencoder: aac
     # 例如 [-b:a, 160K] 表示目标音频码率 160 kbps；aencoder 为 copy 时应写 []
     aencoder_args: [-b:a, 320K]
