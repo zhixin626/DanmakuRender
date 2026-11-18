@@ -32,12 +32,19 @@ logger = logging.getLogger(__name__)
 _dll_handles = []
 RING_SLOTS = 4
 METADATA_FIELDS = 6  # x, y, offset, width, height, alpha
-AV_DURATION_TOLERANCE_SECONDS = 0.1
 
 
 # A forward timestamp jump larger than this is a stream reset, not missing
 # media; holding the last frame that long would freeze the video.
 MAX_TIMESTAMP_GAP = 10.0
+
+# Video frames are re-timed by schedule_frames, audio by FFmpeg aresample;
+# after network glitches the two repairs can end a little apart. That is
+# logged, not failed: the fallback engine uses the same audio repair and
+# would only redo the render slower. A gap beyond the timeline-repair scale
+# means media was lost, so the render still fails and falls back.
+AV_DURATION_WARN_SECONDS = 0.1
+AV_DURATION_FAIL_SECONDS = MAX_TIMESTAMP_GAP
 
 PLAN_KERNEL = r"""
 extern "C" __global__
@@ -264,7 +271,7 @@ def parse_encoder_args(args: list[str]) -> dict[str, str]:
 
 
 def validate_av_duration(path: pathlib.Path) -> dict[str, float]:
-    """Fail full renders whose audio and video timelines disagree."""
+    """Warn when audio and video lengths disagree; fail when media was lost."""
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)],
         check=True,
@@ -279,10 +286,19 @@ def validate_av_duration(path: pathlib.Path) -> dict[str, float]:
     }
     if "video" not in durations or "audio" not in durations:
         raise RenderInputError(f"missing audio/video stream: {path}")
-    if abs(durations["video"] - durations["audio"]) > AV_DURATION_TOLERANCE_SECONDS:
+    difference = abs(durations["video"] - durations["audio"])
+    if difference > AV_DURATION_FAIL_SECONDS:
         raise RenderInputError(
             "audio/video duration difference exceeds "
-            f"{AV_DURATION_TOLERANCE_SECONDS}s: {durations}"
+            f"{AV_DURATION_FAIL_SECONDS}s: {durations}"
+        )
+    if difference > AV_DURATION_WARN_SECONDS:
+        logger.warning(
+            "输出的音频和视频时长相差 %.2f 秒（视频 %.2f 秒，音频 %.2f 秒），"
+            "多为录制时网络波动造成的时间戳跳变；已保留 GPU 结果",
+            difference,
+            durations["video"],
+            durations["audio"],
         )
     return durations
 

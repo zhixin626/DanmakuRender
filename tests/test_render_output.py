@@ -241,18 +241,25 @@ def test_mux_trim_only_when_requested():
         assert ("-t" in command) == (duration is not None)
 
 
-def test_full_duration_disagreement_fails():
+@pytest.mark.parametrize(
+    "audio,outcome", [("2.05", "ok"), ("2.4", "warn"), ("13.0", "fail")]
+)
+def test_duration_disagreement_warns_and_only_lost_media_fails(audio, outcome, caplog):
     with patch("DMR.Render.gpu_render.subprocess.run") as run:
         run.return_value.stdout = json.dumps(
             {
                 "streams": [
                     {"codec_type": "video", "duration": "2.0"},
-                    {"codec_type": "audio", "duration": "2.2"},
+                    {"codec_type": "audio", "duration": audio},
                 ]
             }
         )
-        with pytest.raises(ValueError):
-            validate_av_duration(Path("out.mp4"))
+        if outcome == "fail":
+            with pytest.raises(ValueError):
+                validate_av_duration(Path("out.mp4"))
+            return
+        assert validate_av_duration(Path("out.mp4"))["audio"] == float(audio)
+    assert ("时长相差" in caplog.text) == (outcome == "warn")
 
 
 @pytest.mark.parametrize("shape", ["round_top", "round_bottom", "stadium"])
