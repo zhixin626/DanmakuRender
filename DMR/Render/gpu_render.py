@@ -35,11 +35,11 @@ RING_SLOTS = 4
 METADATA_FIELDS = 6  # x, y, offset, width, height, alpha
 
 
-# Audio and video share one timeline (av_timeline), so their lengths match by
-# construction; only stream-copied audio is not re-timed and can end a little
-# apart. That is logged, not failed: the fallback engine would only redo the
-# render slower. A gap beyond the timeline-repair scale means media was lost,
-# so the render still fails and falls back.
+# Length differences between audio and video (stream-copied audio, or
+# re-encoded audio against the video coverage, see check_video_coverage) are
+# logged, not failed: the fallback engine would only redo the render slower.
+# A gap beyond the timeline-repair scale means media was lost, so the render
+# fails and falls back.
 AV_DURATION_WARN_SECONDS = 0.1
 AV_DURATION_FAIL_SECONDS = MAX_TIMESTAMP_GAP
 
@@ -265,6 +265,29 @@ def parse_encoder_args(args: list[str]) -> dict[str, str]:
             else str(value)
         )
     return result
+
+
+def check_video_coverage(audio_end: float, video_duration: float, truncated: bool):
+    """Audio is cut to the video length, so the audio/video duration check
+    can no longer see a video that stopped early (the NVDEC demuxer stops at
+    corrupt data, e.g. ``Invalid NAL unit size``). Compare against where the
+    source audio ended instead: a large overhang means video was lost, and
+    the fallback engine (FFmpeg skips corrupt packets) may recover it."""
+    if truncated:
+        return
+    overhang = audio_end - video_duration
+    if overhang > AV_DURATION_FAIL_SECONDS:
+        raise RenderInputError(
+            f"video ended {overhang:.1f}s before the source audio "
+            f"(video {video_duration:.1f}s, audio {audio_end:.1f}s)"
+        )
+    if abs(overhang) > AV_DURATION_WARN_SECONDS:
+        logger.warning(
+            "画面 %.2f 秒，源声音 %.2f 秒，%s，已对齐到画面长度（源文件结尾可能不完整）",
+            video_duration,
+            audio_end,
+            "声音更长" if overhang > 0 else "声音提前结束、补了静音",
+        )
 
 
 def parse_audio_encoder_args(args: list[str]) -> tuple[int | None, dict[str, str]]:
@@ -1290,7 +1313,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
                 packet_times = result.pop("packet_times")
                 if audio is not None:
                     timeline.close(video_duration)
-                    audio.join()
+                    check_video_coverage(audio.join(), video_duration, truncated)
                     mux_streams(
                         bitstream,
                         packet_times,

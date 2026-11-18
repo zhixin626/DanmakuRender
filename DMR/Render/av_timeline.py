@@ -175,9 +175,10 @@ def render_audio(
     timeline: SharedTimeline,
     tolerance: float,
     stop_event=None,
-) -> None:
+) -> float:
     """Decode the source audio, place it on the shared timeline and encode
-    it to ``output``, padded with silence to the video length."""
+    it to ``output``, padded with silence to the video length. Returns where
+    the source audio ended on the timeline (seconds), before padding."""
 
     with av.open(str(source)) as container:
         if not container.streams.audio:
@@ -225,31 +226,36 @@ def render_audio(
                     )
             for tail in resampler.resample(None):
                 writer.place(tail.to_ndarray(), writer.written)
+            content_end = writer.written / rate
             writer.pad_to(round(timeline.end(stop_event) * rate))
             writer.flush()
+    return content_end
 
 
 class AudioJob:
-    """Runs render_audio beside the video encoder; join() re-raises."""
+    """Runs render_audio beside the video encoder; join() returns its result
+    or re-raises its error."""
 
     def __init__(self, **kwargs):
         self.error: BaseException | None = None
+        self.content_end = 0.0
         self.thread = threading.Thread(target=self._run, kwargs=kwargs, daemon=True)
         self.thread.start()
 
     def _run(self, **kwargs):
         try:
-            render_audio(**kwargs)
+            self.content_end = render_audio(**kwargs)
         except BaseException as error:
             self.error = error
 
     def wait(self) -> None:
         self.thread.join()
 
-    def join(self) -> None:
+    def join(self) -> float:
         self.wait()
         if self.error is not None:
             raise self.error
+        return self.content_end
 
 
 def mux_streams(

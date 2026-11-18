@@ -247,3 +247,38 @@ def test_stopping_video_releases_running_audio(monkeypatch, tmp_path):
     )
     assert not ok and isinstance(error, gpu_render.RenderStopped)
     assert [p.name for p in tmp_path.iterdir()] == ["source.mp4"]
+
+
+@pytest.mark.parametrize("video_frames,outcome", [(300, "ok"), (100, "warn"), (25, "fail")])
+def test_video_that_stops_early_is_not_hidden(monkeypatch, tmp_path, caplog, video_frames, outcome):
+    source = tmp_path / "source.mp4"
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+         "testsrc=size=160x90:rate=25", "-f", "lavfi", "-i", "sine", "-t", "12",
+         "-c:v", "libx264", "-bf", "0", "-c:a", "aac", "-shortest", str(source)],
+        check=True,
+    )
+    raw_source = tmp_path / "raw.h264"
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-i", str(source), "-frames:v",
+         str(video_frames), "-c:v", "copy", "-an", "-f", "h264", str(raw_source)],
+        check=True,
+    )
+
+    def encode(*args, **kwargs):
+        args[4].write_bytes(raw_source.read_bytes())
+        return {"frames": video_frames, "packet_times": list(range(video_frames)),
+                "bframes": 0}
+
+    fake_gpu(monkeypatch, encode)
+    # Audio runs 12 s; video covers all of it, 4 s or 1 s. The 8 s overhang
+    # is logged; only the 11 s one exceeds the 10 s repair scale.
+    if outcome == "fail":
+        with pytest.raises(gpu_render.RenderInputError):
+            gpu_render.render_one(str(source), str(tmp_path / "out.mp4"),
+                                  without_danmaku=True, canvas_resolution=(160, 90),
+                                  aencoder="aac")
+        return
+    gpu_render.render_one(str(source), str(tmp_path / "out.mp4"),
+                          without_danmaku=True, canvas_resolution=(160, 90), aencoder="aac")
+    assert ("已对齐到画面长度" in caplog.text) == (outcome == "warn")
