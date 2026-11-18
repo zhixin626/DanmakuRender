@@ -14,7 +14,8 @@ import tempfile
 from DMR.Merger.video_merge import (
     amplify_mp4,
     concat_copy,
-    group_by_resolution,
+    describe_format,
+    group_by_format,
     probe_seg,
     retime,
 )
@@ -45,14 +46,10 @@ def merge_mp4(
     amplify_audio=False,
     extra_gain_db=0,
 ) -> Path:
-    """按当前 DMR Merger 的规则无损合并一组同分辨率 MP4（metas 来自 probe_seg）。"""
-    groups = group_by_resolution(metas)
+    """按当前 DMR Merger 的规则无损合并一组同格式 MP4（metas 来自 probe_seg）。"""
+    groups = group_by_format(metas)
     if len(groups) != 1:
-        resolutions = [group[0].get("wh") for group in groups]
-        raise RuntimeError(
-            "输入视频存在不同分辨率或探测失败，不能安全合并成一个文件："
-            f"{resolutions}"
-        )
+        raise RuntimeError("输入视频分辨率或编码格式不一致，不能无损合并成一个文件")
 
     target = Path(target_path).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +150,12 @@ def main():
         print("至少需要两个视频，没有开始合并。")
         return
     metas = [probe_seg(video) for video in videos]
+    if len(group_by_format(metas)) > 1:
+        print("这些视频分辨率或编码格式不一致，无损拼接会花屏，没有开始合并：")
+        for meta in metas:
+            print(f"  {meta['path'].name} | {describe_format(meta)}")
+        print("请用 render_only 统一渲染/转码后再合并。")
+        return
 
     amplify_audio = (
         ask_choice("音量：", ["保持原音量", "放大（峰值提到 -1 dBFS）"]) == 1
@@ -168,11 +171,11 @@ def main():
         print("没有开始合并。")
         return
 
-    lines = ["合并顺序 | 分辨率 | 时长"]
+    lines = ["合并顺序 | 格式 | 时长"]
     for index, meta in enumerate(metas, 1):
-        size = "x".join(map(str, meta["wh"])) if meta["wh"] else "探测失败"
         lines.append(
-            f"{index}. {meta['path'].name} | {size} | {format_duration(meta['dur'])}"
+            f"{index}. {meta['path'].name} | {describe_format(meta)}"
+            f" | {format_duration(meta['dur'])}"
         )
     lines.append(
         "音量："

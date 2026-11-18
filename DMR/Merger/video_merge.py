@@ -3,14 +3,14 @@
 分工：这里只有"探测/分组/改写时间轴/纯拼接/响度"这些积木，全部不碰源文件、不删任何东西；
 编排（分组执行、直通复制、模板命名、统一删源）在 Merger 类的 _merge_pipeline 里。
 
-- probe_seg           : 探测单段的分辨率 / timescale / 时长（只读）。
-- group_by_resolution : 按「连续同分辨率」把探测结果切组。
+- probe_seg           : 探测单段的分辨率 / timescale / 时长 / 编码格式（只读）。
+- group_by_format     : 按「连续同分辨率、同编码格式」把探测结果切组。
 - retime              : 无损改写 timescale（-c copy，不重编码）。
-- concat_copy         : concat 解复用器 + -c copy 纯拼接，输入须已处理好（同分辨率同 timescale）。
+- concat_copy         : concat 解复用器 + -c copy 纯拼接，输入须已处理好（同格式同 timescale）。
 - amplify_mp4 / detect: 音频峰值检测 + 响度增益。
 
-原先"分辨率不一致→重编码归一"的功能已删除：分辨率不一致的段不再重编码，
-由 Merger 按分辨率分组各自合并、单段直通复制。
+分辨率或编码格式（编码器、像素格式、参数头、音频参数）不一致的段不重编码，
+由 Merger 分组各自合并、单段直通复制，例如 GPU 渲染段与回退引擎渲染段。
 """
 import os
 import re
@@ -27,27 +27,42 @@ from DMR.utils.utils import safe_filename
 logger = logging.getLogger(__name__)
 
 
+# 流参数里决定 concat -c copy 能否拼接的部分。参数头(extradata：SPS/PPS 等)
+# 不同的段拼在一起，播放器会拿第一段的参数头解后面的段 → 花屏、画面冻住、声音照常。
+# timescale 不在其中：不同时由 retime 无损对齐。
+VIDEO_FORMAT_KEYS = ("codec_name", "profile", "pix_fmt", "extradata_hash")
+AUDIO_FORMAT_KEYS = ("codec_name", "sample_rate", "channels")
+
+
 def probe_seg(path: Union[str, Path], ffprobe: str = r"ffprobe") -> Dict:
     """探测单个片段用于合并判定的关键信息：
-    分辨率 (w,h)、时长(秒)、时间刻度 timescale(time_base 分母)。
-    concat -c copy 要求所有片段的「分辨率」和「timescale」都一致，否则会画面错乱或时间轴被拉伸。"""
+    分辨率 wh=(w,h)、时长 dur(秒)、时间刻度 ts(time_base 分母)、
+    编码格式 fmt(VIDEO_FORMAT_KEYS + AUDIO_FORMAT_KEYS 的值；探测失败为 None)。"""
     cmd = [
-        ffprobe, "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,time_base",
+        ffprobe, "-v", "error", "-show_data_hash", "sha256",
+        "-show_entries",
+        "stream=codec_type,width,height,time_base,"
+        + ",".join(sorted(set(VIDEO_FORMAT_KEYS + AUDIO_FORMAT_KEYS))),
         "-show_entries", "format=duration",
         "-of", "json", str(path),
     ]
-    res = {"path": Path(path), "wh": None, "dur": 0.0, "ts": None}
+    res = {"path": Path(path), "wh": None, "dur": 0.0, "ts": None, "fmt": None}
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         data = json.loads(out.decode("utf-8", errors="ignore"))
-        s0 = (data.get("streams") or [{}])[0]
-        w, h = s0.get("width"), s0.get("height")
+        streams = data.get("streams") or []
+        video = next((s for s in streams if s.get("codec_type") == "video"), {})
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), {})
+        w, h = video.get("width"), video.get("height")
         res["wh"] = (w, h) if (w and h) else None
-        tb = s0.get("time_base")                       # 形如 "1/90000"
+        tb = video.get("time_base")                    # 形如 "1/90000"
         if tb and "/" in tb:
             den = tb.split("/")[1]
             res["ts"] = int(den) if den.isdigit() else None
+        if video:
+            res["fmt"] = tuple(video.get(k) for k in VIDEO_FORMAT_KEYS) + tuple(
+                audio.get(k) for k in AUDIO_FORMAT_KEYS
+            )
         dur = (data.get("format") or {}).get("duration")
         res["dur"] = float(dur) if dur else 0.0
     except Exception as e:
@@ -55,12 +70,24 @@ def probe_seg(path: Union[str, Path], ffprobe: str = r"ffprobe") -> Dict:
     return res
 
 
-def group_by_resolution(metas: List[Dict]) -> List[List[Dict]]:
-    """把 probe_seg 的结果列表按「连续同分辨率」切成若干组（保持原顺序）。
-    探测不出分辨率(wh=None)的段自成一组：不猜它和谁一致，交给上层直通处理。"""
+def describe_format(meta: Dict) -> str:
+    """一段的格式摘要，供日志/确认表区分不能拼接的段。"""
+    if not meta["wh"] or not meta["fmt"]:
+        return "探测失败"
+    codec, profile, pix_fmt, extradata = meta["fmt"][:4]
+    return (
+        f"{meta['wh'][0]}x{meta['wh'][1]} {codec} {profile or ''} {pix_fmt} "
+        f"参数头 {str(extradata).split(':')[-1][:8]}"
+    )
+
+
+def group_by_format(metas: List[Dict]) -> List[List[Dict]]:
+    """把 probe_seg 的结果按「连续同分辨率、同编码格式」切成若干组（保持原顺序），
+    只有同组的段才能 -c copy 拼接。探测失败的段自成一组：不猜它和谁一致。"""
     groups: List[List[Dict]] = []
     for m in metas:
-        if m["wh"] is not None and groups and groups[-1][-1]["wh"] == m["wh"]:
+        key = (m["wh"], m["fmt"])
+        if None not in key and groups and (groups[-1][-1]["wh"], groups[-1][-1]["fmt"]) == key:
             groups[-1].append(m)
         else:
             groups.append([m])

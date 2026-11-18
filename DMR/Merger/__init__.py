@@ -5,7 +5,7 @@
 **只负责执行，不读 state_dict**，编排仍在 liveevents（由 request_id 关联）。
 
 合并策略（_merge_pipeline，三段式）：
-  1. 计划：probe_seg 探测所有段（全程只探测一次），group_by_resolution 按「连续同分辨率」分组；
+  1. 计划：probe_seg 探测所有段（全程只探测一次），group_by_format 按「连续同分辨率、同编码格式」分组；
   2. 执行：每组产出一个中间产物——≥2 段的组先把 timescale 无损对齐再 concat_copy，
      单段组直接复制直通（不重编码、不改动源文件）；可选 amplify；
   3. 提交：模板命名（多产物自动加 _partN）→ probe 建 VideoInfo →
@@ -48,7 +48,7 @@ from send2trash import send2trash
 from DMR.utils import *
 from DMR.utils.ffprobe import probe_media
 from DMR.utils.utils import rename_safe
-from .video_merge import probe_seg, group_by_resolution, retime, concat_copy, amplify_mp4
+from .video_merge import probe_seg, group_by_format, describe_format, retime, concat_copy, amplify_mp4
 
 
 class Merger():
@@ -99,11 +99,12 @@ class Merger():
         探测→分组→逐组产出→(可选)响度→命名→全部成功后统一删源；
         源文件在删源前绝不被修改/移动，本函数可安全整体重试（每次自带独立工作目录）。"""
         metas = [probe_seg(p) for p in paths]
-        groups = group_by_resolution(metas)
+        groups = group_by_format(metas)
         if len(groups) > 1:
             self.logger.warning(
-                '分段分辨率不一致，按连续同分辨率分成 %d 组分别合并（不重编码）：%s',
-                len(groups), [(g[0]['wh'], len(g)) for g in groups])
+                '分段格式不一致，强行无损拼接会花屏，按连续一致的段分成 %d 组分别合并：%s',
+                len(groups),
+                '；'.join(f'{len(g)} 段 {describe_format(g[0])}' for g in groups))
 
         out_dir = Path(paths[0]).parent
         # 工作目录建在输出同盘：避免跨盘复制，收尾改名是瞬时原地 rename
