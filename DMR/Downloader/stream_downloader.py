@@ -36,6 +36,19 @@ def startup_state(onair: bool, trust_onair_at_startup: bool, in_record_window: b
     return StreamState.REPLAY_START
 
 
+def state_when_onair_unknown(state: StreamState) -> StreamState:
+    """开播状态查询失败（Onair() 返回 None）时的下一个状态。
+
+    查询失败不等于下播：录制中继续录，未开播时不开录，下播确认中不结束本场。
+    开始类的瞬时态照常推进到稳态，其余状态原样保持。
+    """
+    if state == StreamState.LIVE_START:
+        return StreamState.LIVE
+    if state == StreamState.REPLAY_START:
+        return StreamState.REPLAY
+    return state
+
+
 # Seconds stop_once waits for the recording thread to finish its last file.
 VIDEO_STOP_TIMEOUT = 15
 
@@ -438,9 +451,14 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
             except TimeoutError:
                 if time.time() - last_onair_check >= 60:
                     last_onair_check = time.time()
-                    if not self.liveapi.Onair():
+                    onair = self.liveapi.Onair()
+                    # 只有平台明确返回"未开播"才停录；查询失败(None)时 FFmpeg 照常录，
+                    # 真断流由 FFmpeg 自己退出、外层重连处理
+                    if onair is False:
                         self.logger.debug('LIVE END.')
                         return
+                    if onair is None:
+                        self.logger.warning(f"{self.taskname_disp}⚠️查询开播状态失败，继续录制")
 
 
     def get_effective_onair(self):
@@ -502,6 +520,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
         def update_state(state):
             now = datetime.now()
             now_onair = self.get_effective_onair()
+            self._onair_unknown = now_onair is None
 
             # 初始化：启动时已在播，只有信任开播状态且处于录制时段内才开录，否则视为回放
             if state is None:
@@ -513,6 +532,10 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                 return StreamState.STOPPING
             if state == StreamState.REPLAY_END:
                 return StreamState.OFFLINE
+
+            # 查询失败：既不当开播也不当下播，维持当前状态
+            if now_onair is None:
+                return state_when_onair_unknown(state)
 
             if now_onair:
                 if state in (StreamState.OFFLINE, StreamState.STOPPING):
@@ -565,6 +588,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                                             # 由 webapi.get_tasks_data 经 getattr 取走算"本场时长"，勿误删
         # =============================================
 
+        self._onair_unknown = False         # 最近一次开播状态查询是否失败
         restart_cnt = 0
         # 连续"取不到流地址"的次数。用来区分"推流瞬断/卡顿"(短暂取不到，快速重试可恢复)
         # 和"加密/密码房或长时间无流"(持续取不到，再快也是空转)。
@@ -636,9 +660,18 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
                         # 人为下播在完成确认等待后查真实平台状态；仍在线则下一轮进入 REPLAY。
                         if self.liveapi.Onair():
                             self.forced_replay_pending = True
-                    elif prev_state != StreamState.STOPPING and self.get_effective_onair():
-                        self.stop_confirm_deadline = None
-                        state = StreamState.LIVE
+                    elif prev_state != StreamState.STOPPING:
+                        final_onair = self.get_effective_onair()
+                        self._onair_unknown = final_onair is None
+                        if final_onair:
+                            self.stop_confirm_deadline = None
+                            state = StreamState.LIVE
+                            continue
+                    if not self.force_stop_trigger and self._onair_unknown:
+                        # 最后一次查询失败，不能确认真的下播：延长确认等待，不结束本场、不换 session
+                        interval = get_check_interval(stop_check_interval, check_policy)
+                        self.logger.warning(f"{self.taskname_disp}⚠️查询开播状态失败，{interval}秒后再确认是否下播")
+                        self.stop_confirm_deadline = time.monotonic() + interval
                         continue
                     self.logger.info(f"{self.taskname_disp}🔴直播真的结束了")
                     self._pipeSend('liveend', '直播真的结束了', data=self.sess_id)

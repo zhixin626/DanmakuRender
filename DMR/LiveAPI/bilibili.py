@@ -126,6 +126,9 @@ class bilibili(BaseAPI):
                 return True
             else:
                 return False
+        # 接口报错（code != 0）：状态未知，不是下播
+        logger.debug(f'bilibili onair {self.rid}: code={code}, message={resp.get("message")}')
+        return None
 
     def get_stream_urls(self,
                         bili_watch_cookies=None,

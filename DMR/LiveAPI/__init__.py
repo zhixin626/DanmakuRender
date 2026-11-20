@@ -72,10 +72,15 @@ class LiveAPI():
             logger.debug(e)
 
     def Onair(self):
+        """True=在播，False=平台明确返回未开播，None=查询失败（网络错误、接口报错等）。
+
+        调用方必须区分 False 和 None：查询失败不能当成下播。
+        """
         try:
             return self.api_class.onair()
         except Exception as e:
-            logger.debug(e)
+            logger.debug(f'Onair {self.platform, self.rid} Error: {e}')
+            return None
 
     def IsAvailable(self):
         try:
