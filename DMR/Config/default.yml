@@ -98,7 +98,8 @@ download_args:
         stream_cdn: ~
         # 直播流类型（暂时只对B站生效）：
         #   留空：FLV-AVC > fMP4-AVC > HLS-TS-AVC > HEVC > AV1
-        #   flv/fmp4/hls 或 avc/hevc/av1：提高该格式/编码的优先级，缺失时自动回退
+        #   flv/fmp4/hls 或 avc/hevc/av1：提高该格式/编码的优先级，缺失时按留空的顺序回退
+        #     例如 avc：有 FLV-AVC 就录它（即使画质比 HEVC 原画低），没有就回退到 fMP4-HEVC
         #   flv_only/fmp4_only/hls_only 或 avc_only/hevc_only/av1_only：严格限制
         #   type-codec（如 flv-avc、fmp4-hevc）：优先该精确组合
         # 注意HLS/fMP4流无法使用streamgears录制

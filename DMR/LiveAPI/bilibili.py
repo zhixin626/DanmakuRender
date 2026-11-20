@@ -65,7 +65,7 @@ def _ordered_stream_types(preference=None):
         if exact in priority:
             if only:
                 return [exact]
-            return [exact] + [item for item in priority if item != exact]
+            return [exact] + [item for item in DMR_AUTO_STREAM_PRIORITY if item != exact]
 
     if value in ('flv', 'fmp4', 'ts'):
         matched = [item for item in priority if item.startswith(f'{value}-')]
@@ -77,7 +77,9 @@ def _ordered_stream_types(preference=None):
 
     if only:
         return matched
-    return matched + [item for item in priority if item not in matched]
+    # 回退部分沿用自动模式的安全顺序：偏好的类型没有时，不会退到
+    # StreamGears 录不稳的 FLV-HEVC/AV1，而是和自动模式一样改走 fMP4/HLS。
+    return matched + [item for item in DMR_AUTO_STREAM_PRIORITY if item not in matched]
 
 
 def _cdn_matches(pattern, host):
