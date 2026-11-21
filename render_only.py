@@ -11,6 +11,8 @@
 用法：
     python render_only.py [--config configs/global.yml] [--input_dir 路径]
                           [--output_dir 路径] [--transcode] [--emoji | --no-emoji]
+                          [--minutes 3]
+    --minutes：只渲染前几分钟（仅 gpu_render），用来快速预览字体和弹幕效果。
 """
 
 import argparse
@@ -293,6 +295,10 @@ def main():
     parser.add_argument("--danmaku")
     parser.add_argument("--output")
     parser.add_argument('--transcode', action='store_true', help='转码模式（不烧弹幕）')
+    parser.add_argument(
+        '--minutes', type=float,
+        help='只渲染前几分钟用来预览效果，例如 3 或 0.5；仅 GPU 引擎支持',
+    )
     emoji_group = parser.add_mutually_exclusive_group()
     emoji_group.add_argument('--emoji', action='store_true', help='强制使用彩色 emoji 渲染引擎')
     emoji_group.add_argument('--no-emoji', action='store_true', help='强制使用普通 dmrender 引擎')
@@ -334,6 +340,8 @@ def main():
     if not selected:
         print("没有开始渲染。")
         return 0
+    if args.minutes is not None and (args.minutes <= 0 or engine_name != 'gpu_render'):
+        parser.error("--minutes 需要大于 0，且只支持 GPU 渲染引擎（gpu_render）")
     engine = get_engine(engine_name)
     print(f'渲染参数来源: {source} → 渲染引擎: {engine_name}')
     TargetRender = engine.load()
@@ -409,6 +417,8 @@ def main():
                     render_kwargs['canvas_resolution'] = (
                         layout_result.next_state.canvas_resolution
                     )
+            if args.minutes:
+                render_kwargs['max_seconds'] = args.minutes * 60
             target_render = TargetRender(**target_args)
             status, info = target_render.render_one(
                 video=video,

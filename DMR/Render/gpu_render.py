@@ -1207,6 +1207,8 @@ def log_render_start(video, source, plan, frame_rate, duration, kwargs) -> None:
         lines.append(f"  弹幕：{name}，显示 {len(events)} 条")
     if duration > 0:
         note = "（按时间线修正）" if kwargs.get("timeline_corrected") else ""
+        if kwargs.get("max_seconds") and float(kwargs["max_seconds"]) < duration:
+            note += f"，只渲染前 {format_hms(float(kwargs['max_seconds']))}"
         lines.append(f"  时长：{format_hms(duration)}{note}")
     canvas = kwargs.get("canvas_resolution") or getattr(video, "resolution", None)
     size = f"{canvas[0]}x{canvas[1]}，" if canvas else ""
@@ -1261,6 +1263,22 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
     source_duration = float(getattr(video, "duration", 0) or 0)
     if source_duration <= 0:
         source_duration = FFprobe.get_timeline_duration(str(source))
+    max_frames = kwargs.get("max_frames")
+    max_seconds = kwargs.get("max_seconds")
+    if max_seconds:
+        limit = max(1, int(round(float(max_seconds) * frame_rate)))
+        max_frames = min(max_frames or limit, limit)
+        if isinstance(render_plan, dict):
+            # Only danmaku that start inside the preview need sprites.
+            render_plan = {
+                **render_plan,
+                "events": [
+                    event
+                    for event in render_plan.get("events", [])
+                    if not event.get("path")
+                    or float(event["path"][0][0]) < float(max_seconds)
+                ],
+            }
     log_render_start(video, source, render_plan, frame_rate, source_duration, kwargs)
     atlas = kwargs.get("atlas")
     if atlas is None and kwargs.get("without_danmaku"):
@@ -1293,7 +1311,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
         encoder_options=parse_encoder_args(kwargs.get("vencoder_args") or []),
         fps=kwargs.get("fps"),
         minimum_fps=kwargs.get("min_fps"),
-        max_frames=kwargs.get("max_frames"),
+        max_frames=max_frames,
         gpu_id=int(kwargs.get("gpu_id", 0)),
         atlas=atlas,
     )
