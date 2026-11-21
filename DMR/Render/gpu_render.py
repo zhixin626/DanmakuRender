@@ -1368,6 +1368,11 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
                         timeline=timeline,
                         tolerance=0.5 / frame_rate,
                         stop_event=stop_event,
+                        limit=(
+                            config.max_frames / frame_rate + 1.0
+                            if config.max_frames
+                            else None
+                        ),
                     )
                 result = encode_to_file(
                     decoded,

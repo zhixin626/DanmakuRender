@@ -175,6 +175,7 @@ def render_audio(
     timeline: SharedTimeline,
     tolerance: float,
     stop_event=None,
+    limit: float | None = None,
 ) -> float:
     """Decode the source audio, place it on the shared timeline and encode
     it to ``output``, padded with silence to the video length. Returns where
@@ -219,6 +220,11 @@ def render_audio(
                         else own
                     )
                     relative = float(frame.pts * frame.time_base) - origin + shift
+                # A preview (max_frames) needs no audio past its end; mux drops
+                # it anyway. Full renders keep going: where the source audio
+                # ends is what detects video lost at the end of the file.
+                if limit is not None and relative >= limit:
+                    break
                 converted = [f.to_ndarray() for f in resampler.resample(frame)]
                 if converted:
                     writer.place(
