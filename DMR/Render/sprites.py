@@ -9,6 +9,7 @@ import pathlib
 import re
 import sys
 import unicodedata
+from contextvars import ContextVar
 from functools import lru_cache
 from typing import Any
 
@@ -34,6 +35,42 @@ RUN_CACHE_LIMIT = 8192
 SCROLL_SPRITE_SIDE_MARGIN = 4
 DEFAULT_LAYOUT_ENGINE = "auto"
 _RAQM_DLL_HANDLES = []
+# Which danmaku build_atlas is drawing, so missing-glyph warnings can say
+# where the character came from. Unset during layout measurement.
+_DRAW_CONTEXT: ContextVar[dict | None] = ContextVar("dmr_draw_context", default=None)
+_WARNED_MISSING: set[tuple[str, int]] = set()
+_BASIC_WARNED: list[bool] = []
+
+
+def format_hms(seconds: float) -> str:
+    """1 小时 2 分 3 秒 style; leading zero units are omitted."""
+    total = max(0, int(round(float(seconds))))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}小时{minutes}分{secs}秒"
+    if minutes:
+        return f"{minutes}分{secs}秒"
+    return f"{secs}秒"
+
+
+def _warn_missing_glyph(codepoint: int, text: str) -> None:
+    context = _DRAW_CONTEXT.get()
+    if context is None:
+        log.debug("字体回退链没有覆盖 U+%04X：%s", codepoint, text)
+        return
+    key = (context["source"], codepoint)
+    if key in _WARNED_MISSING:
+        return
+    _WARNED_MISSING.add(key)
+    log.warning(
+        "字体回退链没有覆盖 U+%04X（%s），使用主字体。文件 %s，%s 处的弹幕：%s",
+        codepoint,
+        chr(codepoint),
+        context["source"],
+        format_hms(context["start"]),
+        text,
+    )
 EMOTICON_PREFIX = "; DMR_EMOTICON:"
 _STRIP = {0x200D: None, 0x20E3: None}
 _STRIP.update({codepoint: None for codepoint in range(0xFE00, 0xFE10)})
@@ -272,7 +309,6 @@ class SpriteFactory:
         self.layout_engine = resolve_layout_engine(layout_engine)
         self.text_font = self._load_text_font(text_font, correction)
         self.text_fonts = [(self.text_font, self._coverage(text_font))]
-        self._missing_codepoints = set()
         self._run_cache: dict[str, list[tuple[Any, str]]] = {}
         fallback_values = []
         if isinstance(fallback_fonts, str):
@@ -293,7 +329,8 @@ class SpriteFactory:
         self.emoji_font, self.emoji_scale = self._load_emoji_font(
             emoji_font, correction, text_font, self.layout_engine
         )
-        if self.layout_engine == "BASIC":
+        if self.layout_engine == "BASIC" and not _BASIC_WARNED:
+            _BASIC_WARNED.append(True)
             log.warning(
                 "排版引擎为 BASIC（Pillow raqm 不可用），肤色/ZWJ 组合 emoji "
                 "无法合成，将去掉修饰符按基础 emoji 绘制。"
@@ -331,21 +368,19 @@ class SpriteFactory:
             log.debug("读取字体 cmap 失败 '%s': %s", path, error)
             return None
 
-    def _font_for(self, codepoint: int):
+    def _font_for(self, codepoint: int, text: str = ""):
         for font, coverage in self.text_fonts:
             if coverage is None or codepoint in coverage:
                 return font
-        if codepoint not in self._missing_codepoints:
-            log.warning("字体回退链没有覆盖 U+%04X，使用主字体。", codepoint)
-            self._missing_codepoints.add(codepoint)
+        _warn_missing_glyph(codepoint, text)
         return self.text_font
 
-    def _font_for_cluster(self, cluster: str):
+    def _font_for_cluster(self, cluster: str, text: str = ""):
         codepoints = [ord(char) for char in cluster]
         for font, coverage in self.text_fonts:
             if coverage is None or all(codepoint in coverage for codepoint in codepoints):
                 return font
-        return self._font_for(codepoints[0])
+        return self._font_for(codepoints[0], text)
 
     def _split_text_runs(self, text: str) -> list[tuple[Any, str]]:
         """Split by grapheme-like clusters so marks never detach from bases."""
@@ -373,7 +408,7 @@ class SpriteFactory:
         current_font = None
         current_text = []
         for cluster in clusters:
-            font = self._font_for_cluster(cluster)
+            font = self._font_for_cluster(cluster, text)
             if current_text and font is not current_font:
                 runs.append((current_font, "".join(current_text)))
                 current_text = []
@@ -1048,6 +1083,7 @@ def build_atlas(
     emoji_font=None,
     fallback_fonts=None,
     layout_engine=None,
+    source=None,
 ):
     """Build cached GPU planes from a RenderPlan in the task directory."""
     plan = (
@@ -1062,110 +1098,121 @@ def build_atlas(
     factories: dict[tuple[str, str, float], SpriteFactory] = {}
     atlas: list[list[int]] = [[], [], [], []]
     metadata = []
-    for event in plan.get("events", []):
-        if stop_check:
-            stop_check()
-        visual = event.get("visual") or {}
-        materialize_emoticons(visual, emoticon_store)
-        bounds = event.get("bounds") or {}
-        width = max(1, int(bounds.get("width", 1)))
-        height = max(1, int(bounds.get("height", 1)))
-        style = visual.get("style") or {}
-        effective_fallback_fonts = fallback_fonts or visual.get("fallback_fonts")
-        image_pack = {}
-        for token, asset in (visual.get("images") or {}).items():
-            key = str(token).strip("[]").lower()
-            if asset.get("path"):
-                image_pack[key] = asset["path"]
-        if visual.get("type") == "panel":
-            image = draw_panel(
-                visual,
-                width,
-                height,
-                platform_pack,
-                emoji_font,
-                effective_fallback_fonts,
-                layout_engine,
+    if source is None and not isinstance(plan_path, dict):
+        source = plan_path
+    source_name = os.path.basename(str(source)) if source else "未知文件"
+    context_token = _DRAW_CONTEXT.set(None)
+    try:
+        for event in plan.get("events", []):
+            if stop_check:
+                stop_check()
+            path = event.get("path") or []
+            _DRAW_CONTEXT.set(
+                {"source": source_name, "start": float(path[0][0]) if path else 0.0}
             )
-            arrays = rgba_to_yuv(image)
-        else:
-            rgb = parse_color(style["color"])
-            family = str(style["font"])
-            # Existing RenderPlan line styles omit ``bold``; absence means the
-            # regular face, while all required visual fields remain strict.
-            bold = bool(style.get("bold", False))
-            size = float(style["size"])
-            font_name = resolve_font(family, bold)
-            fallback_key = tuple(effective_fallback_fonts or ())
-            effective_layout_engine = resolve_layout_engine(
-                layout_engine or visual.get("layout_engine")
-            )
-            factory_key = (
-                font_name,
-                emoji_name,
-                size,
-                fallback_key,
-                effective_layout_engine,
-            )
-            if factory_key not in factories:
-                factories[factory_key] = SpriteFactory(
+            visual = event.get("visual") or {}
+            materialize_emoticons(visual, emoticon_store)
+            bounds = event.get("bounds") or {}
+            width = max(1, int(bounds.get("width", 1)))
+            height = max(1, int(bounds.get("height", 1)))
+            style = visual.get("style") or {}
+            effective_fallback_fonts = fallback_fonts or visual.get("fallback_fonts")
+            image_pack = {}
+            for token, asset in (visual.get("images") or {}).items():
+                key = str(token).strip("[]").lower()
+                if asset.get("path"):
+                    image_pack[key] = asset["path"]
+            if visual.get("type") == "panel":
+                image = draw_panel(
+                    visual,
+                    width,
+                    height,
+                    platform_pack,
+                    emoji_font,
+                    effective_fallback_fonts,
+                    layout_engine,
+                )
+                arrays = rgba_to_yuv(image)
+            else:
+                rgb = parse_color(style["color"])
+                family = str(style["font"])
+                # Existing RenderPlan line styles omit ``bold``; absence means the
+                # regular face, while all required visual fields remain strict.
+                bold = bool(style.get("bold", False))
+                size = float(style["size"])
+                font_name = resolve_font(family, bold)
+                fallback_key = tuple(effective_fallback_fonts or ())
+                effective_layout_engine = resolve_layout_engine(
+                    layout_engine or visual.get("layout_engine")
+                )
+                factory_key = (
                     font_name,
                     emoji_name,
-                    platform_pack,
                     size,
-                    fallback_fonts=effective_fallback_fonts,
-                    layout_engine=effective_layout_engine,
+                    fallback_key,
+                    effective_layout_engine,
                 )
-            sprite = factories[factory_key].get_sprite(
-                visual.get("text", ""),
-                rgb,
-                pill=(
-                    {
-                        "color": list(
-                            parse_color(visual["pill"].get("color", "#FFC0CB"))
-                        ),
-                        "pad": int(
-                            visual["pill"].get("padding", visual["pill"].get("pad", 6))
-                        ),
-                        "border": int(visual["pill"].get("border", 1)),
-                    }
-                    if visual.get("pill")
-                    else None
-                ),
-                event_pack=image_pack if visual.get("images") else None,
-                outline=style["outline"],
-                outline_rgb=parse_color(style["outline_color"]),
-                scroll_vertical_gap=float(visual.get("scroll_vertical_gap", 0)),
+                if factory_key not in factories:
+                    factories[factory_key] = SpriteFactory(
+                        font_name,
+                        emoji_name,
+                        platform_pack,
+                        size,
+                        fallback_fonts=effective_fallback_fonts,
+                        layout_engine=effective_layout_engine,
+                    )
+                sprite = factories[factory_key].get_sprite(
+                    visual.get("text", ""),
+                    rgb,
+                    pill=(
+                        {
+                            "color": list(
+                                parse_color(visual["pill"].get("color", "#FFC0CB"))
+                            ),
+                            "pad": int(
+                                visual["pill"].get("padding", visual["pill"].get("pad", 6))
+                            ),
+                            "border": int(visual["pill"].get("border", 1)),
+                        }
+                        if visual.get("pill")
+                        else None
+                    ),
+                    event_pack=image_pack if visual.get("images") else None,
+                    outline=style["outline"],
+                    outline_rgb=parse_color(style["outline_color"]),
+                    scroll_vertical_gap=float(visual.get("scroll_vertical_gap", 0)),
+                )
+                opacity = float(style["opacity"])
+                arrays = (
+                    sprite[0],
+                    sprite[1],
+                    sprite[2],
+                    np.rint(sprite[3] * opacity * 255).astype(np.uint8),
+                )
+                width = int(sprite[4])
+                height = int(sprite[5])
+                arrays = tuple(
+                    np.rint(array).astype(np.uint8).reshape(-1) for array in arrays
+                )
+            offset = len(atlas[0])
+            for destination, source in zip(atlas, arrays):
+                destination.extend(source.tolist())
+            path = event.get("path") or []
+            metadata.append(
+                {
+                    "id": event.get("id"),
+                    "track": event_track(event),
+                    "offset": offset,
+                    "width": width,
+                    "height": height,
+                    "start": float(path[0][0]) if path else 0.0,
+                    "end": float(path[-1][0]) if path else 0.0,
+                    "path": path,
+                    "motion": visual.get("motion") or {},
+                }
             )
-            opacity = float(style["opacity"])
-            arrays = (
-                sprite[0],
-                sprite[1],
-                sprite[2],
-                np.rint(sprite[3] * opacity * 255).astype(np.uint8),
-            )
-            width = int(sprite[4])
-            height = int(sprite[5])
-            arrays = tuple(
-                np.rint(array).astype(np.uint8).reshape(-1) for array in arrays
-            )
-        offset = len(atlas[0])
-        for destination, source in zip(atlas, arrays):
-            destination.extend(source.tolist())
-        path = event.get("path") or []
-        metadata.append(
-            {
-                "id": event.get("id"),
-                "track": event_track(event),
-                "offset": offset,
-                "width": width,
-                "height": height,
-                "start": float(path[0][0]) if path else 0.0,
-                "end": float(path[-1][0]) if path else 0.0,
-                "path": path,
-                "motion": visual.get("motion") or {},
-            }
-        )
+    finally:
+        _DRAW_CONTEXT.reset(context_token)
     emoticon_store.save()
     return {
         "duration": plan["duration"],

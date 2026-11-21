@@ -27,7 +27,7 @@ from .resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
 from ..utils.ffprobe import source_frame_rate
 from .baserender import BaseRender, RenderInputError, RenderStopped
 from .av_timeline import MAX_TIMESTAMP_GAP, AudioJob, SharedTimeline, mux_streams
-from .sprites import build_atlas
+from .sprites import build_atlas, format_hms
 
 logger = logging.getLogger(__name__)
 _dll_handles = []
@@ -1214,6 +1214,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
             emoji_font=kwargs.get("emoji_font"),
             fallback_fonts=kwargs.get("fallback_fonts"),
             layout_engine=kwargs.get("layout_engine"),
+            source=getattr(video, "dm_file_id", None),
         )
     check_stop(stop_event)
     config = RenderConfig(
@@ -1392,12 +1393,13 @@ class GpuRender(BaseRender):
             video_seconds = result["frames"] / result["frame_rate"]
             wall_s = float(result.get("wall_s") or 0.0)
             self.logger.info(
-                "GPU 渲染完成：视频 %.0f 秒，用时 %.1f 秒（%.1f 倍速），同屏弹幕平均 %.0f 条、最多 %d 条",
-                video_seconds,
-                wall_s,
+                "GPU 渲染完成：视频 %s，用时 %s（%.1f 倍速），同屏弹幕平均 %.0f 条、最多 %d 条，输出 %s",
+                format_hms(video_seconds),
+                format_hms(wall_s),
                 video_seconds / max(wall_s, 1e-9),
                 result.get("active_events_avg", 0.0),
                 result.get("active_events_peak", 0),
+                output,
             )
             output_info = self.output_info(
                 video,
