@@ -288,8 +288,13 @@ class SpriteFactory:
             except (OSError, ValueError, TypeError) as error:
                 log.warning("字体回退不可用 '%s': %s", value, error)
         self.emoji_font, self.emoji_scale = self._load_emoji_font(
-            emoji_font, correction, text_font
+            emoji_font, correction, text_font, self.layout_engine
         )
+        if self.layout_engine == "BASIC":
+            log.warning(
+                "排版引擎为 BASIC（Pillow raqm 不可用），肤色/ZWJ 组合 emoji "
+                "无法合成，将去掉修饰符按基础 emoji 绘制。"
+            )
         self.emoji_ascent, self.emoji_descent = self.emoji_font.getmetrics()
         self.ascent, self.descent = self.text_font.getmetrics()
         self.png_height = int(round(correction * 1.25))
@@ -379,20 +384,25 @@ class SpriteFactory:
         return runs
 
     @staticmethod
-    def _load_emoji_font(path: str, correction: int, text_font: str):
+    def _load_emoji_font(
+        path: str, correction: int, text_font: str, layout_engine: str = "BASIC"
+    ):
+        layout = getattr(ImageFont, "Layout", None)
+        engine = getattr(layout, layout_engine, None) if layout else None
+        options = {"layout_engine": engine} if engine is not None else {}
         try:
-            return ImageFont.truetype(path, correction), 1.0
+            return ImageFont.truetype(path, correction, **options), 1.0
         except OSError:
             pass
         for size in (109, 128, 136, 96, 160, 64, 32):
             try:
-                font = ImageFont.truetype(path, size)
+                font = ImageFont.truetype(path, size, **options)
                 return font, correction / font.size if getattr(font, "size", 0) else 1.0
             except OSError:
                 continue
         for fallback in (DEFAULT_EMOJI_FONT, text_font):
             try:
-                return ImageFont.truetype(fallback, correction), 1.0
+                return ImageFont.truetype(fallback, correction, **options), 1.0
             except OSError:
                 continue
         return ImageFont.load_default(), 1.0
@@ -418,6 +428,12 @@ class SpriteFactory:
                 prepared = self._load_png(payload)
                 token_width = prepared.width
             elif kind == "emoji":
+                if self.layout_engine == "BASIC":
+                    # BASIC has no GSUB shaping: 💃🏿 would draw as 💃 + a
+                    # brown square. Drop the modifiers and keep base emoji.
+                    payload = payload.translate(_STRIP)
+                    if not payload:
+                        continue
                 prepared = None
                 token_width = max(
                     1, int(self.emoji_font.getlength(payload) * self.emoji_scale)
