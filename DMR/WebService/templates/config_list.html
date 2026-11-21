@@ -8,9 +8,9 @@
     .emoji-result-block { border: 1px solid var(--border-color, #333); border-radius: 4px; padding: 10px 14px; margin-top: 10px; }
 </style>
 <div class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
+    <div class="card-head">
         <h2>Config</h2>
-        <div>
+        <div class="btn-row">
             <button id="btn-apply-all" style="display:none;color:#fff;background:#1a8917;border-color:#1a8917;" onclick="applyAll()">全部应用</button>
             <button id="btn-revert-all" style="display:none;color:#fff;background:#c0392b;border-color:#c0392b;" onclick="revertAll()">全部撤销</button>
             <button id="btn-defer-all" style="display:none;color:#fff;background:#555;border-color:#555;" onclick="deferAll()">全部忽略</button>
@@ -77,7 +77,7 @@
     <div style="background:#1b1b1b;border:1px solid #444;border-radius:8px;width:820px;max-width:94vw;max-height:86vh;display:flex;flex-direction:column;">
         <div style="padding:10px 14px;border-bottom:1px solid #333;color:#ddd;">查看改动 - <span id="diff-title" style="color:#6f9"></span> <span style="color:#777;font-size:0.8rem;">（已应用 → 当前；<span style="color:#4caf50;">绿=新增</span> <span style="color:#e05555;">红=删除</span>）</span></div>
         <pre id="diff-body" style="margin:0;padding:10px 14px;overflow:auto;font-family:Consolas,monospace;font-size:0.82rem;line-height:1.45;flex:1;background:#141414;"></pre>
-        <div style="padding:8px 14px;border-top:1px solid #333;display:flex;justify-content:space-between;">
+        <div class="modal-foot" style="padding:8px 14px;border-top:1px solid #333;display:flex;justify-content:space-between;">
             <div>
                 <!-- title 挂在外层 span 上：按钮 disabled 时不响应鼠标事件，tooltip 不一定弹得出来 -->
                 <span id="diff-apply-wrap" style="display:none;"><button id="diff-apply-btn" onclick="applyFromDiff()" style="color:#fff;background:#1a8917;border-color:#1a8917;">应用</button></span>
@@ -95,7 +95,7 @@
         <div style="padding:10px 14px;border-bottom:1px solid #333;color:#ddd;">编辑配置 - <span id="edit-title" style="color:#6f9"></span></div>
         <textarea id="edit-body" spellcheck="false" style="margin:0;padding:10px 14px;flex:1;min-height:400px;background:#141414;color:#ddd;border:none;outline:none;font-family:Consolas,monospace;font-size:0.82rem;line-height:1.45;resize:vertical;"></textarea>
         <div id="edit-error" style="display:none;color:#e05555;padding:0 14px 8px;font-size:0.85rem;white-space:pre-wrap;"></div>
-        <div style="padding:8px 14px;border-top:1px solid #333;display:flex;justify-content:space-between;">
+        <div class="modal-foot" style="padding:8px 14px;border-top:1px solid #333;display:flex;justify-content:space-between;">
             <button onclick="saveEdit()" style="color:#fff;background:#1a8917;border-color:#1a8917;">保存</button>
             <button onclick="closeEdit()">取消</button>
         </div>

@@ -7,8 +7,13 @@
     --border-color: #333;
 }
 
+/* 手机横屏时 iOS 会自动放大文字，关掉它，横竖屏字号一致 */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
 body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    /* 补上中文字体，避免中文回退到奇怪的默认字体 */
+    font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+                 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
     background-color: var(--bg-color);
     color: var(--text-color);
     margin: 0;
@@ -244,4 +249,107 @@ button:hover { opacity: 0.7; }
     color: #f44336;
     text-align: center;
     margin-bottom: 20px;
+}
+
+/* ===== 通用小组件 ===== */
+.logo { font-size: 1.5rem; font-weight: bold; color: var(--accent-color); white-space: nowrap; }
+.logo-short { display: none; }
+
+/* 一排按钮：放不下时整颗按钮换行，不会把按钮里的字挤断 */
+.btn-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.btn-row button, .status-badge { white-space: nowrap; }
+.btn-sm { padding: 2px 8px; }
+
+/* 卡片标题 + 右侧按钮组 */
+.card-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.card-head h2 { margin-bottom: 0; }
+.card-head .btn-row { gap: 8px; }
+
+/* 标题里的附加信息(如日志行数)整体换行，不在中间断字 */
+h2 > span { display: inline-block; }
+
+.modal-foot { flex-wrap: wrap; gap: 8px; }
+
+/* ===================================================================
+ * 手机竖屏（窄屏）：表格每一行变成一张卡片，竖着往下排，不用左右划。
+ * 单元格左侧的小标签来自 data-label，由 base.html 里的 labelTables() 自动填。
+ * 只作用于卡片里的 .table-scroll 表格，弹窗里的小表格不受影响。
+ * =================================================================== */
+@media (max-width: 640px) {
+    .container { padding: 10px; }
+    .card { padding: 14px 12px; margin-bottom: 12px; border-radius: 10px; }
+    h2 { font-size: 1.2rem; margin-bottom: 0.6rem; }
+
+    .card .table-scroll { overflow-x: visible; }
+    .card .table-scroll table,
+    .card .table-scroll tbody,
+    .card .table-scroll tr,
+    .card .table-scroll td { display: block; width: auto; }
+    .card .table-scroll table { white-space: normal; margin-top: 4px; min-width: 0; }
+
+    /* 表头隐藏；能点击排序的表头保留成一排小按钮 */
+    .card .table-scroll thead { display: none; }
+    .card .table-scroll thead:has(th[onclick]) { display: block; margin-bottom: 8px; }
+    .card .table-scroll thead tr { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .card .table-scroll thead tr::before { content: '排序'; color: #888; font-size: 0.85rem; margin-right: 2px; }
+    .card .table-scroll thead th { display: none; }
+    .card .table-scroll thead th[onclick] {
+        display: inline-block; padding: 3px 10px; border: 1px solid var(--border-color);
+        border-radius: 999px; font-size: 0.85rem; font-weight: normal; white-space: nowrap;
+    }
+
+    .card .table-scroll tbody tr {
+        background: #262626; border-radius: 8px; padding: 8px 12px; margin-bottom: 8px;
+    }
+    .card .table-scroll td {
+        position: relative; padding: 4px 0 4px 5.2em; border: none; min-height: 1.6em;
+        overflow-wrap: anywhere; word-break: normal;
+    }
+    .card .table-scroll td::before {
+        content: attr(data-label);
+        position: absolute; left: 0; top: 4px; width: 4.8em;
+        color: #888; font-size: 0.85em; line-height: 1.9; white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis;
+    }
+    /* 第一列 = 卡片标题，不要标签 */
+    .card .table-scroll td.td-title {
+        padding: 2px 0 6px; margin-bottom: 4px; border-bottom: 1px solid var(--border-color);
+        font-weight: bold; font-size: 1.05em;
+    }
+    /* 操作按钮单独一行，按钮加大方便手指点 */
+    .card .table-scroll td.td-actions { padding: 8px 0 2px; }
+    .card .table-scroll td.td-title::before,
+    .card .table-scroll td.td-actions::before,
+    .card .table-scroll td[colspan]::before { content: none; }
+    .card .table-scroll td[colspan] { padding-left: 0; }
+    .card .table-scroll td button { padding: 6px 14px; }
+    .card .table-scroll td .btn-row { gap: 8px; }
+    .card .table-scroll td code { white-space: normal !important; overflow-wrap: anywhere; }
+
+    /* 录制页的时间列在桌面上是固定宽度，卡片里放开 */
+    .card #recording-tasks td.rec-time { width: auto; min-width: 0; max-width: none; }
+
+    .card #console-box { padding: 8px; font-size: 0.78rem; height: 72vh; }
+    .card #console-box .log-no { min-width: 5ch; }
+
+    .login-card { padding: 28px 20px; margin: 0 16px; }
+}
+
+/* ===================================================================
+ * 手机横屏（矮屏）：保留表格，但收紧顶栏和间距，把高度留给内容。
+ * =================================================================== */
+@media (orientation: landscape) and (max-height: 520px) {
+    header { padding: 0.4rem 0; margin-bottom: 0.75rem; }
+    .container { padding: 8px 16px; }
+    .card { padding: 12px 14px; margin-bottom: 12px; }
+    h2 { font-size: 1.15rem; margin-bottom: 0.4rem; }
+    th, td { padding: 6px 8px; }
+    table { font-size: 0.92rem; }
+    .card #console-box { height: calc(100vh - 120px); }
+    .tp-wheel { height: 160px; }
+    .tp-spacer { height: 60px; }
+    .tp-highlight { top: 60px; }
+    .tp-colon { line-height: 160px; }
+    #edit-body { min-height: 40vh !important; }
+    .login-body { height: auto; min-height: 100vh; }
 }
