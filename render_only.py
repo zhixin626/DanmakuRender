@@ -41,9 +41,28 @@ from DMR.utils.prompts import (
 )
 
 
+_progress_line = [False]
+
+
 def show_progress(label, pct):
     """Erase the previous line before writing a shorter progress value."""
     print(f"\r\x1b[2K{label} 进度 {float(pct):.1f}%", end="", flush=True)
+    _progress_line[0] = True
+
+
+def end_progress_line():
+    if _progress_line[0]:
+        print()
+        _progress_line[0] = False
+
+
+def console_filter(record):
+    """Warnings, plus the GPU engine's start/end summaries; a log line never
+    lands on the end of the progress line."""
+    if record.levelno < logging.WARNING and record.name != "DMR.Render.gpu_render":
+        return False
+    end_progress_line()
+    return True
 
 
 def enable_console_escapes():
@@ -279,10 +298,11 @@ def main():
     emoji_group.add_argument('--no-emoji', action='store_true', help='强制使用普通 dmrender 引擎')
     args = parser.parse_args()
 
-    # 控制台只出 WARNING 以上(引擎内部的常规 info 一律不刷屏),渲染状态用下面的简洁进度行显示
+    # 控制台只出 WARNING 以上和 GPU 引擎的开始/完成摘要，渲染状态用下面的简洁进度行显示
     logging.getLogger().setLevel(logging.INFO)
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.WARNING)
+    console_handler.setLevel(logging.INFO)
+    console_handler.addFilter(console_filter)
     console_handler.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
     logging.getLogger().addHandler(console_handler)
 
@@ -336,7 +356,8 @@ def main():
         os.makedirs(os.path.dirname(output), exist_ok=True)
 
         label = f'[{seq}/{total}] {os.path.basename(task["video"])}'
-        print(f'{label} 开始渲染')
+        if engine_name != 'gpu_render':   # GPU 引擎自己打印开始摘要
+            print(f'{label} 开始渲染')
 
         def on_progress(pct, *_, _label=label):
             show_progress(_label, pct)
@@ -409,11 +430,13 @@ def main():
                 layout_result.cleanup()
             if output_work is not None:
                 output_work.cleanup()
-        print()   # 进度行换行
+        end_progress_line()
 
         if status:
             n_ok += 1
-            print(f'{label} 完成 → {output}')
+            # GPU 引擎自己会打印“渲染完成”摘要；覆盖原文件时它写的是临时路径
+            if engine_name != 'gpu_render' or output_work is not None:
+                print(f'{label} 完成 → {output}')
         else:
             n_fail += 1
             print(f'{label} 失败: {info}')

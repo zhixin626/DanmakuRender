@@ -19,8 +19,10 @@ from DMR.EmojiPack.common import EmoticonStore
 
 try:
     from .layout_models import event_track
+    from .render_log import format_hms, note_issue
 except ImportError:  # emoji_render_mt's standalone subprocess
     from layout_models import event_track
+    from render_log import format_hms, note_issue
 
 
 log = logging.getLogger("emoji_mt")
@@ -38,19 +40,7 @@ DEFAULT_LAYOUT_ENGINE = "auto"
 # where the character came from. Unset during layout measurement.
 _DRAW_CONTEXT: ContextVar[dict | None] = ContextVar("dmr_draw_context", default=None)
 _WARNED_MISSING: set[tuple[str, int]] = set()
-_BASIC_WARNED: list[bool] = []
-
-
-def format_hms(seconds: float) -> str:
-    """1 小时 2 分 3 秒 style; leading zero units are omitted."""
-    total = max(0, int(round(float(seconds))))
-    hours, rest = divmod(total, 3600)
-    minutes, secs = divmod(rest, 60)
-    if hours:
-        return f"{hours}小时{minutes}分{secs}秒"
-    if minutes:
-        return f"{minutes}分{secs}秒"
-    return f"{secs}秒"
+_WARNED_FONTS: set[str] = set()
 
 
 def _warn_missing_glyph(codepoint: int, text: str) -> None:
@@ -62,6 +52,7 @@ def _warn_missing_glyph(codepoint: int, text: str) -> None:
     if key in _WARNED_MISSING:
         return
     _WARNED_MISSING.add(key)
+    note_issue("缺字")
     log.warning(
         "字体回退链没有覆盖 U+%04X（%s），使用主字体。文件 %s，%s 处的弹幕：%s",
         codepoint,
@@ -168,8 +159,9 @@ def parse_pill(name: str | None) -> dict[str, Any] | None:
     }
 
 
-def resolve_font(family: str, bold: bool) -> str:
-    """Resolve an ASS font family to a local font file."""
+@lru_cache(maxsize=128)
+def find_font(family: str, bold: bool) -> str | None:
+    """Return the installed font file for a family, or None. Never warns."""
     try:
         import matplotlib.font_manager as font_manager
 
@@ -180,8 +172,29 @@ def resolve_font(family: str, bold: bool) -> str:
         # the regular face, which is exactly what we want, so keep it quiet.
         logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
         return font_manager.findfont(properties, fallback_to_default=False)
-    except (ImportError, ValueError, OSError) as error:
-        log.warning("找不到字体 '%s'（%s），回退到支持中文的系统字体。", family, error)
+    except (ImportError, ValueError, OSError):
+        return None
+
+
+def missing_fonts(values) -> list[str]:
+    """Fallback-chain entries that are neither a file nor an installed family."""
+    if isinstance(values, str):
+        values = [item.strip() for item in values.split(",")]
+    return [
+        str(value)
+        for value in values or ()
+        if not os.path.isfile(str(value)) and not find_font(str(value), True)
+    ]
+
+
+def resolve_font(family: str, bold: bool) -> str:
+    """Resolve an ASS font family to a local font file."""
+    found = find_font(family, bold)
+    if found:
+        return found
+    if family not in _WARNED_FONTS:
+        _WARNED_FONTS.add(family)
+        log.warning("找不到字体 '%s'，改用支持中文的系统字体。", family)
     if os.name == "nt":
         candidates = [
             r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc"
@@ -203,6 +216,7 @@ def resolve_font(family: str, bold: bool) -> str:
     )
 
 
+@lru_cache(maxsize=32)
 def resolve_emoji_font(value: str | None) -> str:
     """Resolve an emoji font path or family, with a system fallback."""
     if not value:
@@ -297,7 +311,11 @@ class SpriteFactory:
             try:
                 path = str(value)
                 if not os.path.isfile(path):
-                    path = resolve_font(path, True)
+                    # Missing entries are listed once in the render's start
+                    # summary; skip them instead of substituting a CJK font.
+                    path = find_font(path, True)
+                    if not path:
+                        continue
                 if path == text_font:
                     continue
                 font = self._load_text_font(path, correction)
@@ -307,12 +325,6 @@ class SpriteFactory:
         self.emoji_font, self.emoji_scale = self._load_emoji_font(
             emoji_font, correction, text_font, self.layout_engine
         )
-        if self.layout_engine == "BASIC" and not _BASIC_WARNED:
-            _BASIC_WARNED.append(True)
-            log.warning(
-                "排版引擎为 BASIC（Pillow raqm 不可用），肤色/ZWJ 组合 emoji "
-                "无法合成，将去掉修饰符按基础 emoji 绘制。"
-            )
         self.emoji_ascent, self.emoji_descent = self.emoji_font.getmetrics()
         self.ascent, self.descent = self.text_font.getmetrics()
         self.png_height = int(round(correction * 1.25))

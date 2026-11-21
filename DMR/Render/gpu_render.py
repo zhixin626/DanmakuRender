@@ -27,7 +27,8 @@ from .resolution import resolve_output_fps, resolve_render_canvas, fit_canvas
 from ..utils.ffprobe import source_frame_rate
 from .baserender import BaseRender, RenderInputError, RenderStopped
 from .av_timeline import MAX_TIMESTAMP_GAP, AudioJob, SharedTimeline, mux_streams
-from .sprites import build_atlas, format_hms
+from .sprites import build_atlas
+from .render_log import collect_issues, format_hms, format_size, note_issue
 
 logger = logging.getLogger(__name__)
 _dll_handles = []
@@ -282,6 +283,7 @@ def check_video_coverage(audio_end: float, video_duration: float, truncated: boo
             f"(video {video_duration:.1f}s, audio {audio_end:.1f}s)"
         )
     if abs(overhang) > AV_DURATION_WARN_SECONDS:
+        note_issue("音画长度不一致")
         logger.warning(
             "画面 %.2f 秒，源声音 %.2f 秒，%s，已对齐到画面长度（源文件结尾可能不完整）",
             video_duration,
@@ -329,6 +331,7 @@ def validate_av_duration(path: pathlib.Path) -> dict[str, float]:
             f"{AV_DURATION_FAIL_SECONDS}s: {durations}"
         )
     if difference > AV_DURATION_WARN_SECONDS:
+        note_issue("音画长度不一致")
         logger.warning(
             "输出的音频和视频时长相差 %.2f 秒（视频 %.2f 秒，音频 %.2f 秒），"
             "多为录制时网络波动造成的时间戳跳变；已保留 GPU 结果",
@@ -433,6 +436,7 @@ def schedule_frames(
             # Keep dropping until the re-sent content passes the last frame shown.
             if nominal / 2 <= backward <= MAX_TIMESTAMP_GAP or (dropping and backward >= 0):
                 if not dropping:
+                    note_issue("时间戳跳变")
                     logger.warning(
                         "源视频时间戳在第 %.2f 秒回退 %.2f 秒（重复片段），丢弃重叠画面以保持音画同步",
                         current_relative,
@@ -448,6 +452,7 @@ def schedule_frames(
                 pending_relative = current_relative + nominal
                 if timeline is not None:
                     timeline.add_shift(timeline_shift)
+                note_issue("时间戳跳变")
                 logger.warning(
                     "源视频时间戳在第 %.2f 秒跳变 %+.2f 秒，已接续时间线",
                     current_relative,
@@ -1180,6 +1185,59 @@ def mux_audio(
                     process.wait()
 
 
+def _arg_value(args, name: str) -> str | None:
+    args = list(args or [])
+    for flag, value in zip(args[::2], args[1::2]):
+        if str(flag).lstrip("-").split(":")[0] == name:
+            return str(value)
+    return None
+
+
+def log_render_start(video, source, plan, frame_rate, duration, kwargs) -> None:
+    """One block with everything the render is about to use."""
+    from .sprites import missing_fonts, resolve_emoji_font, resolve_layout_engine
+
+    lines = [f"开始渲染：{source.name}"]
+    danmaku = getattr(video, "dm_file_id", None)
+    if kwargs.get("without_danmaku") or not plan:
+        lines.append("  弹幕：不烧弹幕")
+    else:
+        events = plan.get("events", [])
+        name = os.path.basename(str(danmaku)) if danmaku else "渲染计划"
+        lines.append(f"  弹幕：{name}，显示 {len(events)} 条")
+    if duration > 0:
+        note = "（按时间线修正）" if kwargs.get("timeline_corrected") else ""
+        lines.append(f"  时长：{format_hms(duration)}{note}")
+    canvas = kwargs.get("canvas_resolution") or getattr(video, "resolution", None)
+    size = f"{canvas[0]}x{canvas[1]}，" if canvas else ""
+    vbit = _arg_value(kwargs.get("vencoder_args"), "b")
+    abit = _arg_value(kwargs.get("aencoder_args"), "b")
+    lines.append(
+        f"  输出：{size}{frame_rate:g} 帧；视频 {kwargs.get('vencoder', 'hevc_nvenc')}"
+        f"{' ' + vbit if vbit else ''}；音频 {kwargs.get('aencoder', 'copy')}"
+        f"{' ' + abit if abit else ''}"
+    )
+    if plan and not kwargs.get("without_danmaku"):
+        fonts = []
+        for event in plan.get("events", []):
+            visual = event.get("visual") or {}
+            names = [(visual.get("style") or {}).get("font")]
+            names += [node.get("font") for node in visual.get("nodes") or []]
+            for font in names:
+                if font and font not in fonts:
+                    fonts.append(font)
+        layout = resolve_layout_engine(kwargs.get("layout_engine"))
+        emoji = os.path.basename(resolve_emoji_font(kwargs.get("emoji_font")))
+        lines.append(
+            f"  字体：{'、'.join(fonts) or '默认'}；emoji {emoji}；排版 {layout}"
+            + ("（不支持肤色和组合 emoji，只画基础 emoji）" if layout == "BASIC" else "")
+        )
+        missing = missing_fonts(kwargs.get("fallback_fonts"))
+        if missing:
+            lines.append(f"  回退链里找不到，已跳过：{'、'.join(missing)}")
+    logger.info("\n".join(lines))
+
+
 def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwargs):
     """Render atomically; cancellation leaves no incomplete output."""
     check_stop(stop_event)
@@ -1190,7 +1248,20 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
         progress_cb(0.0)
     from DMR.Render.sprites import detect_platform
 
-    render_plan = kwargs.get("render_plan")
+    plan_source = render_plan = kwargs.get("render_plan")
+    if render_plan and not isinstance(render_plan, dict):
+        render_plan = json.loads(pathlib.Path(render_plan).read_text(encoding="utf-8"))
+    source_fps = source_frame_rate(str(source))
+    frame_rate = kwargs.get("fps") or resolve_output_fps(
+        source_fps, kwargs.get("min_fps")
+    )
+    # Live FLV containers often carry cumulative timestamps, so format.duration
+    # is unreliable. Prefer the recorder's timeline duration, then probe the
+    # packet timeline; progress is only reported when a length is known.
+    source_duration = float(getattr(video, "duration", 0) or 0)
+    if source_duration <= 0:
+        source_duration = FFprobe.get_timeline_duration(str(source))
+    log_render_start(video, source, render_plan, frame_rate, source_duration, kwargs)
     atlas = kwargs.get("atlas")
     if atlas is None and kwargs.get("without_danmaku"):
         atlas = empty_atlas()
@@ -1198,7 +1269,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
         if not render_plan:
             raise ValueError("gpu_render requires a RenderPlan")
         platform = kwargs.get("platform") or detect_platform(
-            getattr(video, "dm_file_id", None) or render_plan
+            getattr(video, "dm_file_id", None) or plan_source
         )
         pack = (
             pathlib.Path(kwargs["emoji_pack"])
@@ -1228,8 +1299,6 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
     )
     cupy, nvc = load_cuda_modules()
     cupy.cuda.Device(config.gpu_id).use()
-    source_fps = source_frame_rate(str(source))
-    frame_rate = config.fps or resolve_output_fps(source_fps, config.minimum_fps)
     metadata = FFprobe.run_ffprobe(str(source))
     timing = metadata["format"]
     # Missing/unspecified metadata follows the H.26x left-sited convention.
@@ -1239,12 +1308,6 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
     if chroma_location not in CHROMA_PHASES:
         raise RenderInputError(f"unsupported source chroma location: {chroma_location}")
     source_start = float(timing.get("start_time", 0))
-    # Live FLV containers often carry cumulative timestamps, so format.duration
-    # is unreliable. Prefer the recorder's timeline duration, then probe the
-    # packet timeline; progress is only reported when a length is known.
-    source_duration = float(getattr(video, "duration", 0) or 0)
-    if source_duration <= 0:
-        source_duration = FFprobe.get_timeline_duration(str(source))
     expected = (
         int(round(source_duration * frame_rate)) if source_duration > 0 else None
     )
@@ -1343,8 +1406,10 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
                     timeline.close()
                     audio.wait()
                 raise
+            av_difference = None
             if not truncated:
-                validate_av_duration(partial)
+                durations = validate_av_duration(partial)
+                av_difference = abs(durations["video"] - durations["audio"])
             check_stop(stop_event)
             partial.replace(destination)
         result.update(
@@ -1354,6 +1419,7 @@ def render_one(video: Any, output: str, progress_cb=None, stop_event=None, **kwa
             height=height,
             frame_rate=frame_rate,
             intentional_trim=truncated,
+            av_difference=av_difference,
             atlas_bytes=atlas["atlas_bytes"],
         )
         if progress_cb:
@@ -1379,28 +1445,37 @@ class GpuRender(BaseRender):
     def render_one(self, video, output, progress_cb=None, **kwargs):
         try:
             started = datetime.now()
-            result = render_one(
-                video,
-                output,
-                progress_cb=progress_cb,
-                stop_event=self.stop_event,
-                **{**self.options, **kwargs},
-            )
+            with collect_issues() as issues:
+                result = render_one(
+                    video,
+                    output,
+                    progress_cb=progress_cb,
+                    stop_event=self.stop_event,
+                    **{**self.options, **kwargs},
+                )
             self.logger.debug(
                 "GPU render statistics: %s", json.dumps(result, ensure_ascii=False)
             )
-            # A summary line must never fail an otherwise finished render.
             video_seconds = result["frames"] / result["frame_rate"]
             wall_s = float(result.get("wall_s") or 0.0)
-            self.logger.info(
-                "GPU 渲染完成：视频 %s，用时 %s（%.1f 倍速），同屏弹幕平均 %.0f 条、最多 %d 条，输出 %s",
-                format_hms(video_seconds),
-                format_hms(wall_s),
-                video_seconds / max(wall_s, 1e-9),
-                result.get("active_events_avg", 0.0),
-                result.get("active_events_peak", 0),
-                output,
-            )
+            details = [
+                format_size(os.path.getsize(output)),
+                f"视频 {format_hms(video_seconds)}",
+                f"用时 {format_hms(wall_s)}（{video_seconds / max(wall_s, 1e-9):.1f} 倍速）",
+            ]
+            if result.get("av_difference") is not None:
+                details.append(f"音画差 {result['av_difference']:.2f} 秒")
+            lines = [f"渲染完成：{output}", "  " + "，".join(details)]
+            if issues:
+                lines.append(
+                    "  过程中："
+                    + "、".join(
+                        f"{kind} {count} {'个' if kind == '缺字' else '次'}"
+                        for kind, count in issues.items()
+                    )
+                    + "（详见上方）"
+                )
+            self.logger.info("\n".join(lines))
             output_info = self.output_info(
                 video,
                 output,

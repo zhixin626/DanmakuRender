@@ -367,18 +367,16 @@ class Render():
                     if timeline_duration > 0:
                         video.duration = timeline_duration
                         if abs(timeline_duration - declared_duration) >= 0.05:
-                            self.logger.info(
+                            self.logger.debug(
                                 '媒体时间线时长修正: %.3fs → %.3fs',
                                 declared_duration,
                                 timeline_duration,
                             )
+                            render_kwargs['timeline_corrected'] = True
                     layout_result = self._compile_layout(task, mode)
                     render_kwargs['render_plan'] = layout_result.render_plan_path
                     render_kwargs['canvas_resolution'] = (
                         layout_result.next_state.canvas_resolution
-                    )
-                    self.logger.info(
-                        '弹幕排版完成：显示 %s 条', layout_result.event_count
                     )
 
             target_render = TargetRender(**target_args)
