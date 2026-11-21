@@ -92,6 +92,7 @@ class BiliWebApi:
             'connection': 'keep-alive'
         })
         self._auto_os = None
+        self._line_lock = threading.Lock()   # 并行上传多个分P时，线路只探测一次
         login_info = self.login_by_biliuprs()
         self.cookies = {}
         for item in login_info['cookie_info']['cookies']:
@@ -474,29 +475,50 @@ class BiliWebApi:
             'watermark': kwargs.get('watermark', 0),
             'space_hidden': kwargs.get('space_hidden', 0),
         }
-        for fi, file in enumerate(files, 1):
-            if self.stoped:                     # 手动停止：立即中断，不再传后续文件
-                raise RuntimeError('上传已被手动停止')
+        # parallel_parts>1：同时上传多个分P的视频数据（每个分P内部仍按 limit 并发分块），
+        # 但提交仍按分P顺序逐个进行——前一个分P提交后才提交下一个，保证分P顺序不乱。
+        parallel = min(max(1, int(kwargs.get('parallel_parts') or 1)), n_files)
+        lines = kwargs.get('line', 'AUTO')
+
+        def make_cb(fi):
             # UPOS 回调成功上传字节数；这里换算成百分比并带上文件序号交给上层。
-            file_cb = (lambda done, total, _i=fi:
-                       progress_cb(int(done / total * 100) if total else 0, _i, n_files)) \
-                      if progress_cb else None
-            status, info = self.upload_file(
-                filepath=file.path,
-                lines=kwargs.get('line', 'AUTO'),
-                videos=videos,
-                submit_api='web',
-                progress_cb=file_cb,
-                publish_options=publish_options,
-                # 一次上传任务只追加一段简介；最后一个文件提交时，前面的分P都已成功提交。
-                append_desc=formatted_append_desc if fi == n_files else None,
+            if not progress_cb:
+                return None
+            return lambda done, total, _i=fi: progress_cb(int(done / total * 100) if total else 0, _i, n_files)
+
+        def upload_bytes(fi, file):
+            return self._upload_bytes(file.path, os.path.basename(file.path),
+                                      os.path.getsize(file.path), lines, make_cb(fi))
+
+        pool, futures = None, {}
+        if parallel > 1:
+            logger.info('同时上传 %d 个分P，按分P顺序依次提交', parallel)
+            pool = ThreadPoolExecutor(max_workers=parallel)
+            futures = {fi: pool.submit(upload_bytes, fi, file) for fi, file in enumerate(files, 1)}
+        status, info = False, ''
+        try:
+            for fi, file in enumerate(files, 1):
+                if self.stoped:                     # 手动停止：立即中断，不再传后续文件
+                    raise RuntimeError('上传已被手动停止')
+                ok, part = futures[fi].result() if pool else upload_bytes(fi, file)
+                if not ok:
+                    status, info = False, part
+                    break
+                status, info = self._submit_part(
+                    part,
+                    videos=videos,
+                    submit_api='web',
+                    publish_options=publish_options,
+                    # 一次上传任务只追加一段简介；最后一个文件提交时，前面的分P都已成功提交。
+                    append_desc=formatted_append_desc if fi == n_files else None,
                 )
-            if status:
-                # upload_file 已经提交到远端；后续分P失败时也保留这个有效稿件状态。
+                # 已经提交到远端；后续分P失败时也保留这个有效稿件状态。
                 videos.bvid = info
                 self.videos = videos
-            else:
-                break
+        finally:
+            if pool:
+                # 失败/停止时取消还没开始的分P；已在传的分P结果直接丢弃
+                pool.shutdown(wait=False, cancel_futures=True)
 
         # self.submit(submit_api='web', videos=videos)
         # 合集：add_episodes(epid，原作者，仅加入) 与 add_to_list(season_id，加入+排到最前) 二选一，
@@ -687,20 +709,8 @@ class BiliWebApi:
         )
         return status, message
 
-    def _upload_path(
-        self,
-        filepath: str,
-        file_name,
-        total_size,
-        lines='AUTO',
-        videos: 'Data'=None,
-        submit_api: Callable[[str], None] = None,
-        progress_cb=None,
-        publish_options=None,
-        append_desc=None,
-    ):
-
-        logger.info(f"{file_name} 开始上传")
+    def _select_line(self, lines):
+        """首次上传时选择上传线路，记到 self._auto_os；返回手动指定的 upcdn（没有则 None）。"""
         cs_upcdn = ['alia', 'bda', 'bda2', 'bldsa', 'qn', 'tx', 'txa']
         jd_upcdn = ['jd-alia', 'jd-bd', 'jd-bldsa', 'jd-tx', 'jd-txa']
         preferred_upos_cdn = None
@@ -717,6 +727,33 @@ class BiliWebApi:
             else:
                 self._auto_os = self.probe()
             logger.debug(f"线路选择 => {self._auto_os['os']}: {self._auto_os['query']}. time: {self._auto_os.get('cost')}")
+        return preferred_upos_cdn
+
+    def _upload_path(
+        self,
+        filepath: str,
+        file_name,
+        total_size,
+        lines='AUTO',
+        videos: 'Data'=None,
+        submit_api: Callable[[str], None] = None,
+        progress_cb=None,
+        publish_options=None,
+        append_desc=None,
+    ):
+        """上传一个文件并立即提交为稿件的新分P。"""
+        status, video_part = self._upload_bytes(filepath, file_name, total_size, lines, progress_cb)
+        if not status:
+            return False, video_part
+        return self._submit_part(video_part, videos, submit_api, publish_options, append_desc)
+
+    def _upload_bytes(self, filepath: str, file_name, total_size, lines='AUTO', progress_cb=None):
+        """只上传视频数据，不提交稿件。成功返回 (True, video_part)，失败返回 (False, 原因)。
+        可在多个线程里同时调用（线路选择加锁，只探测一次）。"""
+
+        logger.info(f"{file_name} 开始上传")
+        with self._line_lock:
+            preferred_upos_cdn = self._select_line(lines)
         if self._auto_os['os'] == 'upos':
             upload = self._upos_upload
         else:
@@ -755,7 +792,11 @@ class BiliWebApi:
             # stop_event.set()
             return False, '分P上传失败'
         video_part['title'] = video_part['title'][:80]
+        return True, video_part
 
+    def _submit_part(self, video_part, videos: 'Data'=None, submit_api=None,
+                     publish_options=None, append_desc=None):
+        """把已上传好的分P追加到稿件并提交，返回 (True, bvid)。"""
         if new_videos := self.get_remote_data(videos.bvid):
             videos = new_videos
         self._apply_publish_options(videos, publish_options)

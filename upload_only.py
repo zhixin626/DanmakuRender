@@ -2,6 +2,7 @@
 
 用法：python upload_only.py
 依次询问：视频（文件或文件夹）→ 任务配置 → 上传账号 → 确认。
+多个分P时（biliwebapi 引擎）同时上传两个分P，按分P顺序依次提交。
 """
 
 from pathlib import Path
@@ -50,6 +51,9 @@ _MANUAL_GROUP_ID = "upload_only"
 
 
 VIDEO_TYPES = {"dm_video": "弹幕版", "src_video": "原画/转码"}
+
+# 同时上传的分P数量（只有 biliwebapi 引擎支持并行，biliuprs / acfun 仍逐个上传）
+UPLOAD_ONLY_PARALLEL_PARTS = 2
 
 
 def upload_configs(config: Config, data: dict, vtype: str) -> list:
@@ -138,6 +142,8 @@ def upload_process(video_infos: list, account_config: dict, live_events: LiveEve
     """
     account = account_config["account"]
     cfg = account_config.copy()
+    # 手动上传默认同时传两个分P（仅 biliwebapi 引擎生效；任务配置里写了 parallel_parts 则以配置为准）
+    cfg.setdefault("parallel_parts", UPLOAD_ONLY_PARALLEL_PARTS)
 
     # --- auto_append_period：注入 base_bvid ---
     period = cfg.get("auto_append_period")
@@ -165,7 +171,8 @@ def upload_process(video_infos: list, account_config: dict, live_events: LiveEve
     else:
         raise ValueError(f"未知上传引擎: {engine_type}")
 
-    status, result = uploader.upload(video_infos, **cfg)
+    # biliwebapi 失败时会多返回一个附加信息（如生成的封面路径），这里只取前两项
+    status, result = uploader.upload(video_infos, **cfg)[:2]
 
     if status:
         logger.info(f"账号 {account} 上传成功: {result}")

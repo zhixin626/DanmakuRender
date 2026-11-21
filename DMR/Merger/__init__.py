@@ -5,7 +5,8 @@
 **只负责执行，不读 state_dict**，编排仍在 liveevents（由 request_id 关联）。
 
 合并策略（_merge_pipeline，三段式）：
-  1. 计划：probe_seg 探测所有段（全程只探测一次），group_by_format 按「连续同分辨率、同编码格式」分组；
+  1. 计划：probe_seg 探测所有段（全程只探测一次），group_by_format 按「连续同分辨率、同编码格式」分组，
+     split_by_duration 再按时长上限（max_duration，默认 10 小时）切开，每组一个产物；
   2. 执行：每组由 merge_group 产出一个中间产物——timescale 无损对齐后 concat_copy，
      单段组直接复制直通（不重编码、不改动源文件）；放大音频时整组音频统一增益、只编码一次；
   3. 提交：模板命名（多产物自动加 _partN）→ probe 建 VideoInfo →
@@ -21,6 +22,7 @@ job data 约定（由 liveevents 发来；pipe 为进程内 queue，可直接传
         'is_amplify': bool, 'extra_gain_db': float,
         'file_name_template': str,      # 用 stime 格式化成输出文件名（多产物自动加 _partN）
         'remove_source': bool,          # 全部合并成功后是否删源（send2trash，默认 True）
+        'max_duration': float,          # 单个产物时长上限（秒），默认 36000=10 小时；0 不限制
     },
     'new_video_meta'  : {               # 用于构造合并后的 VideoInfo（会话/分组级字段）
         'dtype'     : str, 'stime': datetime, 'etime': datetime, 'totaltime': str,
@@ -47,7 +49,8 @@ from send2trash import send2trash
 from DMR.utils import *
 from DMR.utils.ffprobe import probe_media
 from DMR.utils.utils import rename_safe
-from .video_merge import probe_seg, group_by_format, describe_format, merge_group
+from .video_merge import (probe_seg, group_by_format, describe_format, merge_group,
+                          split_by_duration, DEFAULT_MAX_DURATION)
 
 
 class Merger():
@@ -104,6 +107,17 @@ class Merger():
                 '分段格式不一致，强行无损拼接会花屏，按连续一致的段分成 %d 组分别合并：%s',
                 len(groups),
                 '；'.join(f'{len(g)} 段 {describe_format(g[0])}' for g in groups))
+        max_duration = args.get('max_duration', DEFAULT_MAX_DURATION)
+        n_before = len(groups)
+        groups = split_by_duration(groups, max_duration)
+        if len(groups) > n_before:
+            self.logger.info(
+                '单个视频时长上限 %.1f 小时，按时长切成 %d 个产物：%s',
+                max_duration / 3600, len(groups),
+                '；'.join(f'{len(g)} 段 {sum(x.get("dur") or 0 for x in g) / 3600:.2f} 小时' for g in groups))
+        for g in groups:
+            if len(g) == 1 and max_duration and (g[0].get('dur') or 0) > max_duration:
+                self.logger.warning('单段 %s 本身就超过时长上限，无法无损再切，原样输出', g[0]['path'])
 
         out_dir = Path(paths[0]).parent
         # 工作目录建在输出同盘：避免跨盘复制，收尾改名是瞬时原地 rename

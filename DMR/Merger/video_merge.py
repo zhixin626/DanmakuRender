@@ -5,6 +5,7 @@
 
 - probe_seg           : 探测单段的分辨率 / timescale / 时长 / 编码格式（只读）。
 - group_by_format     : 按「连续同分辨率、同编码格式」把探测结果切组。
+- split_by_duration   : 再把每组按总时长上限切开（默认 10 小时一个产物）。
 - retime              : 无损改写 timescale（-c copy，不重编码）。
 - concat_copy         : concat 解复用器 + -c copy 纯拼接，输入须已处理好（同格式同 timescale）。
 - concat_with_gain    : 拼接并对整体音频做同一个增益（峰值并行检测，音频与视频同时处理）。
@@ -93,6 +94,31 @@ def group_by_format(metas: List[Dict]) -> List[List[Dict]]:
         else:
             groups.append([m])
     return groups
+
+
+# 单个合并产物的默认时长上限：10 小时
+DEFAULT_MAX_DURATION = 10 * 3600
+
+
+def split_by_duration(groups: List[List[Dict]], max_duration: float = DEFAULT_MAX_DURATION) -> List[List[Dict]]:
+    """把 group_by_format 的每组再按时长切开，让每个产物总时长不超过 max_duration 秒。
+    按顺序往当前组里放段，放下这一段会超限就另起一组；只切在段与段之间，不切开任何一段，
+    所以单独一段本身超过上限时自成一组（无法无损再切）。max_duration<=0 表示不限制。"""
+    if not max_duration or max_duration <= 0:
+        return groups
+    result: List[List[Dict]] = []
+    for group in groups:
+        current, total = [], 0.0
+        for m in group:
+            dur = m.get("dur") or 0.0
+            if current and total + dur > max_duration:
+                result.append(current)
+                current, total = [], 0.0
+            current.append(m)
+            total += dur
+        if current:
+            result.append(current)
+    return result
 
 
 def retime(src: Union[str, Path], dst: Union[str, Path],
