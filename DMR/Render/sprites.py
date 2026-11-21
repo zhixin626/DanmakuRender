@@ -215,6 +215,9 @@ def load_raqm_dependencies() -> None:
     ]
     for root in roots:
         if root.is_dir():
+            # Pillow's fribidi shim calls plain LoadLibrary("fribidi"), which
+            # ignores add_dll_directory but does search PATH.
+            os.environ["PATH"] = str(root) + os.pathsep + os.environ.get("PATH", "")
             try:
                 _RAQM_DLL_HANDLES.append(os.add_dll_directory(str(root)))
             except OSError:
