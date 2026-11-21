@@ -216,6 +216,34 @@ def resolve_font(family: str, bold: bool) -> str:
     )
 
 
+def _drawable_emoji_font(path: str, value: str) -> str:
+    """Pillow (FreeType) draws CBDT/sbix bitmaps and COLR v0 layers, but not
+    COLR v1 paint graphs: such a font renders every emoji blank."""
+    try:
+        from fontTools.ttLib import TTFont
+
+        font = TTFont(path, fontNumber=0, lazy=True)
+        tables = set(font.keys())
+        drawable = bool(tables & {"CBDT", "sbix"})
+        if not drawable and "COLR" in tables:
+            colr = font["COLR"]
+            drawable = colr.version == 0 or bool(
+                getattr(colr.table, "BaseGlyphRecordCount", 0)
+            )
+        font.close()
+    except Exception as error:
+        log.debug("检查 emoji 字体格式失败 '%s': %s", path, error)
+        return path
+    if drawable:
+        return path
+    log.warning(
+        "emoji 字体 '%s' 是 COLRv1 格式，Pillow 画不出来（emoji 会全部空白），"
+        "改用系统 Segoe UI Emoji；Noto 请用 GitHub googlefonts/noto-emoji 里 fonts/NotoColorEmoji.ttf",
+        value,
+    )
+    return DEFAULT_EMOJI_FONT
+
+
 @lru_cache(maxsize=32)
 def resolve_emoji_font(value: str | None) -> str:
     """Resolve an emoji font path or family, with a system fallback."""
@@ -238,7 +266,7 @@ def resolve_emoji_font(value: str | None) -> str:
                 else value + extension
             )
             if os.path.isfile(candidate):
-                return os.path.abspath(candidate)
+                return _drawable_emoji_font(os.path.abspath(candidate), value)
     try:
         import matplotlib.font_manager as font_manager
 
@@ -247,7 +275,7 @@ def resolve_emoji_font(value: str | None) -> str:
             fallback_to_default=False,
         )
         if candidate and os.path.isfile(candidate):
-            return os.path.abspath(candidate)
+            return _drawable_emoji_font(os.path.abspath(candidate), value)
     except Exception as error:
         log.debug("按字体名查找 Emoji 字体失败: %s", error)
     log.warning("找不到 emoji 字体 '%s', 回退到系统 Segoe UI Emoji。", value)
