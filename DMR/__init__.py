@@ -1,3 +1,18 @@
+import os
+import sys
+
+if os.name == "nt":
+    # Pillow loads fribidi (needed by raqm) once, when PIL.ImageFont is first
+    # imported, through plain LoadLibrary, which only searches PATH. Put the
+    # interpreter's DLL folders on PATH before anything imports Pillow.
+    for _dll_dir in (
+        os.path.join(sys.prefix, "Library", "bin"),
+        os.path.join(sys.prefix, "bin"),
+        os.path.join(sys.prefix, "DLLs"),
+    ):
+        if os.path.isdir(_dll_dir):
+            os.environ["PATH"] = _dll_dir + os.pathsep + os.environ.get("PATH", "")
+
 import logging
 import os
 import shutil
