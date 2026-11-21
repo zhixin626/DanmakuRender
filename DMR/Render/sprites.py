@@ -34,7 +34,6 @@ RUN_CACHE_LIMIT = 8192
 
 SCROLL_SPRITE_SIDE_MARGIN = 4
 DEFAULT_LAYOUT_ENGINE = "auto"
-_RAQM_DLL_HANDLES = []
 # Which danmaku build_atlas is drawing, so missing-glyph warnings can say
 # where the character came from. Unset during layout measurement.
 _DRAW_CONTEXT: ContextVar[dict | None] = ContextVar("dmr_draw_context", default=None)
@@ -241,26 +240,6 @@ def resolve_emoji_font(value: str | None) -> str:
     return DEFAULT_EMOJI_FONT
 
 
-def load_raqm_dependencies() -> None:
-    """Load only DLLs installed beside the active interpreter; never download."""
-    if os.name != "nt" or _RAQM_DLL_HANDLES:
-        return
-    roots = [
-        pathlib.Path(sys.prefix) / "Library" / "bin",
-        pathlib.Path(sys.prefix) / "bin",
-        pathlib.Path(sys.prefix) / "DLLs",
-    ]
-    for root in roots:
-        if root.is_dir():
-            # Pillow's fribidi shim calls plain LoadLibrary("fribidi"), which
-            # ignores add_dll_directory but does search PATH.
-            os.environ["PATH"] = str(root) + os.pathsep + os.environ.get("PATH", "")
-            try:
-                _RAQM_DLL_HANDLES.append(os.add_dll_directory(str(root)))
-            except OSError:
-                continue
-
-
 def resolve_layout_engine(value: str | None) -> str:
     """Select RAQM when explicitly/automatically available, otherwise BASIC."""
     requested = str(value or DEFAULT_LAYOUT_ENGINE).upper()
@@ -268,7 +247,6 @@ def resolve_layout_engine(value: str | None) -> str:
         raise ValueError(f"未知 layout_engine: {value}")
     if requested == "BASIC":
         return "BASIC"
-    load_raqm_dependencies()
     if features.check("raqm"):
         return "RAQM"
     if requested == "RAQM":
