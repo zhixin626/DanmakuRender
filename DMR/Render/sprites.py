@@ -216,6 +216,27 @@ def resolve_font(family: str, bold: bool) -> str:
     )
 
 
+@lru_cache(maxsize=16)
+def _bitmap_strikes(path: str) -> tuple[int, ...]:
+    """Pixel sizes of the embedded bitmap strikes of a CBDT/sbix font."""
+    try:
+        from fontTools.ttLib import TTFont
+
+        font = TTFont(path, fontNumber=0, lazy=True)
+        sizes = set()
+        if "CBLC" in font:
+            sizes.update(
+                strike.bitmapSizeTable.ppemY for strike in font["CBLC"].strikes
+            )
+        if "sbix" in font:
+            sizes.update(int(ppem) for ppem in font["sbix"].strikes)
+        font.close()
+        return tuple(sorted(sizes))
+    except Exception as error:
+        log.debug("读取 emoji 位图尺寸失败 '%s': %s", path, error)
+        return ()
+
+
 def _drawable_emoji_font(path: str, value: str) -> str:
     """Pillow (FreeType) draws CBDT/sbix bitmaps and COLR v0 layers, but not
     COLR v1 paint graphs: such a font renders every emoji blank."""
@@ -450,12 +471,19 @@ class SpriteFactory:
             return ImageFont.truetype(path, correction, **options), 1.0
         except OSError:
             pass
-        for size in (109, 128, 136, 96, 160, 64, 32):
+        # Bitmap fonts (CBDT/sbix) only open at their strike sizes, e.g. 109
+        # for Noto, 128/192 for Noto 3D. Prefer the smallest strike at least
+        # as large as the target, so downscaling stays sharp and cheap.
+        strikes = sorted(_bitmap_strikes(path))
+        larger = [size for size in strikes if size >= correction]
+        preferred = larger[:1] + strikes[::-1]
+        for size in (*preferred, 109, 128, 136, 160, 192, 96, 64, 32):
             try:
                 font = ImageFont.truetype(path, size, **options)
                 return font, correction / font.size if getattr(font, "size", 0) else 1.0
             except OSError:
                 continue
+        log.warning("emoji 字体 '%s' 无法加载，改用系统默认 emoji 字体。", path)
         for fallback in (DEFAULT_EMOJI_FONT, text_font):
             try:
                 return ImageFont.truetype(fallback, correction, **options), 1.0
