@@ -373,10 +373,10 @@ render_args:
     emoji_font: ~
     # GPU/Pillow 文字回退链：主字体缺字（韩文、泰文、符号等）时按顺序在这些字体里查找；
     # 写系统字体名或字体文件路径，找不到的字体会警告并跳过；留空时只用主字体
-    fallback_fonts: [Malgun Gothic, Yu Gothic, Leelawadee UI, Segoe UI, Segoe UI Symbol, Cambria Math]
+    fallback_fonts: [Malgun Gothic, Yu Gothic, Leelawadee UI, Nirmala UI, Segoe UI, Segoe UI Symbol, Cambria Math]
     # Pillow 文字排版引擎：basic 基础排版（中英日韩足够）；auto/raqm 用于阿拉伯文、泰文等复杂文字，
     # 需要 Pillow 支持 raqm 并安装 fribidi，且确认中英文显示不变后再开启
-    layout_engine: basic
+    layout_engine: auto
     # 轨道是第一层，事件类型嵌套在所属轨道中。
     r2l:
       # 滚动速度，单位为画布像素/秒；横竖屏、长短弹幕速度相同
