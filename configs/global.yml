@@ -38,7 +38,7 @@ merge_args:
   file_name_template: '{stime.month:02d}月{stime.day:02d}日'
   remove_source: true
   retry: 3
-  max_duration: 36000  # 单个合并视频最长秒数（10 小时），超过就分成 _part1、_part2…；0 不限制
+  max_duration: 34200  # 单个合并视频最长秒数（9.5 小时）；合并前检查，超过就均匀分成几份分别合并（_part1、_part2…）；0 不限制
 
 download_args:
   live:

@@ -5,7 +5,7 @@
 
 - probe_seg           : 探测单段的分辨率 / timescale / 时长 / 编码格式（只读）。
 - group_by_format     : 按「连续同分辨率、同编码格式」把探测结果切组。
-- split_by_duration   : 再把每组按总时长上限切开（默认 10 小时一个产物）。
+- split_by_duration   : 合并前按时长上限（默认 9.5 小时）把每组均匀分成几份，每份一个产物。
 - retime              : 无损改写 timescale（-c copy，不重编码）。
 - concat_copy         : concat 解复用器 + -c copy 纯拼接，输入须已处理好（同格式同 timescale）。
 - concat_with_gain    : 拼接并对整体音频做同一个增益（峰值并行检测，音频与视频同时处理）。
@@ -14,6 +14,7 @@
 分辨率或编码格式（编码器、像素格式、参数头、音频参数）不一致的段不重编码，
 由 Merger 分组各自合并、单段直通复制，例如 GPU 渲染段与回退引擎渲染段。
 """
+import math
 import os
 import re
 import json
@@ -96,28 +97,75 @@ def group_by_format(metas: List[Dict]) -> List[List[Dict]]:
     return groups
 
 
-# 单个合并产物的默认时长上限：10 小时
-DEFAULT_MAX_DURATION = 10 * 3600
+# 单个合并产物的默认时长上限：9.5 小时
+DEFAULT_MAX_DURATION = 9.5 * 3600
+
+
+def _balanced_partition(durs: List[float], max_duration: float) -> List[int]:
+    """把一串连续分段切成尽量少的几份、每份不超过 max_duration，并让各份时长尽量接近。
+    返回每份的起始下标。先取最少份数 k，在 k 份的所有切法里选「最长一份最短」的；
+    分段粒度导致 k 份放不下时再加一份。分段数很少（几十段以内），直接 DP。"""
+    n = len(durs)
+    prefix = [0.0]
+    for d in durs:
+        prefix.append(prefix[-1] + d)
+    total = prefix[-1]
+    if total <= max_duration:
+        return [0]
+
+    def span(i, j):            # 第 i..j-1 段的总时长
+        return prefix[j] - prefix[i]
+
+    k = max(2, math.ceil(total / max_duration))
+    while k <= n:
+        INF = float("inf")
+        # best[p][j]：前 j 段切成 p 份时，最长一份的最小值；cut[p][j] 记录最后一份的起点
+        best = [[INF] * (n + 1) for _ in range(k + 1)]
+        cut = [[0] * (n + 1) for _ in range(k + 1)]
+        best[0][0] = 0.0
+        for p in range(1, k + 1):
+            for j in range(p, n + 1):
+                for i in range(p - 1, j):
+                    v = max(best[p - 1][i], span(i, j))
+                    if v < best[p][j]:
+                        best[p][j], cut[p][j] = v, i
+        if best[k][n] <= max_duration:
+            starts, j = [], n
+            for p in range(k, 0, -1):
+                j = cut[p][j]
+                starts.append(j)
+            return starts[::-1]
+        k += 1
+    return list(range(n))      # 理论上到不了：每段单独一份
 
 
 def split_by_duration(groups: List[List[Dict]], max_duration: float = DEFAULT_MAX_DURATION) -> List[List[Dict]]:
-    """把 group_by_format 的每组再按时长切开，让每个产物总时长不超过 max_duration 秒。
-    按顺序往当前组里放段，放下这一段会超限就另起一组；只切在段与段之间，不切开任何一段，
-    所以单独一段本身超过上限时自成一组（无法无损再切）。max_duration<=0 表示不限制。"""
+    """合并前的分配：把 group_by_format 的每组按时长上限分成几份，每份合并成一个产物。
+    总时长不超过 max_duration 的组不动；超过时用最少的份数、尽量均匀地分配
+    （例如 12 段 2 小时 = 24 小时，分成 8+8+8 小时，而不是 10+10+4）。
+    只在段与段之间分，不切开任何一段；单独一段本身超过上限时自成一份（无法无损再切）。
+    max_duration<=0 表示不限制。"""
     if not max_duration or max_duration <= 0:
         return groups
     result: List[List[Dict]] = []
     for group in groups:
-        current, total = [], 0.0
+        # 超长的单段先单独拿出来，其余连续的段各自做均匀分配
+        runs, run = [], []
         for m in group:
-            dur = m.get("dur") or 0.0
-            if current and total + dur > max_duration:
-                result.append(current)
-                current, total = [], 0.0
-            current.append(m)
-            total += dur
-        if current:
-            result.append(current)
+            if (m.get("dur") or 0.0) > max_duration:
+                if run:
+                    runs.append(run)
+                    run = []
+                runs.append([m])
+            else:
+                run.append(m)
+        if run:
+            runs.append(run)
+        for run in runs:
+            starts = _balanced_partition([m.get("dur") or 0.0 for m in run], max_duration)
+            for idx, st in enumerate(starts):
+                end = starts[idx + 1] if idx + 1 < len(starts) else len(run)
+                result.append(run[st:end])
     return result
 
 
