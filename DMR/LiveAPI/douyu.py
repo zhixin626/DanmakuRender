@@ -105,63 +105,29 @@ class douyu(BaseAPI):
         except Exception as e:
             logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 读取失败（{e}），按未登录录制。")
             return
-        if not cookies:
-            logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 为空，按未登录录制。")
+        # Only the web login cookies: unrelated browser cookies (and the passport
+        # ticket LTP0, which is only for renewing) can make the play API fall
+        # back to anonymous quality.
+        login = {
+            name: val for name, val in cookies.items()
+            if name.startswith("acf_") or name in ("dy_did", "dy_auth")
+        }
+        if not login:
+            logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 里没有登录项（acf_ 开头），按未登录录制。")
             return
-        self.sess.cookies.update(cookies)
-        # The play API checks the device id against the logged-in session.
-        self._did = cookies.get("dy_did") or DOUYU_DEFAULT_DID
-        if not any(name.startswith("acf_") for name in cookies):
-            logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 里没有 acf_ 开头的登录项，可能没有登录。")
-        else:
-            logger.info(f"{self.plugin_msg}: 已使用斗鱼登录 cookie（{len(cookies)} 项）。")
+        self.sess.cookies.clear()
+        self.sess.cookies.update(login)
+        # Sign with the device id the login belongs to, or Douyu treats the
+        # request as a guest.
+        self._did = (
+            login.get("acf_did") or login.get("dy_did") or login.get("acf_devid")
+            or DOUYU_DEFAULT_DID
+        )
+        # The CDN checks the login too: without the cookie on the FLV request
+        # it cuts the stream after about 5 minutes.
+        self.stream_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in login.items())
+        logger.info(f"{self.plugin_msg}: 已使用斗鱼登录 cookie（{len(login)} 项，签名、取流、下载都会带上）。")
 
-    @staticmethod
-    def md5(data):
-        return hashlib.md5(data.encode('utf-8')).hexdigest()
-
-    def get_resp_new(self):
-        resp = self.sess.get(f'https://www.douyu.com/betard/{self.rid}', headers=self.fake_headers, timeout=5).json()
-        return resp
-    
-    def is_available(self) -> bool:
-        return True
-
-    def onair(self) -> bool:
-        resp = self.get_resp_new()
-        videoloop = resp['room']['videoLoop']
-        show_status = resp['room']['show_status']
-        if show_status == 1 and videoloop == 0:
-            return True
-        else:
-            return False
-
-    def get_info(self):
-        """
-        return: title,uname,face_url,keyframe_url
-        """
-        resp = self.get_resp_new()
-        if resp['room']['isVip'] == 1:
-            with DouyuUtils._lock:
-                DouyuUtils.VipRoom.add(self.rid)
-        try:
-            title = resp['room']['room_name']
-        except Exception:
-            title = 'douyu'+self.rid
-        try:
-            uname = resp['room']['nickname']
-        except Exception:
-            uname = 'douyu'+self.rid
-        try:
-            face_url = resp['room']['owner_avatar']
-        except Exception:
-            face_url = None
-        try:
-            keyframe_url = resp['room']['room_pic']
-        except Exception:
-            keyframe_url = None
-        return title,uname,face_url,keyframe_url
-    
     def aget_sign(self, rid: Union[str, int], did: str | None = None) -> dict[str, Any]:
         '''
         :param rid: 房间号

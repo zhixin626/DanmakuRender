@@ -154,6 +154,13 @@ class CookieManager:
         platform, account = self._identify(filename)
         path = self.login_info_dir / filename
 
+        if platform == 'douyu' and path.exists():
+            # 有 LTP0 就直接换票，不用开浏览器，而且能真正延长有效期
+            from DMR.Login import douyu_auth
+            result = douyu_auth.renew(path, account)
+            if result is not None:
+                return result
+
         if platform != 'bilibili':
             from DMR.Login import browser_login
             if platform not in browser_login.SPECS:

@@ -202,12 +202,15 @@ def _login(platform: str, account: str, timeout: int = LOGIN_TIMEOUT_SECONDS) ->
                     if token:
                         cookies['msToken'] = token
                 output = _save(platform, account, spec, cookies, raw)
+                note = ''
+                if platform == 'douyu' and not cookies.get('LTP0'):
+                    note = '（没拿到长期票据 LTP0，以后只能靠重新登录续期）'
             finally:
                 try:
                     context.close()
                 except Exception:
                     pass
-        return True, f'{spec.name}登录成功，已保存到 {output}'
+        return True, f'{spec.name}登录成功，已保存到 {output}{note}'
     except Exception as e:
         return False, f'{spec.name}登录失败：{e}'
     finally:
