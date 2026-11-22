@@ -35,7 +35,10 @@
 </div>
 
 <div class="card">
-    <h2>Cookie</h2>
+    <div class="card-head" style="margin-bottom:10px;">
+        <h2>Cookie</h2>
+        <div class="btn-row"><button onclick="openLoginDialog()">＋ 新增账号</button></div>
+    </div>
     <div class="table-scroll">
     <table>
         <thead>
@@ -52,7 +55,6 @@
         </tbody>
     </table>
     </div>
-    <div style="margin-top:8px;"><button onclick="openLoginDialog()">＋ 新增账号</button></div>
 </div>
 
 <div id="login-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center;" onclick="if(event.target===this)closeLoginDialog()">
@@ -71,6 +73,7 @@
                 <input id="login-account" placeholder="自己起，比如 主账号、小号" style="margin-left:8px;width:220px;">
             </label>
             <div style="color:#888;font-size:0.85rem;">名字只用来区分账号，会成为文件名：.login_info/<span id="login-file-hint">b站_名字</span>.json</div>
+            <div style="color:#888;font-size:0.85rem;">AcFun/抖音/斗鱼：会打开一个全新的浏览器窗口，登录完成后关掉窗口即可保存。</div>
             <div id="login-msg" style="min-height:1.2em;font-size:0.9rem;white-space:pre-wrap;"></div>
         </div>
         <div class="modal-foot" style="padding:8px 14px;border-top:1px solid #333;display:flex;justify-content:space-between;">

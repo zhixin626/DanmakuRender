@@ -5,7 +5,7 @@ browser_login.py
 
 每个账号保留一份专属浏览器资料（.login_info/browser/<前缀><账号>/），和平时用的
 浏览器一样，关掉再开仍是登录状态：
-  - login：弹出浏览器窗口，扫码或输入账号密码；检测到登录成功后自动保存并关闭窗口
+  - login：用全新的浏览器资料弹出窗口，扫码或输入账号密码，登录后自己关掉窗口，程序再保存 cookie
   - renew：后台无窗口打开一次网站首页，让网站像平时访问那样刷新登录状态，再保存 cookie；
            若已经不是登录状态，返回失败，需要重新 login
 
@@ -44,9 +44,7 @@ if __name__ == '__main__' and 'DMR' not in sys.modules:
 
 from DMR.Login.cookiemgr import LOGIN_INFO_DIR, PLATFORM_PREFIXES, save_cookie_file
 
-LOGIN_TIMEOUT_SECONDS = 300
-# 登录项出现后再多等一会儿，让页面把其余 cookie（风控令牌等）也写完
-SETTLE_SECONDS = 3
+LOGIN_TIMEOUT_SECONDS = 600
 RENEW_WAIT_SECONDS = 6
 
 # Playwright 同一时间只跑一个浏览器任务，避免同一份浏览器资料被同时打开
@@ -149,14 +147,18 @@ def _save(platform: str, account: str, spec: PlatformSpec, cookies, raw) -> Path
     return save_cookie_file(platform, account, picked, raw, expiry_keys=spec.expiry_keys)
 
 
-def _open(p, platform: str, account: str, headless: bool):
+def _open(p, platform: str, account: str, headless: bool, offscreen: bool = False):
     directory = profile_dir(platform, account)
     directory.mkdir(parents=True, exist_ok=True)
+    args = ['--disable-blink-features=AutomationControlled']
+    if offscreen:
+        # 有界面但放到屏幕外：比无界面模式更像真人访问，不容易被风控识别
+        args.append('--window-position=-32000,-32000')
     return p.chromium.launch_persistent_context(
         str(directory),
         headless=headless,
         viewport={'width': 1280, 'height': 800},
-        args=['--disable-blink-features=AutomationControlled'],
+        args=args,
     )
 
 
@@ -169,47 +171,70 @@ def _sync_playwright():
 
 
 def _login(platform: str, account: str, timeout: int = LOGIN_TIMEOUT_SECONDS) -> Tuple[bool, str]:
-    """弹出浏览器等用户登录，登录成功后自动保存 cookie 并关闭窗口。"""
+    """用全新的浏览器资料打开登录页；用户登录后自己关掉浏览器窗口，再保存 cookie。"""
     spec = _spec(platform)
     if not _LOCK.acquire(blocking=False):
         return False, '已有一个登录/更新任务在进行，请稍后再试'
     try:
+        # 重新登录：丢掉旧的浏览器资料，从干净的窗口开始，避免旧登录状态干扰
+        remove_profile(platform, account)
+        snapshot: Dict[str, str] = {}
+        snapshot_raw: List[dict] = []
+        seen_urls: List[str] = []
+        timed_out = False
         with _sync_playwright() as p:
             context = _open(p, platform, account, headless=False)
             try:
                 page = context.pages[0] if context.pages else context.new_page()
-                seen_urls: List[str] = []
-                page.on('request', lambda request: seen_urls.append(request.url))
+                context.on('request', lambda request: seen_urls.append(request.url))
                 try:
                     page.goto(spec.login_url, wait_until='domcontentloaded', timeout=30_000)
                 except Exception:
                     pass
                 deadline = time.monotonic() + timeout
-                while time.monotonic() < deadline:
+                # 每秒记一份 cookie：浏览器关掉以后就读不到了，会话级 cookie 也不会落盘
+                while True:
                     try:
-                        cookies, _ = _read_cookies(context, spec)
+                        snapshot, snapshot_raw = _read_cookies(context, spec)
                     except Exception:
-                        return False, '浏览器窗口被关闭，登录已取消'
-                    if _logged_in(cookies, spec):
+                        break                       # 用户关掉了窗口
+                    if not context.pages:
                         break
-                    time.sleep(2)
-                else:
-                    return False, f'{timeout // 60} 分钟内没有检测到登录，已取消'
-                time.sleep(SETTLE_SECONDS)
-                cookies, raw = _read_cookies(context, spec)
-                if platform == 'douyin' and not cookies.get('msToken'):
-                    token = _douyin_ms_token(page, cookies, seen_urls)
-                    if token:
-                        cookies['msToken'] = token
-                output = _save(platform, account, spec, cookies, raw)
-                note = ''
-                if platform == 'douyu' and not cookies.get('LTP0'):
-                    note = '（没拿到长期票据 LTP0，以后只能靠重新登录续期）'
+                    if time.monotonic() >= deadline:
+                        timed_out = True
+                        break
+                    time.sleep(1)
             finally:
                 try:
                     context.close()
                 except Exception:
                     pass
+            # 再用同一份浏览器资料（无窗口）读一次落盘的 cookie，补上最后一秒内写入的
+            try:
+                disk_context = _open(p, platform, account, headless=True)
+                try:
+                    disk, disk_raw = _read_cookies(disk_context, spec)
+                finally:
+                    disk_context.close()
+            except Exception:
+                disk, disk_raw = {}, []
+        cookies = {**snapshot, **disk}
+        raw = {c['name']: c for c in snapshot_raw}
+        raw.update({c['name']: c for c in disk_raw})
+        if not _logged_in(cookies, spec):
+            reason = f'{timeout // 60} 分钟内没有完成' if timed_out else '关闭窗口时还没有登录'
+            return False, f'{spec.name}登录未完成（{reason}），原来的 cookie 文件没有改动'
+        if platform == 'douyin' and not cookies.get('msToken'):
+            from DMR.Login.douyin_login import _extract_ms_token_from_text
+            for url in reversed(seen_urls):
+                token = _extract_ms_token_from_text(url)
+                if token:
+                    cookies['msToken'] = token
+                    break
+        output = _save(platform, account, spec, cookies, list(raw.values()))
+        note = ''
+        if platform == 'douyu' and not cookies.get('LTP0'):
+            note = '（没拿到长期票据 LTP0，以后只能靠重新登录续期）'
         return True, f'{spec.name}登录成功，已保存到 {output}{note}'
     except Exception as e:
         return False, f'{spec.name}登录失败：{e}'
@@ -217,7 +242,7 @@ def _login(platform: str, account: str, timeout: int = LOGIN_TIMEOUT_SECONDS) ->
         _LOCK.release()
 
 
-def _renew(platform: str, account: str, headless: bool = True) -> Tuple[bool, str]:
+def _renew(platform: str, account: str) -> Tuple[bool, str]:
     """后台打开一次网站首页刷新登录状态，再保存 cookie。"""
     spec = _spec(platform)
     if not has_profile(platform, account):
@@ -226,7 +251,7 @@ def _renew(platform: str, account: str, headless: bool = True) -> Tuple[bool, st
         return False, '已有一个登录/更新任务在进行，请稍后再试'
     try:
         with _sync_playwright() as p:
-            context = _open(p, platform, account, headless=headless)
+            context = _open(p, platform, account, headless=False, offscreen=True)
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 seen_urls: List[str] = []
@@ -311,7 +336,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ok, message = _renew(args.platform, args.account)
     else:
         if not args.json:
-            print(f'[INFO] 正在打开浏览器，请在 {LOGIN_TIMEOUT_SECONDS // 60} 分钟内完成登录，成功后会自动保存并关闭窗口。')
+            print(f'[INFO] 正在打开浏览器，请在 {LOGIN_TIMEOUT_SECONDS // 60} 分钟内完成登录，登录后关掉浏览器窗口即可保存。')
         ok, message = _login(args.platform, args.account)
     if args.json:
         print(json.dumps({'ok': ok, 'message': message}))

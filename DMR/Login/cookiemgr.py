@@ -212,7 +212,7 @@ class CookieManager:
         if platform == 'bilibili':
             hint = '已在电脑上打开一个命令行窗口：用方向键选“扫码登录”回车，再用B站手机App扫码（10 分钟内）'
         else:
-            hint = '已在电脑上打开浏览器，请在 5 分钟内扫码登录，成功后窗口会自动关闭'
+            hint = '已在电脑上打开浏览器：请在 10 分钟内登录，登录完成后关掉浏览器窗口，程序就会保存'
         _LOGIN_JOBS[filename] = {'state': 'running', 'message': hint}
 
         def run():
