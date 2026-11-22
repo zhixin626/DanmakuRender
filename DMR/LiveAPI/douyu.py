@@ -1,6 +1,7 @@
 # 获取斗鱼直播间的真实流媒体地址，默认最高画质
 # 使用 https://github.com/wbt5/real-url/issues/185 中两位大佬@wjxgzz @4bbu6j5885o3gpv6ss8找到的的CDN，在此感谢！
 # 2025.11.30 更新，https://github.com/biliup/biliup/blob/master/biliup/plugins/douyu.py
+import base64
 import hashlib
 import json
 import logging
@@ -210,43 +211,60 @@ class douyu(BaseAPI):
             raise e
         return params
     
+    def _fetch_login_key(self, headers: dict) -> dict:
+        rsp = self.sess.get(
+            f"https://{DOUYU_WEB_DOMAIN}/wgapi/livenc/liveweb/websec/getEncryption",
+            params={"did": self._did}, headers=headers, timeout=10,
+        )
+        rsp.raise_for_status()
+        data = rsp.json()
+        if data.get("error") != 0:
+            raise RuntimeError(f"登录态 getEncryption 失败 {data}")
+        key = data["data"]
+        # 密钥只有约 10 分钟有效，过期时间写在 enc_data（base64 的 JSON）里；提前 1 分钟换
+        try:
+            expire_at = int(json.loads(base64.b64decode(key["enc_data"]))["expire_at"])
+        except Exception:
+            expire_at = int(time.time()) + 300
+        return {**key, "expire_at": expire_at - 60}
+
     def _login_play_info(self, room_id: str, req_query: dict[str, Any]) -> dict[str, Any]:
         """登录态取流（参考 biliup）：用登录设备号 + cookie 申请 getEncryption 密钥，
         本地算签名，再带 cookie 请求 getH5PlayV1。游客路径的密钥绑定默认设备号，用它
         签名会被当成游客：token 里 uid=0，链接 expire=300，CDN 5 分钟就断开。"""
-        now = int(time.time())
         headers = {
             "User-Agent": self._login_ua,
             "Referer": f"https://{DOUYU_WEB_DOMAIN}/{room_id}",
             "Origin": f"https://{DOUYU_WEB_DOMAIN}",
         }
-        if not self._login_key or self._login_key.get("expire_at", 0) <= now:
-            rsp = self.sess.get(
-                f"https://{DOUYU_WEB_DOMAIN}/wgapi/livenc/liveweb/websec/getEncryption",
-                params={"did": self._did}, headers=headers, timeout=10,
-            )
-            rsp.raise_for_status()
-            data = rsp.json()
-            if data.get("error") != 0:
-                raise RuntimeError(f"登录态 getEncryption 失败 {data}")
-            self._login_key = {**data["data"], "expire_at": now + 3600}
-        key = self._login_key
-        secret = key["rand_str"]
-        for _ in range(int(key["enc_time"])):
-            secret = hashlib.md5(f"{secret}{key['key']}".encode("utf-8")).hexdigest()
-        salt = "" if key.get("is_special") else f"{room_id}{now}"
-        auth = hashlib.md5(f"{secret}{key['key']}{salt}".encode("utf-8")).hexdigest()
-        query = {**req_query, "enc_data": key["enc_data"], "tt": now, "did": self._did, "auth": auth}
-        rsp = self.sess.post(
-            f"https://{DOUYU_WEB_DOMAIN}/lapi/live/getH5PlayV1/{room_id}",
-            headers=headers, params=query, data=query, timeout=10,
-        )
-        rsp.raise_for_status()
-        play_data = rsp.json()
-        if play_data.get("error") != 0 or not play_data.get("data"):
-            self._login_key = {}
-            raise ValueError(f"登录态获取播放信息错误 {play_data}")
-        return play_data["data"]
+        for attempt in range(2):
+            now = int(time.time())
+            fresh = not self._login_key or self._login_key["expire_at"] <= now
+            if fresh:
+                self._login_key = self._fetch_login_key(headers)
+            key = self._login_key
+            secret = key["rand_str"]
+            for _ in range(int(key["enc_time"])):
+                secret = hashlib.md5(f"{secret}{key['key']}".encode("utf-8")).hexdigest()
+            salt = "" if key.get("is_special") else f"{room_id}{now}"
+            auth = hashlib.md5(f"{secret}{key['key']}{salt}".encode("utf-8")).hexdigest()
+            query = {**req_query, "enc_data": key["enc_data"], "tt": now, "did": self._did, "auth": auth}
+            try:
+                rsp = self.sess.post(
+                    f"https://{DOUYU_WEB_DOMAIN}/lapi/live/getH5PlayV1/{room_id}",
+                    headers=headers, params=query, data=query, timeout=10,
+                )
+                rsp.raise_for_status()
+                play_data = rsp.json()
+                if play_data.get("error") != 0 or not play_data.get("data"):
+                    raise ValueError(f"登录态获取播放信息错误 {play_data}")
+                return play_data["data"]
+            except (requests.RequestException, ValueError):
+                # 缓存的密钥可能已被作废：换一把新密钥再试一次
+                self._login_key = {}
+                if fresh or attempt:
+                    raise
+        raise RuntimeError("unreachable")
 
     def get_web_play_info(
         self,
@@ -424,7 +442,8 @@ class douyu(BaseAPI):
         for _ in range(2): # 允许多重试一次以剔除 scdn
             # self.__js_runable = False
             try:
-                play_info = self.get_web_play_info(self.rid, self.__req_query)
+                # 传副本：游客路径会把签名参数写进去，留在共享参数里会污染下一次请求
+                play_info = self.get_web_play_info(self.rid, dict(self.__req_query))
                 if play_info['rtmp_cdn'].startswith('scdn'):
                     new_cdn = play_info['cdnsWithName'][-1]['cdn']
                     logger.debug(f"{self.plugin_msg}: 回避 scdn 为 {new_cdn}")
