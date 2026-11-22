@@ -4,6 +4,7 @@
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import threading
@@ -58,8 +59,52 @@ class douyu(BaseAPI):
             'sov': '0', # use wasm?
         }
     
+        self._cookie_source = None
+        self._did = DOUYU_DEFAULT_DID
+
     def __del__(self):
         self.sess.close()
+
+    @staticmethod
+    def _parse_cookies(value: str) -> dict:
+        """A browser cookie string, or a file holding one (also accepts a JSON
+        dict or a list of {name, value})."""
+        text = str(value).strip()
+        if os.path.isfile(text):
+            with open(text, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+        if text.startswith("{") or text.startswith("["):
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+            return {str(item["name"]): str(item["value"]) for item in data}
+        cookies = {}
+        for part in text.split(";"):
+            name, sep, val = part.strip().partition("=")
+            if sep and name:
+                cookies[name.strip()] = val.strip()
+        return cookies
+
+    def _use_cookies(self, value) -> None:
+        """Log in with the configured cookies once (again if the value changes)."""
+        if not value or str(value).lower() == "none" or value == self._cookie_source:
+            return
+        self._cookie_source = value
+        try:
+            cookies = self._parse_cookies(value)
+        except Exception as e:
+            logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 读取失败（{e}），按未登录录制。")
+            return
+        if not cookies:
+            logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 为空，按未登录录制。")
+            return
+        self.sess.cookies.update(cookies)
+        # The play API checks the device id against the logged-in session.
+        self._did = cookies.get("dy_did") or DOUYU_DEFAULT_DID
+        if not any(name.startswith("acf_") for name in cookies):
+            logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 里没有 acf_ 开头的登录项，可能没有登录。")
+        else:
+            logger.info(f"{self.plugin_msg}: 已使用斗鱼登录 cookie（{len(cookies)} 项）。")
 
     @staticmethod
     def md5(data):
@@ -107,7 +152,7 @@ class douyu(BaseAPI):
             keyframe_url = None
         return title,uname,face_url,keyframe_url
     
-    def aget_sign(self, rid: Union[str, int]) -> dict[str, Any]:
+    def aget_sign(self, rid: Union[str, int], did: str | None = None) -> dict[str, Any]:
         '''
         :param rid: 房间号
         :return: sign dict
@@ -126,7 +171,7 @@ class douyu(BaseAPI):
             sign_fun, sign_v = ctx.eval(f'{js_enc};ub98484234();') # type: ignore
 
             tt = str(int(time.time()))
-            did = hashlib.md5(tt.encode('utf-8')).hexdigest()
+            did = did or hashlib.md5(tt.encode('utf-8')).hexdigest()
             rb = hashlib.md5(f"{rid}{did}{tt}{sign_v}".encode('utf-8')).hexdigest()
             sign_fun = sign_fun.rstrip(';').replace("CryptoJS.MD5(cb).toString()", f'"{rb}"')
             sign_fun += f'("{rid}","{did}","{tt}");'
@@ -165,7 +210,7 @@ class douyu(BaseAPI):
             }
             req_query.update(auth_param)
         else:
-            s = self.aget_sign(room_id)
+            s = self.aget_sign(room_id, did if did != DOUYU_DEFAULT_DID else None)
             # logger.debug(f"{self.plugin_msg}: JSEngine 签名参数 {s}")
             req_query.update(s)
         api_ver = "V1" if not self.__js_runable else ""
@@ -304,11 +349,12 @@ class douyu(BaseAPI):
         hs_cname_url = f"http://{hs_cname_host}/live/{stream_id}.flv?{query}"
         return (hs_host, hs_cname_url)
 
-    def get_stream_urls(self, stream_cdn=None, **kwargs) -> str:
+    def get_stream_urls(self, stream_cdn=None, douyu_cookies=None, **kwargs) -> str:
+        self._use_cookies(douyu_cookies)
         for _ in range(2): # 允许多重试一次以剔除 scdn
             # self.__js_runable = False
             try:
-                play_info = self.get_web_play_info(self.rid, self.__req_query)
+                play_info = self.get_web_play_info(self.rid, self.__req_query, did=self._did)
                 if play_info['rtmp_cdn'].startswith('scdn'):
                     new_cdn = play_info['cdnsWithName'][-1]['cdn']
                     logger.debug(f"{self.plugin_msg}: 回避 scdn 为 {new_cdn}")
