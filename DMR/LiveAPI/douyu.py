@@ -67,14 +67,17 @@ class douyu(BaseAPI):
 
     @staticmethod
     def _parse_cookies(value: str) -> dict:
-        """A browser cookie string, or a file holding one (also accepts a JSON
-        dict or a list of {name, value})."""
+        """A browser cookie string, or a file holding one; also accepts the
+        .login_info/斗鱼_<账号>.json saved by douyu_login.py, a JSON dict or a
+        list of {name, value}."""
         text = str(value).strip()
         if os.path.isfile(text):
             with open(text, "r", encoding="utf-8") as f:
                 text = f.read().strip()
         if text.startswith("{") or text.startswith("["):
             data = json.loads(text)
+            if isinstance(data, dict) and isinstance(data.get("cookies"), dict):
+                data = data["cookies"]
             if isinstance(data, dict):
                 return {str(k): str(v) for k, v in data.items()}
             return {str(item["name"]): str(item["value"]) for item in data}
@@ -86,10 +89,17 @@ class douyu(BaseAPI):
         return cookies
 
     def _use_cookies(self, value) -> None:
-        """Log in with the configured cookies once (again if the value changes)."""
-        if not value or str(value).lower() == "none" or value == self._cookie_source:
+        """Log in with the configured cookies; reload when the value or the
+        cookie file changes (e.g. after a renew in the WebUI)."""
+        if not value or str(value).lower() == "none":
             return
-        self._cookie_source = value
+        try:
+            stamp = os.path.getmtime(str(value)) if os.path.isfile(str(value)) else None
+        except OSError:
+            stamp = None
+        if (value, stamp) == self._cookie_source:
+            return
+        self._cookie_source = (value, stamp)
         try:
             cookies = self._parse_cookies(value)
         except Exception as e:

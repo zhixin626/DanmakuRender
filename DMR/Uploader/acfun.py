@@ -335,7 +335,7 @@ class acfun:
             acfun_prefix = PLATFORM_PREFIXES['acfun']
             bare_account = account[len(acfun_prefix):] if account.startswith(acfun_prefix) else account
             raise RuntimeError(
-                f'Cookie 无效或已过期，请重新运行 python DMR/Login/acfun_login.py {bare_account}\n'
+                f'Cookie 无效或已过期，请在网页端 Cookie 列表点“更新”或“登录”，或运行 python DMR/Login/acfun_login.py {bare_account}\n'
                 f'  cookie 文件: {cookie_file}'
             )
         self._client._cookie_file = cookie_file
