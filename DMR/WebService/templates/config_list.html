@@ -36,17 +36,6 @@
 
 <div class="card">
     <h2>Cookie</h2>
-    <div style="margin-bottom:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-        <span>新登录：</span>
-        <select id="cookie-login-platform">
-            <option value="acfun">AcFun</option>
-            <option value="douyin">抖音</option>
-            <option value="douyu">斗鱼</option>
-        </select>
-        <input id="cookie-login-account" placeholder="账号名（自己起，用作文件名）" style="width:200px;">
-        <button id="cookie-login-btn">登录</button>
-        <span id="cookie-login-msg" style="color:#888;"></span>
-    </div>
     <div class="table-scroll">
     <table>
         <thead>
@@ -62,6 +51,32 @@
             <tr><td colspan="5" style="color:#999;">加载中...</td></tr>
         </tbody>
     </table>
+    </div>
+    <div style="margin-top:8px;"><button onclick="openLoginDialog()">＋ 新增账号</button></div>
+</div>
+
+<div id="login-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center;" onclick="if(event.target===this)closeLoginDialog()">
+    <div style="background:#1b1b1b;border:1px solid #444;border-radius:8px;width:420px;max-width:94vw;display:flex;flex-direction:column;">
+        <div id="login-title" style="padding:10px 14px;border-bottom:1px solid #333;color:#ddd;">新增账号</div>
+        <div style="padding:14px;display:flex;flex-direction:column;gap:10px;">
+            <label>平台
+                <select id="login-platform" style="margin-left:8px;">
+                    <option value="bilibili">B站</option>
+                    <option value="acfun">AcFun</option>
+                    <option value="douyin">抖音</option>
+                    <option value="douyu">斗鱼</option>
+                </select>
+            </label>
+            <label>名字
+                <input id="login-account" placeholder="自己起，比如 主账号、小号" style="margin-left:8px;width:220px;">
+            </label>
+            <div style="color:#888;font-size:0.85rem;">名字只用来区分账号，会成为文件名：.login_info/<span id="login-file-hint">b站_名字</span>.json</div>
+            <div id="login-msg" style="min-height:1.2em;font-size:0.9rem;white-space:pre-wrap;"></div>
+        </div>
+        <div class="modal-foot" style="padding:8px 14px;border-top:1px solid #333;display:flex;justify-content:space-between;">
+            <button id="login-start-btn" onclick="submitLoginDialog()" style="color:#fff;background:#1a8917;border-color:#1a8917;">开始登录</button>
+            <button onclick="closeLoginDialog()">关闭</button>
+        </div>
     </div>
 </div>
 
@@ -473,11 +488,11 @@
         var opsCell;
         var renewBtn = '<button class="op-renew" data-fn="' + esc(c.filename) + '">更新</button>';
         var loginBtn = '<button class="op-login" data-fn="' + esc(c.filename) + '" data-platform="' +
-            esc(c.platform) + '" data-account="' + esc(c.account) + '">登录</button>';
+            esc(c.platform) + '" data-account="' + esc(c.account) + '">重新登录</button>';
         if (c.platform === 'bilibili') {
-            opsCell = renewBtn;
+            opsCell = '<span style="white-space:nowrap;">' + renewBtn + ' ' + loginBtn + '</span>';
         } else if (c.browser_login) {
-            // 没有浏览器资料（旧方式登录的）只能先登录一次，之后才能一键更新
+            // 旧方式登录的没有浏览器资料，要重新登录一次之后才能一键更新
             opsCell = '<span style="white-space:nowrap;">' + (c.has_profile ? renewBtn + ' ' : '') + loginBtn + '</span>';
         } else {
             opsCell = '—';
@@ -515,15 +530,49 @@
             .catch(function (e) { alert('请求失败: ' + e); });
     }
 
+    var COOKIE_PREFIX = { 'bilibili': 'b站_', 'acfun': 'A站_', 'douyin': '抖音_', 'douyu': '斗鱼_' };
+    var loginRunning = false;
+
     function setLoginMsg(text, color) {
-        var el = document.getElementById('cookie-login-msg');
-        el.textContent = text;
-        el.style.color = color || '#888';
+        var el = document.getElementById('login-msg');
+        el.textContent = text || '';
+        el.style.color = color || '#aaa';
     }
 
-    function startBrowserLogin(platform, account) {
-        if (!account) { alert('请先填写账号名'); return; }
-        setLoginMsg('正在打开浏览器…');
+    function updateLoginFileHint() {
+        var platform = document.getElementById('login-platform').value;
+        var account = document.getElementById('login-account').value.trim() || '名字';
+        document.getElementById('login-file-hint').textContent = COOKIE_PREFIX[platform] + account;
+    }
+
+    // 传了 platform/account 就是某一行的“重新登录”：平台和名字锁定不可改
+    function openLoginDialog(platform, account) {
+        var fixed = !!platform;
+        var sel = document.getElementById('login-platform');
+        var input = document.getElementById('login-account');
+        sel.value = platform || 'bilibili';
+        input.value = account || '';
+        sel.disabled = input.disabled = fixed;
+        document.getElementById('login-title').textContent = fixed ? '重新登录' : '新增账号';
+        document.getElementById('login-start-btn').disabled = loginRunning;
+        if (!loginRunning) setLoginMsg('');
+        updateLoginFileHint();
+        document.getElementById('login-overlay').style.display = 'flex';
+        if (!fixed) input.focus();
+    }
+
+    function closeLoginDialog() {
+        document.getElementById('login-overlay').style.display = 'none';
+    }
+
+    function submitLoginDialog() {
+        if (loginRunning) return;
+        var platform = document.getElementById('login-platform').value;
+        var account = document.getElementById('login-account').value.trim();
+        if (!account) { setLoginMsg('请先起一个名字', '#c00'); return; }
+        loginRunning = true;
+        document.getElementById('login-start-btn').disabled = true;
+        setLoginMsg('正在打开登录窗口…');
         fetch('/api/cookies/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -531,34 +580,41 @@
         })
             .then(function (r) { return r.json(); })
             .then(function (d) {
-                if (!d.ok) { setLoginMsg(d.message || '登录失败', '#c00'); return; }
-                setLoginMsg('已在电脑上打开浏览器，请在 5 分钟内扫码登录，成功后窗口会自动关闭');
+                if (!d.ok) { finishLogin(d.message || '登录失败', false); return; }
                 pollLogin(d.filename);
             })
-            .catch(function (e) { setLoginMsg('请求失败: ' + e, '#c00'); });
+            .catch(function (e) { finishLogin('请求失败: ' + e, false); });
+    }
+
+    function finishLogin(message, ok) {
+        loginRunning = false;
+        document.getElementById('login-start-btn').disabled = false;
+        setLoginMsg(message, ok ? '#1a8917' : '#c00');
+        refreshCookiesList();
     }
 
     function pollLogin(filename) {
         fetch('/api/cookies/login_status/' + encodeURIComponent(filename))
             .then(function (r) { return r.json(); })
             .then(function (d) {
-                if (d.state === 'running') { setTimeout(function () { pollLogin(filename); }, 2000); return; }
-                setLoginMsg(d.message, d.state === 'ok' ? '#1a8917' : '#c00');
-                refreshCookiesList();
+                if (d.state === 'running') {
+                    setLoginMsg(d.message);
+                    setTimeout(function () { pollLogin(filename); }, 2000);
+                    return;
+                }
+                finishLogin(d.message, d.state === 'ok');
             })
             .catch(function () { setTimeout(function () { pollLogin(filename); }, 3000); });
     }
 
-    document.getElementById('cookie-login-btn').addEventListener('click', function () {
-        startBrowserLogin(document.getElementById('cookie-login-platform').value,
-                          document.getElementById('cookie-login-account').value.trim());
-    });
+    document.getElementById('login-platform').addEventListener('change', updateLoginFileHint);
+    document.getElementById('login-account').addEventListener('input', updateLoginFileHint);
 
     document.getElementById('cookies-tbody').addEventListener('click', function (e) {
         var t = e.target;
         if (!t.dataset || !t.dataset.fn) return;
         if (t.classList.contains('op-renew')) renewCookie(t.dataset.fn);
-        if (t.classList.contains('op-login')) startBrowserLogin(t.dataset.platform, t.dataset.account);
+        if (t.classList.contains('op-login')) openLoginDialog(t.dataset.platform, t.dataset.account);
     });
 
     startPolling(refreshCookiesList, 5000);

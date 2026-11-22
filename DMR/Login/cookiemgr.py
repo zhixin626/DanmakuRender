@@ -167,10 +167,33 @@ class CookieManager:
         return ok, ('续期成功' if ok else '续期失败，cookie 可能已彻底失效，需要重新登录')
 
     @staticmethod
+    def _bili_login(account: str) -> Tuple[bool, str]:
+        """B站沿用 biliup-rs 登录（登录信息里带刷新令牌，之后才能一键更新）：
+        在电脑上弹出一个命令行窗口让用户扫码。"""
+        import os
+        import subprocess
+        from DMR.utils.logintools import bili_islogin
+        from DMR.utils.toolsmgr import ToolsList
+        path = LOGIN_INFO_DIR / f"{PLATFORM_PREFIXES['bilibili']}{account}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        command = [ToolsList.get('biliup'), '-u', str(path), 'login']
+        if os.name != 'nt':
+            return False, '只有 Windows 能从网页端弹出登录窗口，请在终端运行：' + ' '.join(command)
+        proc = subprocess.Popen(command, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        try:
+            proc.wait(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return False, '10 分钟内没有完成登录，已取消'
+        if path.exists() and bili_islogin(str(path)):
+            return True, f'B站登录成功，已保存到 {path}'
+        return False, 'B站登录没有完成（窗口被关闭或扫码失败）'
+
+    @staticmethod
     def start_login(platform: str, account: str) -> Tuple[bool, str]:
-        """在后台线程弹出浏览器让用户登录；进度用 login_status 查询。"""
+        """在后台线程打开登录窗口让用户扫码；进度用 login_status 查询。"""
         from DMR.Login import browser_login
-        if platform not in browser_login.SPECS:
+        if platform != 'bilibili' and platform not in browser_login.SPECS:
             return False, f'不支持网页端登录的平台: {platform}'
         account = (account or '').strip()
         if not account or any(ch in account for ch in '\\/:*?"<>|'):
@@ -178,10 +201,17 @@ class CookieManager:
         filename = f'{PLATFORM_PREFIXES[platform]}{account}.json'
         if _LOGIN_JOBS.get(filename, {}).get('state') == 'running':
             return False, '这个账号正在登录中'
-        _LOGIN_JOBS[filename] = {'state': 'running', 'message': '已在电脑上打开浏览器，请扫码登录'}
+        if platform == 'bilibili':
+            hint = '已在电脑上打开一个命令行窗口：用方向键选“扫码登录”回车，再用B站手机App扫码（10 分钟内）'
+        else:
+            hint = '已在电脑上打开浏览器，请在 5 分钟内扫码登录，成功后窗口会自动关闭'
+        _LOGIN_JOBS[filename] = {'state': 'running', 'message': hint}
 
         def run():
-            ok, message = browser_login.login(platform, account)
+            if platform == 'bilibili':
+                ok, message = CookieManager._bili_login(account)
+            else:
+                ok, message = browser_login.login(platform, account)
             _LOGIN_JOBS[filename] = {'state': 'ok' if ok else 'error', 'message': message}
 
         threading.Thread(target=run, daemon=True).start()
