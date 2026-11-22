@@ -114,30 +114,24 @@ class douyu(BaseAPI):
         except Exception as e:
             logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 读取失败（{e}），按未登录录制。")
             return
-        # Only the web login cookies: unrelated browser cookies (and the passport
-        # ticket LTP0, which is only for renewing) can make the play API fall
-        # back to anonymous quality.
+        # 只带网页登录项：夹带其他浏览器 cookie 可能让播放接口退回游客画质；
+        # LTP0 只用于续期（DMR/Login/douyu_auth.py），不用于取流
         login = {
             name: val for name, val in cookies.items()
-            if name.startswith("acf_") or name in ("dy_did", "dy_auth")
+            if name.startswith("acf_") or name == "dy_did"
         }
-        if not login:
-            logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 里没有登录项（acf_ 开头），按未登录录制。")
+        if not login.get("acf_uid"):
+            logger.warning(f"{self.plugin_msg}: 斗鱼 cookie 里没有登录信息（acf_uid），按游客录制。")
             return
         self.sess.cookies.clear()
         self.sess.cookies.update(login)
-        # Sign with the device id the login belongs to, or Douyu treats the
-        # request as a guest.
-        self._did = (
-            login.get("acf_did") or login.get("dy_did") or login.get("acf_devid")
-            or DOUYU_DEFAULT_DID
-        )
-        # The CDN checks the login too: without the cookie on the FLV request
-        # it cuts the stream after about 5 minutes.
+        # 签名要用登录账号对应的设备号，否则会被当成游客
+        self._did = login.get("acf_did") or login.get("dy_did") or DOUYU_DEFAULT_DID
+        # bililive-go 在下载 FLV 时也带登录 cookie
         self.stream_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in login.items())
         self._logged_in = True
         self._login_key = {}
-        logger.info(f"{self.plugin_msg}: 已使用斗鱼登录 cookie（{len(login)} 项，签名、取流、下载都会带上）。")
+        logger.info(f"{self.plugin_msg}: 斗鱼已登录（uid={login['acf_uid']}）")
 
     @staticmethod
     def md5(data):
@@ -185,7 +179,7 @@ class douyu(BaseAPI):
             keyframe_url = None
         return title,uname,face_url,keyframe_url
     
-    def aget_sign(self, rid: Union[str, int], did: str | None = None) -> dict[str, Any]:
+    def aget_sign(self, rid: Union[str, int]) -> dict[str, Any]:
         '''
         :param rid: 房间号
         :return: sign dict
@@ -204,7 +198,7 @@ class douyu(BaseAPI):
             sign_fun, sign_v = ctx.eval(f'{js_enc};ub98484234();') # type: ignore
 
             tt = str(int(time.time()))
-            did = did or hashlib.md5(tt.encode('utf-8')).hexdigest()
+            did = hashlib.md5(tt.encode('utf-8')).hexdigest()
             rb = hashlib.md5(f"{rid}{did}{tt}{sign_v}".encode('utf-8')).hexdigest()
             sign_fun = sign_fun.rstrip(';').replace("CryptoJS.MD5(cb).toString()", f'"{rb}"')
             sign_fun += f'("{rid}","{did}","{tt}");'
@@ -217,9 +211,9 @@ class douyu(BaseAPI):
         return params
     
     def _login_play_info(self, room_id: str, req_query: dict[str, Any]) -> dict[str, Any]:
-        """登录态取流：参考 biliup / bililive-go，用登录设备号 + cookie 申请 getEncryption
-        密钥，本地算签名，再带 cookie 请求 getH5PlayV1。全局游客密钥绑定的是默认设备号，
-        用它签名会被当成游客（token 里 uid=0，链接 5 分钟过期）。"""
+        """登录态取流（参考 biliup）：用登录设备号 + cookie 申请 getEncryption 密钥，
+        本地算签名，再带 cookie 请求 getH5PlayV1。游客路径的密钥绑定默认设备号，用它
+        签名会被当成游客：token 里 uid=0，链接 expire=300，CDN 5 分钟就断开。"""
         now = int(time.time())
         headers = {
             "User-Agent": self._login_ua,
@@ -286,7 +280,7 @@ class douyu(BaseAPI):
             }
             req_query.update(auth_param)
         else:
-            s = self.aget_sign(room_id, did if did != DOUYU_DEFAULT_DID else None)
+            s = self.aget_sign(room_id)
             # logger.debug(f"{self.plugin_msg}: JSEngine 签名参数 {s}")
             req_query.update(s)
         api_ver = "V1" if not self.__js_runable else ""
@@ -430,7 +424,7 @@ class douyu(BaseAPI):
         for _ in range(2): # 允许多重试一次以剔除 scdn
             # self.__js_runable = False
             try:
-                play_info = self.get_web_play_info(self.rid, self.__req_query, did=self._did)
+                play_info = self.get_web_play_info(self.rid, self.__req_query)
                 if play_info['rtmp_cdn'].startswith('scdn'):
                     new_cdn = play_info['cdnsWithName'][-1]['cdn']
                     logger.debug(f"{self.plugin_msg}: 回避 scdn 为 {new_cdn}")

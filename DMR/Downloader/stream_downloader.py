@@ -55,45 +55,27 @@ VIDEO_STOP_TIMEOUT = 15
 
 
 def describe_stream_link(url: str) -> str:
-    """取流地址的主机和有效期参数，用来判断多久后会被 CDN 断开。"""
+    """取流地址的主机、有效期和身份（斗鱼），用来判断会不会被 CDN 定时断开。"""
     try:
         parsed = urlparse(url)
         query = {k.lower(): v[0] for k, v in parse_qs(parsed.query).items() if v}
     except Exception:
-        return '无法解析取流地址'
-    now = time.time()
-    parts = []
-    for key in ('expire', 'expires', 'deadline'):
-        value = query.get(key)
-        if value is None:
-            continue
-        if value.isdigit() and int(value) > 10**9:      # 绝对时间戳
-            parts.append(f'{key}={value}（还剩 {int(int(value) - now)} 秒）')
-        elif value.isdigit() and int(value) > 0:          # 有效时长
-            parts.append(f'{key}={value}（{int(value) // 60}分{int(value) % 60}秒）')
-        else:
-            parts.append(f'{key}={value}')
-    for key in ('txtime', 'wstime'):                     # 腾讯/网宿：十六进制或十进制的过期时间戳
-        value = query.get(key)
-        if not value:
-            continue
-        try:
-            stamp = int(value, 16) if not value.isdigit() else int(value)
-            parts.append(f'{key}={value}（还剩 {int(stamp - now)} 秒）')
-        except ValueError:
-            parts.append(f'{key}={value}')
-    validity = '，'.join(parts) if parts else '链接里没有有效期参数'
-    # 斗鱼的 token 形如 web-h5-<uid>-<房间号>-... 或 h5-douyu-<uid>-<房间号>-...，
-    # uid 为 0 说明播放接口把这次请求当成游客
-    token = query.get('token', '')
-    match = re.search(r'h5-(?:douyu-)?(\d+)-\d+', token)
+        return '无法解析'
+    parts = [parsed.hostname or '?']
+    expire = query.get('expire') or query.get('expires')
+    if expire and expire.isdigit():
+        value = int(expire)
+        if value == 0:
+            parts.append('不过期')
+        elif value > 10**9:                 # 绝对时间戳
+            parts.append(f'{int(value - time.time())} 秒后过期')
+        else:                               # 有效时长
+            parts.append(f'{value // 60}分{value % 60}秒后过期')
+    # 斗鱼 token 形如 web-h5-<uid>-<房间号>-...，uid 为 0 表示被当成游客
+    match = re.search(r'h5-(?:douyu-)?(\d+)-\d+', query.get('token', ''))
     if match:
-        validity += '，身份 ' + ('游客（uid=0）' if match.group(1) == '0' else f'已登录（uid={match.group(1)}）')
-    elif token:
-        validity += f'，token 开头 {token[:24]}'
-    # 参数名（不含值，值里有鉴权信息），方便判断是哪种链接
-    validity += f'，参数 {",".join(query) or "无"}'
-    return f'{parsed.hostname or "?"}{parsed.path.rsplit("/", 1)[0]}，{validity}'
+        parts.append('游客' if match.group(1) == '0' else f'已登录 uid={match.group(1)}')
+    return '，'.join(parts)
 
 
 class StreamUnavailableError(RuntimeError):
@@ -418,7 +400,7 @@ class StreamDownloadTask(): # 被上层class Downloader():的new_task函数中�
 
         self.width,self.height = width, height
         self.logger.info(f'{self.taskname_disp}🎬录制流 {width}x{height}，容器 {self.output_format}，引擎 {this_engine}')
-        self.logger.info(f'{self.taskname_disp}🔗取流地址 {describe_stream_link(stream_url)}')
+        self.logger.info(f'{self.taskname_disp}🔗取流 {describe_stream_link(stream_url)}')
         self.logger.debug(f'{self.taskname}: 取流地址 {stream_url}')
         self.dmw = None
 
