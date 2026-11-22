@@ -54,3 +54,4 @@ perf/outputs/
 !/tests/references/flicker/
 !/tests/references/flicker/*.png
 !/tests/references/flicker/*.json
+*.ttf
