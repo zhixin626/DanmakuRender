@@ -128,6 +128,52 @@ class douyu(BaseAPI):
         self.stream_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in login.items())
         logger.info(f"{self.plugin_msg}: 已使用斗鱼登录 cookie（{len(login)} 项，签名、取流、下载都会带上）。")
 
+    @staticmethod
+    def md5(data):
+        return hashlib.md5(data.encode('utf-8')).hexdigest()
+
+    def get_resp_new(self):
+        resp = self.sess.get(f'https://www.douyu.com/betard/{self.rid}', headers=self.fake_headers, timeout=5).json()
+        return resp
+    
+    def is_available(self) -> bool:
+        return True
+
+    def onair(self) -> bool:
+        resp = self.get_resp_new()
+        videoloop = resp['room']['videoLoop']
+        show_status = resp['room']['show_status']
+        if show_status == 1 and videoloop == 0:
+            return True
+        else:
+            return False
+
+    def get_info(self):
+        """
+        return: title,uname,face_url,keyframe_url
+        """
+        resp = self.get_resp_new()
+        if resp['room']['isVip'] == 1:
+            with DouyuUtils._lock:
+                DouyuUtils.VipRoom.add(self.rid)
+        try:
+            title = resp['room']['room_name']
+        except Exception:
+            title = 'douyu'+self.rid
+        try:
+            uname = resp['room']['nickname']
+        except Exception:
+            uname = 'douyu'+self.rid
+        try:
+            face_url = resp['room']['owner_avatar']
+        except Exception:
+            face_url = None
+        try:
+            keyframe_url = resp['room']['room_pic']
+        except Exception:
+            keyframe_url = None
+        return title,uname,face_url,keyframe_url
+    
     def aget_sign(self, rid: Union[str, int], did: str | None = None) -> dict[str, Any]:
         '''
         :param rid: 房间号
