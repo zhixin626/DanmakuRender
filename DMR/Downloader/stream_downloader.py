@@ -83,9 +83,10 @@ def describe_stream_link(url: str) -> str:
         except ValueError:
             parts.append(f'{key}={value}')
     validity = '，'.join(parts) if parts else '链接里没有有效期参数'
-    # 斗鱼的 token 形如 h5-douyu-<uid>-<房间号>-...，uid 为 0 说明播放接口把这次请求当成游客
+    # 斗鱼的 token 形如 web-h5-<uid>-<房间号>-... 或 h5-douyu-<uid>-<房间号>-...，
+    # uid 为 0 说明播放接口把这次请求当成游客
     token = query.get('token', '')
-    match = re.match(r'h5-douyu-(\d+)-', token)
+    match = re.search(r'h5-(?:douyu-)?(\d+)-\d+', token)
     if match:
         validity += '，身份 ' + ('游客（uid=0）' if match.group(1) == '0' else f'已登录（uid={match.group(1)}）')
     elif token:

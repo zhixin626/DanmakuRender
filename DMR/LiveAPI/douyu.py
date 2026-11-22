@@ -24,6 +24,11 @@ except ImportError:
 DOUYU_DEFAULT_DID = "10000000000000000000000000001501"
 DOUYU_WEB_DOMAIN = "www.douyu.com"
 DOUYU_PLAY_DOMAIN = "playweb.douyucdn.cn"
+# 登录态取流时 getEncryption 和 getH5PlayV1 用同一个 UA（enc_data 会校验 UA）
+DOUYU_LOGIN_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 DOUYU_MOBILE_DOMAIN = "m.douyu.com"
 
 
@@ -61,6 +66,10 @@ class douyu(BaseAPI):
     
         self._cookie_source = None
         self._did = DOUYU_DEFAULT_DID
+        self._logged_in = False
+        # 登录态取流用的加密密钥：要用登录设备号 + cookie 单独申请，不能用全局游客密钥
+        self._login_key: dict = {}
+        self._login_ua = DOUYU_LOGIN_UA
 
     def __del__(self):
         self.sess.close()
@@ -126,6 +135,8 @@ class douyu(BaseAPI):
         # The CDN checks the login too: without the cookie on the FLV request
         # it cuts the stream after about 5 minutes.
         self.stream_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in login.items())
+        self._logged_in = True
+        self._login_key = {}
         logger.info(f"{self.plugin_msg}: 已使用斗鱼登录 cookie（{len(login)} 项，签名、取流、下载都会带上）。")
 
     @staticmethod
@@ -205,6 +216,44 @@ class douyu(BaseAPI):
             raise e
         return params
     
+    def _login_play_info(self, room_id: str, req_query: dict[str, Any]) -> dict[str, Any]:
+        """登录态取流：参考 biliup / bililive-go，用登录设备号 + cookie 申请 getEncryption
+        密钥，本地算签名，再带 cookie 请求 getH5PlayV1。全局游客密钥绑定的是默认设备号，
+        用它签名会被当成游客（token 里 uid=0，链接 5 分钟过期）。"""
+        now = int(time.time())
+        headers = {
+            "User-Agent": self._login_ua,
+            "Referer": f"https://{DOUYU_WEB_DOMAIN}/{room_id}",
+            "Origin": f"https://{DOUYU_WEB_DOMAIN}",
+        }
+        if not self._login_key or self._login_key.get("expire_at", 0) <= now:
+            rsp = self.sess.get(
+                f"https://{DOUYU_WEB_DOMAIN}/wgapi/livenc/liveweb/websec/getEncryption",
+                params={"did": self._did}, headers=headers, timeout=10,
+            )
+            rsp.raise_for_status()
+            data = rsp.json()
+            if data.get("error") != 0:
+                raise RuntimeError(f"登录态 getEncryption 失败 {data}")
+            self._login_key = {**data["data"], "expire_at": now + 3600}
+        key = self._login_key
+        secret = key["rand_str"]
+        for _ in range(int(key["enc_time"])):
+            secret = hashlib.md5(f"{secret}{key['key']}".encode("utf-8")).hexdigest()
+        salt = "" if key.get("is_special") else f"{room_id}{now}"
+        auth = hashlib.md5(f"{secret}{key['key']}{salt}".encode("utf-8")).hexdigest()
+        query = {**req_query, "enc_data": key["enc_data"], "tt": now, "did": self._did, "auth": auth}
+        rsp = self.sess.post(
+            f"https://{DOUYU_WEB_DOMAIN}/lapi/live/getH5PlayV1/{room_id}",
+            headers=headers, params=query, data=query, timeout=10,
+        )
+        rsp.raise_for_status()
+        play_data = rsp.json()
+        if play_data.get("error") != 0 or not play_data.get("data"):
+            self._login_key = {}
+            raise ValueError(f"登录态获取播放信息错误 {play_data}")
+        return play_data["data"]
+
     def get_web_play_info(
         self,
         room_id: Union[str, int],
@@ -221,6 +270,11 @@ class douyu(BaseAPI):
         '''
         if type(room_id) == int:
             room_id = str(room_id)
+        if self._logged_in:
+            try:
+                return self._login_play_info(room_id, dict(req_query))
+            except Exception as e:
+                logger.warning(f"{self.plugin_msg}: 登录态取流失败，改用游客方式：{e}")
         if not self.__js_runable:
             s = DouyuUtils.sign(type="stream", ts=int(time.time()), did=did, rid=room_id)
             logger.debug(f"{self.plugin_msg}: 免 JSEngine 签名参数 {s}")
