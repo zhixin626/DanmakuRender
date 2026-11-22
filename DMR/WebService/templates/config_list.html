@@ -492,11 +492,12 @@
         var renewBtn = '<button class="op-renew" data-fn="' + esc(c.filename) + '">更新</button>';
         var loginBtn = '<button class="op-login" data-fn="' + esc(c.filename) + '" data-platform="' +
             esc(c.platform) + '" data-account="' + esc(c.account) + '">重新登录</button>';
-        if (c.platform === 'bilibili') {
+        // 只有能真正延长有效期的平台才显示“更新”：B站（刷新令牌）、斗鱼（LTP0 换票）。
+        // A站/抖音没有续期接口，到期只能重新登录。
+        if (c.platform === 'bilibili' || c.platform === 'douyu') {
             opsCell = '<span style="white-space:nowrap;">' + renewBtn + ' ' + loginBtn + '</span>';
         } else if (c.browser_login) {
-            // 旧方式登录的没有浏览器资料，要重新登录一次之后才能一键更新
-            opsCell = '<span style="white-space:nowrap;">' + (c.has_profile ? renewBtn + ' ' : '') + loginBtn + '</span>';
+            opsCell = loginBtn;
         } else {
             opsCell = '—';
         }

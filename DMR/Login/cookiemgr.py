@@ -161,6 +161,9 @@ class CookieManager:
             if result is not None:
                 return result
 
+        if platform in ('acfun', 'douyin'):
+            return False, 'A站/抖音没有续期接口，cookie 到期后请点“重新登录”'
+
         if platform != 'bilibili':
             from DMR.Login import browser_login
             if platform not in browser_login.SPECS:
