@@ -21,7 +21,10 @@ browser_login.py
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -32,6 +35,12 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+if __name__ == '__main__' and 'DMR' not in sys.modules:
+    # 单独运行时只用到 DMR.Login：跳过 DMR/__init__.py，不加载整个程序，启动更快
+    import types
+    _package = types.ModuleType('DMR')
+    _package.__path__ = [str(_PROJECT_ROOT / 'DMR')]
+    sys.modules['DMR'] = _package
 
 from DMR.Login.cookiemgr import LOGIN_INFO_DIR, PLATFORM_PREFIXES, save_cookie_file
 
@@ -159,7 +168,7 @@ def _sync_playwright():
     return sync_playwright()
 
 
-def login(platform: str, account: str, timeout: int = LOGIN_TIMEOUT_SECONDS) -> Tuple[bool, str]:
+def _login(platform: str, account: str, timeout: int = LOGIN_TIMEOUT_SECONDS) -> Tuple[bool, str]:
     """弹出浏览器等用户登录，登录成功后自动保存 cookie 并关闭窗口。"""
     spec = _spec(platform)
     if not _LOCK.acquire(blocking=False):
@@ -205,11 +214,11 @@ def login(platform: str, account: str, timeout: int = LOGIN_TIMEOUT_SECONDS) -> 
         _LOCK.release()
 
 
-def renew(platform: str, account: str, headless: bool = True) -> Tuple[bool, str]:
+def _renew(platform: str, account: str, headless: bool = True) -> Tuple[bool, str]:
     """后台打开一次网站首页刷新登录状态，再保存 cookie。"""
     spec = _spec(platform)
     if not has_profile(platform, account):
-        return False, '这个账号还没有保存浏览器资料，请先点“登录”扫码一次'
+        return False, '这个账号还没有保存浏览器资料，请先点“重新登录”扫码一次'
     if not _LOCK.acquire(blocking=False):
         return False, '已有一个登录/更新任务在进行，请稍后再试'
     try:
@@ -226,7 +235,7 @@ def renew(platform: str, account: str, headless: bool = True) -> Tuple[bool, str
                 time.sleep(RENEW_WAIT_SECONDS)
                 cookies, raw = _read_cookies(context, spec)
                 if not _logged_in(cookies, spec):
-                    return False, f'{spec.name}登录已失效，请点“登录”重新扫码'
+                    return False, f'{spec.name}登录已失效，请点“重新登录”扫码'
                 if platform == 'douyin' and not cookies.get('msToken'):
                     token = _douyin_ms_token(page, cookies, seen_urls)
                     if token:
@@ -244,6 +253,46 @@ def renew(platform: str, account: str, headless: bool = True) -> Tuple[bool, str
         _LOCK.release()
 
 
+def _run_child(platform: str, account: str, renew_only: bool, timeout: int) -> Tuple[bool, str]:
+    """Playwright 放到单独的进程里跑：主程序为了弹幕把 asyncio 换成了 Selector 事件循环，
+    它在 Windows 上开不了子进程，Playwright 在主进程里会直接报 NotImplementedError。"""
+    _spec(platform)
+    command = [sys.executable, str(Path(__file__).resolve()), platform, account, '--json']
+    if renew_only:
+        command.append('--renew')
+    if not _LOCK.acquire(blocking=False):
+        return False, '已有一个登录/更新任务在进行，请稍后再试'
+    try:
+        proc = subprocess.run(
+            command, cwd=str(Path.cwd()), capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=timeout,
+            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+        )
+    except subprocess.TimeoutExpired:
+        return False, '登录/更新超时，已取消'
+    finally:
+        _LOCK.release()
+    for line in reversed((proc.stdout or '').splitlines()):
+        if line.startswith('{'):
+            try:
+                result = json.loads(line)
+                return bool(result.get('ok')), str(result.get('message', ''))
+            except ValueError:
+                break
+    detail = (proc.stderr or proc.stdout or '').strip().splitlines()
+    return False, '登录/更新进程异常退出：' + (detail[-1] if detail else f'返回码 {proc.returncode}')
+
+
+def login(platform: str, account: str) -> Tuple[bool, str]:
+    return _run_child(platform, account, False, LOGIN_TIMEOUT_SECONDS + 60)
+
+
+def renew(platform: str, account: str) -> Tuple[bool, str]:
+    if not has_profile(platform, account):
+        return False, '这个账号还没有保存浏览器资料，请先点“重新登录”扫码一次'
+    return _run_child(platform, account, True, 120)
+
+
 def remove_profile(platform: str, account: str) -> None:
     shutil.rmtree(profile_dir(platform, account), ignore_errors=True)
 
@@ -253,13 +302,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument('platform', choices=sorted(SPECS))
     parser.add_argument('account', help='账号名，决定文件名 .login_info/<平台前缀><账号名>.json')
     parser.add_argument('--renew', action='store_true', help='续期已登录的账号（后台运行，不弹窗）')
+    parser.add_argument('--json', action='store_true', help=argparse.SUPPRESS)  # 主程序调用时用
     args = parser.parse_args(argv)
     if args.renew:
-        ok, message = renew(args.platform, args.account)
+        ok, message = _renew(args.platform, args.account)
     else:
-        print(f'[INFO] 正在打开浏览器，请在 {LOGIN_TIMEOUT_SECONDS // 60} 分钟内完成登录，成功后会自动保存并关闭窗口。')
-        ok, message = login(args.platform, args.account)
-    print(('[OK]  ' if ok else '[ERROR] ') + message)
+        if not args.json:
+            print(f'[INFO] 正在打开浏览器，请在 {LOGIN_TIMEOUT_SECONDS // 60} 分钟内完成登录，成功后会自动保存并关闭窗口。')
+        ok, message = _login(args.platform, args.account)
+    if args.json:
+        print(json.dumps({'ok': ok, 'message': message}))
+    else:
+        print(('[OK]  ' if ok else '[ERROR] ') + message)
     return 0 if ok else 1
 
 
