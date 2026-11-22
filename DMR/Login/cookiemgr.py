@@ -14,7 +14,8 @@ PLATFORM_PREFIXES = {
 
 LOGIN_INFO_DIR = Path('.login_info')
 
-EXPIRING_SOON_SECONDS = 7 * 24 * 3600
+# 剩余不到这么久就在网页端标成“即将过期”（斗鱼 cookie 本身只有约 6 天有效期）
+EXPIRING_SOON_SECONDS = 2 * 24 * 3600
 
 
 def save_cookie_file(platform: str, account: str, cookies: Dict[str, str],
