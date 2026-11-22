@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -8,6 +9,7 @@ PLATFORM_PREFIXES = {
     'bilibili': 'b站_',
     'acfun': 'A站_',
     'douyin': '抖音_',
+    'douyu': '斗鱼_',
 }
 
 LOGIN_INFO_DIR = Path('.login_info')
@@ -19,7 +21,7 @@ def save_cookie_file(platform: str, account: str, cookies: Dict[str, str],
                       raw_playwright_cookies: Optional[List[Dict[str, Any]]] = None,
                       expiry_keys: Optional[set] = None) -> Path:
     """
-    给 acfun_login.py / douyin_login.py 用：把过滤后的 cookie 字典存成统一的带壳格式。
+    给 browser_login.py 用：把过滤后的 cookie 字典存成统一的带壳格式。
     expires_at 取 raw_playwright_cookies 里的过期时间戳算出来。
     只看 expiry_keys 里指定的那几个「登录态」字段（不传就退回看 cookies 里的全部字段）——
     像抖音的 bd_ticket_guard_*/__security_mc_* 这类风控签名 cookie 本身就是短命的、
@@ -64,8 +66,12 @@ def load_cookie_dict(path) -> Dict[str, str]:
     return data
 
 
+# 网页端发起的浏览器登录在后台线程里跑（要等用户扫码），这里记录每个账号的进度
+_LOGIN_JOBS: Dict[str, Dict[str, str]] = {}
+
+
 class CookieManager:
-    """扫描 .login_info/，统一展示三个平台 cookie 的过期状态，供网页端使用。"""
+    """扫描 .login_info/，统一展示各平台 cookie 的过期状态，供网页端使用。"""
 
     def __init__(self, login_info_dir: Optional[str] = None):
         self.login_info_dir = Path(login_info_dir) if login_info_dir else LOGIN_INFO_DIR
@@ -128,10 +134,14 @@ class CookieManager:
                 except OSError:
                     updated_at = None
 
+            has_profile = (self.login_info_dir / 'browser' / path.stem).is_dir()
             results.append({
                 'filename': path.name,
                 'platform': platform,
                 'account': account,
+                # A站/抖音/斗鱼：有浏览器资料才能一键更新，否则要先登录
+                'browser_login': platform in ('acfun', 'douyin', 'douyu'),
+                'has_profile': has_profile,
                 'expires_at': expires_at,
                 'updated_at': updated_at,
                 'status': self._status(expires_at),
@@ -144,8 +154,10 @@ class CookieManager:
         path = self.login_info_dir / filename
 
         if platform != 'bilibili':
-            script = 'acfun_login.py' if platform == 'acfun' else 'douyin_login.py'
-            return False, f'{platform} 平台暂不支持网页端自动更新，请手动运行 python DMR/Login/{script} {account}'
+            from DMR.Login import browser_login
+            if platform not in browser_login.SPECS:
+                return False, f'无法识别 {filename} 属于哪个平台'
+            return browser_login.renew(platform, account)
 
         if not path.exists():
             return False, f'找不到 cookie 文件: {path}'
@@ -153,3 +165,28 @@ class CookieManager:
         from DMR.utils.logintools import bili_islogin
         ok = bili_islogin(str(path))
         return ok, ('续期成功' if ok else '续期失败，cookie 可能已彻底失效，需要重新登录')
+
+    @staticmethod
+    def start_login(platform: str, account: str) -> Tuple[bool, str]:
+        """在后台线程弹出浏览器让用户登录；进度用 login_status 查询。"""
+        from DMR.Login import browser_login
+        if platform not in browser_login.SPECS:
+            return False, f'不支持网页端登录的平台: {platform}'
+        account = (account or '').strip()
+        if not account or any(ch in account for ch in '\\/:*?"<>|'):
+            return False, '账号名不能为空，也不能包含 \\ / : * ? " < > |'
+        filename = f'{PLATFORM_PREFIXES[platform]}{account}.json'
+        if _LOGIN_JOBS.get(filename, {}).get('state') == 'running':
+            return False, '这个账号正在登录中'
+        _LOGIN_JOBS[filename] = {'state': 'running', 'message': '已在电脑上打开浏览器，请扫码登录'}
+
+        def run():
+            ok, message = browser_login.login(platform, account)
+            _LOGIN_JOBS[filename] = {'state': 'ok' if ok else 'error', 'message': message}
+
+        threading.Thread(target=run, daemon=True).start()
+        return True, filename
+
+    @staticmethod
+    def login_status(filename: str) -> Dict[str, str]:
+        return _LOGIN_JOBS.get(filename, {'state': 'none', 'message': ''})

@@ -36,6 +36,17 @@
 
 <div class="card">
     <h2>Cookie</h2>
+    <div style="margin-bottom:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+        <span>新登录：</span>
+        <select id="cookie-login-platform">
+            <option value="acfun">AcFun</option>
+            <option value="douyin">抖音</option>
+            <option value="douyu">斗鱼</option>
+        </select>
+        <input id="cookie-login-account" placeholder="账号名（自己起，用作文件名）" style="width:200px;">
+        <button id="cookie-login-btn">登录</button>
+        <span id="cookie-login-msg" style="color:#888;"></span>
+    </div>
     <div class="table-scroll">
     <table>
         <thead>
@@ -438,6 +449,7 @@
         'bilibili': 'B站',
         'acfun':    'AcFun',
         'douyin':   '抖音',
+        'douyu':    '斗鱼',
         'unknown':  '未知',
     };
     var COOKIE_STATUS_META = {
@@ -446,7 +458,6 @@
         'expired':       { text: '已过期',   color: '#c00'    },
         'unknown':       { text: '未知',     color: '#888'    },
     };
-    var LOGIN_SCRIPTS = { 'acfun': 'acfun_login.py', 'douyin': 'douyin_login.py' };
 
     function fmtTime(ts) {
         if (!ts) return '未知';
@@ -460,10 +471,14 @@
         var statusCell = '<span style="white-space:nowrap;color:' + meta.color + ';font-weight:bold;">● ' + meta.text + '</span>';
 
         var opsCell;
+        var renewBtn = '<button class="op-renew" data-fn="' + esc(c.filename) + '">更新</button>';
+        var loginBtn = '<button class="op-login" data-fn="' + esc(c.filename) + '" data-platform="' +
+            esc(c.platform) + '" data-account="' + esc(c.account) + '">登录</button>';
         if (c.platform === 'bilibili') {
-            opsCell = '<button class="op-renew" data-fn="' + esc(c.filename) + '">更新</button>';
-        } else if (LOGIN_SCRIPTS[c.platform]) {
-            opsCell = '<code style="white-space:nowrap;color:#ccc;">python DMR/Login/' + LOGIN_SCRIPTS[c.platform] + ' ' + esc(c.account) + '</code>';
+            opsCell = renewBtn;
+        } else if (c.browser_login) {
+            // 没有浏览器资料（旧方式登录的）只能先登录一次，之后才能一键更新
+            opsCell = '<span style="white-space:nowrap;">' + (c.has_profile ? renewBtn + ' ' : '') + loginBtn + '</span>';
         } else {
             opsCell = '—';
         }
@@ -500,10 +515,50 @@
             .catch(function (e) { alert('请求失败: ' + e); });
     }
 
+    function setLoginMsg(text, color) {
+        var el = document.getElementById('cookie-login-msg');
+        el.textContent = text;
+        el.style.color = color || '#888';
+    }
+
+    function startBrowserLogin(platform, account) {
+        if (!account) { alert('请先填写账号名'); return; }
+        setLoginMsg('正在打开浏览器…');
+        fetch('/api/cookies/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform: platform, account: account }),
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (!d.ok) { setLoginMsg(d.message || '登录失败', '#c00'); return; }
+                setLoginMsg('已在电脑上打开浏览器，请在 5 分钟内扫码登录，成功后窗口会自动关闭');
+                pollLogin(d.filename);
+            })
+            .catch(function (e) { setLoginMsg('请求失败: ' + e, '#c00'); });
+    }
+
+    function pollLogin(filename) {
+        fetch('/api/cookies/login_status/' + encodeURIComponent(filename))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (d.state === 'running') { setTimeout(function () { pollLogin(filename); }, 2000); return; }
+                setLoginMsg(d.message, d.state === 'ok' ? '#1a8917' : '#c00');
+                refreshCookiesList();
+            })
+            .catch(function () { setTimeout(function () { pollLogin(filename); }, 3000); });
+    }
+
+    document.getElementById('cookie-login-btn').addEventListener('click', function () {
+        startBrowserLogin(document.getElementById('cookie-login-platform').value,
+                          document.getElementById('cookie-login-account').value.trim());
+    });
+
     document.getElementById('cookies-tbody').addEventListener('click', function (e) {
         var t = e.target;
         if (!t.dataset || !t.dataset.fn) return;
         if (t.classList.contains('op-renew')) renewCookie(t.dataset.fn);
+        if (t.classList.contains('op-login')) startBrowserLogin(t.dataset.platform, t.dataset.account);
     });
 
     startPolling(refreshCookiesList, 5000);

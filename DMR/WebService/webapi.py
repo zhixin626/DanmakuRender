@@ -482,6 +482,18 @@ class WebApi:
             ok, message = CookieManager().renew(os.path.basename(filename))
             return {'ok': ok, 'message': message}
 
+        @app.route('/api/cookies/login', methods=['POST'])
+        @self.login_required
+        def cookies_login_api():
+            data = request.get_json(silent=True) or {}
+            ok, result = CookieManager.start_login(data.get('platform', ''), data.get('account', ''))
+            return {'ok': ok, 'filename': result} if ok else {'ok': False, 'message': result}
+
+        @app.route('/api/cookies/login_status/<filename>')
+        @self.login_required
+        def cookies_login_status_api(filename):
+            return CookieManager.login_status(os.path.basename(filename))
+
         # ---- 表情包检查：查缺失 -> 前端展示 -> 用户确认后再下载 ----
         EMOJI_PLATFORMS = [
             {'platform': 'bilibili', 'label': 'B站', 'dir': emoji_bilibili.PACK_DIR, 'supported': True},
