@@ -63,7 +63,7 @@ download_args:
   live:
     # 直播间链接
     # 请填写标准格式链接，例如：https://live.bilibili.com/123456
-    url:
+    url: ~
     # 录制输出文件夹，设置为空则使用主播名称作为文件夹
     output_dir: ./直播回放
     # 录制文件名称模板
@@ -106,7 +106,7 @@ download_args:
         stream_type: ~
         # B站观看cookies，用于获取直播流，如果不填写则使用登录B站上传视频的cookies
         # 如果希望不登录录制最低画质，请设置为'None'
-        bili_watch_cookies: .login_info/bili_watch_cookies.json
+        bili_watch_cookies: ~
         # 斗鱼登录 cookie：不登录拿不到最高画质，取流链接 5 分钟就会被断开
         # 推荐：网页端 Cookie 卡片“新增账号”选斗鱼登录，这里填 .login_info/斗鱼_<名字>.json，之后可一键更新
         # 也可以填浏览器复制的整段 cookie 字符串或保存它的文本文件；留空则不登录。建议用小号

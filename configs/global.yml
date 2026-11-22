@@ -54,7 +54,7 @@ download_args:
         stream_cdn: ~
         # 留空按 FLV-AVC > fMP4-AVC > HLS-TS-AVC > HEVC > AV1 自动选择
         stream_type: ~
-        bili_watch_cookies: .login_info/bili_watch_cookies.json
+        bili_watch_cookies: ~
       advanced_args:
         default_resolution: [1920, 1080]
         start_check_interval: 60
