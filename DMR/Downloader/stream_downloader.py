@@ -88,7 +88,11 @@ def describe_stream_link(url: str) -> str:
     match = re.match(r'h5-douyu-(\d+)-', token)
     if match:
         validity += '，身份 ' + ('游客（uid=0）' if match.group(1) == '0' else f'已登录（uid={match.group(1)}）')
-    return f'{parsed.hostname or "?"}，{validity}'
+    elif token:
+        validity += f'，token 开头 {token[:24]}'
+    # 参数名（不含值，值里有鉴权信息），方便判断是哪种链接
+    validity += f'，参数 {",".join(query) or "无"}'
+    return f'{parsed.hostname or "?"}{parsed.path.rsplit("/", 1)[0]}，{validity}'
 
 
 class StreamUnavailableError(RuntimeError):
