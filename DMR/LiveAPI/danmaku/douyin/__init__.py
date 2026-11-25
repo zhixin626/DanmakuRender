@@ -2,6 +2,7 @@
 # 抖音的弹幕录制参考了 https://github.com/biliup/biliup/blob/master/biliup/plugins/Danmaku/douyin.py
 # 2024.6.23 抖音的弹幕录制参考了 https://github.com/SecPhases/DanmakuRender/commit/fd6d85afede5845274ad699bbcdf5db98e68977e
 
+from collections import OrderedDict
 from datetime import datetime
 import base64
 import os
@@ -34,6 +35,50 @@ import aiohttp
 from DMR.utils.bark_notifier  import bark_notify
 
 logger = logging.getLogger(__name__)
+
+
+class _GiftDeltaTracker:
+    """按 (room_id, user_id, gift_id, group_id) 追踪 repeatCount 增量，统一处理 combo=true/false。"""
+
+    def __init__(self, max_groups: int = 5000, ttl_seconds: float = 120.0) -> None:
+        self._history: OrderedDict[tuple, tuple[int, float]] = OrderedDict()
+        self._max_groups = max_groups
+        self._ttl = ttl_seconds
+
+    def compute_delta(
+        self,
+        room_id: str,
+        user_id: str,
+        gift_id: str,
+        group_id: str,
+        current_repeat: int,
+    ) -> int:
+        now = time.monotonic()
+        key = (str(room_id), str(user_id), str(gift_id), str(group_id))
+
+        if key in self._history:
+            last_repeat, _ = self._history.pop(key)
+            delta = (
+                max(0, current_repeat - last_repeat)
+                if current_repeat >= last_repeat
+                else current_repeat
+            )
+        else:
+            delta = current_repeat
+
+        self._history[key] = (current_repeat, now)
+
+        while len(self._history) > self._max_groups:
+            self._history.popitem(last=False)
+
+        while self._history:
+            oldest_key, (_, old_time) = next(iter(self._history.items()))
+            if now - old_time > self._ttl:
+                del self._history[oldest_key]
+            else:
+                break
+
+        return delta
 
 def _decode_protobuf_raw(data: bytes, max_depth: int = 4):
     """
@@ -250,6 +295,8 @@ class Douyin:
         self._unknown_sample_counter = {}
         self._unknown_sample_session_id = None
         self._unknown_sample_dir = None
+        self._room_id = ''
+        self._gift_tracker = _GiftDeltaTracker()
         self._set_identity(dm_cookie_path)
 
     def _set_identity(self, dm_cookie_path: str = None) -> None:
@@ -308,6 +355,7 @@ class Douyin:
                 )
 
             room_info = rooms[0]
+            self._room_id = str(room_info['id_str'])
             self._configure_unknown_sampling(room_id, room_info['id_str'])
             USER_UNIQUE_ID = DouyinDanmakuUtils.get_user_unique_id()
             VERSION_CODE = 180800 # https://lf-cdn-tos.bytescm.com/obj/static/webcast/douyin_live/7697.782665f8.js -> a.ry
@@ -418,12 +466,22 @@ class Douyin:
                 elif method == 'WebcastGiftMessage':               # 礼物
                     proto = GiftMessage(); proto.ParseFromString(msg.payload)
                     j = json_format.MessageToDict(proto, preserving_proto_field_name=True)
-                    if 'combo' in j['gift'] and 'repeatEnd' not in j:   # 连击中间态跳过，只取结束帧
-                        continue
                     user = j.get('user', {})
                     name = user.get('nickName') or user.get('shortId') or '未知用户'
+                    uid = user.get('id') or user.get('shortId') or name
+                    gift_id = j.get('giftId') or j.get('gift', {}).get('id') or ''
+                    group_id = (
+                        j.get('groupId')
+                        or j.get('common', {}).get('createTime')
+                        or msg.msgId
+                    )
+                    cur_repeat = int(j.get('repeatCount', 1))
+                    gift_count = self._gift_tracker.compute_delta(
+                        self._room_id, uid, gift_id, group_id, cur_repeat
+                    )
+                    if gift_count <= 0:
+                        continue
                     gift_price = int(j['gift']['diamondCount'])
-                    gift_count = int(j.get('repeatCount', 1))
                     gift_name = j['gift']['name']
                     gtext = f"送出 {gift_name}({gift_price:g}抖币)x{gift_count}"
                     msgs.append(GiftDanmaku(
