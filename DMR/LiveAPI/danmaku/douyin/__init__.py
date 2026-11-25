@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 class _GiftDeltaTracker:
     """按 (room_id, user_id, gift_id, group_id) 追踪 repeatCount 增量，统一处理 combo=true/false。"""
 
-    def __init__(self, max_groups: int = 5000, ttl_seconds: float = 120.0) -> None:
+    def __init__(self, max_groups: int = 50000, ttl_seconds: float = 3600.0) -> None:
         self._history: OrderedDict[tuple, tuple[int, float]] = OrderedDict()
         self._max_groups = max_groups
         self._ttl = ttl_seconds
@@ -54,19 +54,27 @@ class _GiftDeltaTracker:
         current_repeat: int,
     ) -> int:
         now = time.monotonic()
-        key = (str(room_id), str(user_id), str(gift_id), str(group_id))
+        gid_str = str(group_id)
+        key = (str(room_id), str(user_id), str(gift_id), gid_str)
 
         if key in self._history:
             last_repeat, _ = self._history.pop(key)
-            delta = (
-                max(0, current_repeat - last_repeat)
-                if current_repeat >= last_repeat
-                else current_repeat
-            )
+            if current_repeat > last_repeat:
+                delta = current_repeat - last_repeat
+                new_repeat = current_repeat
+            elif not gid_str and current_repeat < last_repeat:
+                # 无 groupId 降级时，repeatCount 变小视为新一轮送礼
+                delta = current_repeat
+                new_repeat = current_repeat
+            else:
+                # 同 groupId 下 repeatCount 只增不减；乱序/重复帧返回 0 且保持高水位
+                delta = 0
+                new_repeat = last_repeat
         else:
             delta = current_repeat
+            new_repeat = current_repeat
 
-        self._history[key] = (current_repeat, now)
+        self._history[key] = (new_repeat, now)
 
         while len(self._history) > self._max_groups:
             self._history.popitem(last=False)
@@ -470,11 +478,7 @@ class Douyin:
                     name = user.get('nickName') or user.get('shortId') or '未知用户'
                     uid = user.get('id') or user.get('shortId') or name
                     gift_id = j.get('giftId') or j.get('gift', {}).get('id') or ''
-                    group_id = (
-                        j.get('groupId')
-                        or j.get('common', {}).get('createTime')
-                        or msg.msgId
-                    )
+                    group_id = j.get('groupId') or ''
                     cur_repeat = int(j.get('repeatCount', 1))
                     gift_count = self._gift_tracker.compute_delta(
                         self._room_id, uid, gift_id, group_id, cur_repeat
